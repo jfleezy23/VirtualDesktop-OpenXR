@@ -211,7 +211,7 @@ namespace virtualdesktop_openxr {
             m_exeName.c_str(),
             createInfo->applicationInfo.engineName);
 
-        Log("Application request API version %d.%d.%d\n",
+        Log("Application requests API version %d.%d.%d\n",
             XR_VERSION_MAJOR(createInfo->applicationInfo.apiVersion),
             XR_VERSION_MINOR(createInfo->applicationInfo.apiVersion),
             XR_VERSION_PATCH(createInfo->applicationInfo.apiVersion));

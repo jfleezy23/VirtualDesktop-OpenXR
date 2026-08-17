@@ -152,7 +152,9 @@ namespace {
                         ParseConfiguration(appByName);
                     }
                 } catch (std::runtime_error& exc) {
-                    Log("Error parsing configuration file %ws: %s\n", configPath.c_str(), exc.what());
+                    if (inputFile.is_open()) {
+                        Log("Could not parse configuration file %ws: %s\n", configPath.c_str(), exc.what());
+                    }
                     throw;
                 }
                 cJSON_Delete(json);

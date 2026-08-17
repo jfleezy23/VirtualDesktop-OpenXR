@@ -75,6 +75,8 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_VALIDATION_FAILURE;
         }
 
+        OnceLog("Application uses visibility mask\n");
+
         // Ignore ridiculously big masks.
         if (m_overrideVisibilityMaskScale > 10.f) {
             visibilityMask->vertexCountOutput = 0;
