@@ -131,7 +131,7 @@ namespace virtualdesktop_openxr {
 
             // Workaround: OVR cannot wait for a frame without having a device. If no swapchain was created up to this
             // point, we must create one to initialize OVR.
-            if (m_frameWaited == 0) {
+            if (m_frameWaited == 0 && !m_headlessSwapchain) {
                 // Make as small as possible of a memory footprint...
                 ovrTextureSwapChainDesc desc{};
                 desc.Type = ovrTexture_2D;

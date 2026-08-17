@@ -459,8 +459,9 @@ namespace virtualdesktop_openxr {
 
         Swapchain& xrSwapchain = *(Swapchain*)swapchain;
 
-        if (!xrSwapchain.resolvedSlices.empty() && xrSwapchain.appSwapchain.ovrSwapchain &&
-            xrSwapchain.resolvedSlices[0].ovrSwapchain != xrSwapchain.appSwapchain.ovrSwapchain) {
+        if (xrSwapchain.appSwapchain.ovrSwapchain &&
+            (xrSwapchain.resolvedSlices.empty() ||
+             xrSwapchain.resolvedSlices[0].ovrSwapchain != xrSwapchain.appSwapchain.ovrSwapchain)) {
             ovr_DestroyTextureSwapChain(m_ovrSession, xrSwapchain.appSwapchain.ovrSwapchain);
         }
         while (!xrSwapchain.resolvedSlices.empty()) {

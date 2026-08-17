@@ -285,6 +285,7 @@ namespace virtualdesktop_openxr {
         }
         if (m_headlessSwapchain) {
             ovr_DestroyTextureSwapChain(m_ovrSession, m_headlessSwapchain);
+            m_headlessSwapchain = nullptr;
         }
 
         // We do not destroy actionsets and actions, since they are tied to the instance.
