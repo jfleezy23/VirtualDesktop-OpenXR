@@ -1119,7 +1119,7 @@ namespace virtualdesktop_openxr {
             const auto controllerTypes = ovr_GetConnectedControllerTypes(m_ovrSession);
             const bool isLingering =
                 (std::chrono::high_resolution_clock::now() - m_lastControllerSeenTime[side]).count() <
-                m_controllerLingerTimeout;
+                m_controllerLingerTimeout.load(std::memory_order_relaxed);
             const bool isPhysicalControllerConnected =
                 controllerTypes & (side == 0 ? ovrControllerType_LTouch : ovrControllerType_RTouch);
             const bool isEmulatedControllerConnected =

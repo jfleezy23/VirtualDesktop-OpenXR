@@ -22,6 +22,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include "framework/dispatch.gen.h"
 
 #include "accessibility.h"
@@ -752,7 +754,7 @@ namespace virtualdesktop_openxr {
         uint64_t m_submissionFenceValue{0};
         wil::unique_handle m_eventForSubmissionFence;
         UINT m_gpuVendor{0};
-        bool m_syncGpuWorkInEndFrame{false};
+        std::atomic<bool> m_syncGpuWorkInEndFrame{false};
         ComPtr<ID3D11SamplerState> m_linearClampSampler;
         ComPtr<ID3D11SamplerState> m_pointClampSampler;
         ComPtr<ID3D11DepthStencilState> m_noDepthReadState;
@@ -811,21 +813,21 @@ namespace virtualdesktop_openxr {
         bool m_hasEyeTrackerBindings{false};
         bool m_hasViveTrackerBindings{false};
         Haptic m_currentVibration[xr::Side::Count];
-        bool m_shouldUseDepth{false};
-        bool m_useRunningStart{true};
-        bool m_useDeferredFrameWait{false};
-        bool m_jiggleViewRotations{false};
+        std::atomic<bool> m_shouldUseDepth{false};
+        std::atomic<bool> m_useRunningStart{true};
+        std::atomic<bool> m_useDeferredFrameWait{false};
+        std::atomic<bool> m_jiggleViewRotations{false};
         MyHandSimulation m_handSimulation[xr::Side::Count];
         PrecompositorState m_precompositor;
         uint32_t m_shouldRecenter{false};
         XrTime m_recenterTime{0};
         float m_supersamplingFactor{1.f};
         float m_upscalingMultiplier{1.f};
-        float m_sharpenFactor{0.f};
-        float m_overrideWorldScale{1.f};
-        float m_overrideVisibilityMaskScale{1.f};
-        uint32_t m_visibilityMaskDirty{0};
-        int64_t m_controllerLingerTimeout{5'000'000'000};
+        std::atomic<float> m_sharpenFactor{0.f};
+        std::atomic<float> m_overrideWorldScale{1.f};
+        std::atomic<float> m_overrideVisibilityMaskScale{1.f};
+        std::atomic<uint32_t> m_visibilityMaskDirty{0};
+        std::atomic<int64_t> m_controllerLingerTimeout{5'000'000'000};
         std::unique_ptr<AccessibilityHelper> m_accessibilityHelper;
 
         // Swapchains and other graphics stuff.
@@ -833,7 +835,7 @@ namespace virtualdesktop_openxr {
         std::set<XrSwapchain> m_swapchains;
 
         // Mirror window.
-        bool m_useMirrorWindow{false};
+        std::atomic<bool> m_useMirrorWindow{false};
         std::mutex m_mirrorWindowMutex;
         HWND m_mirrorWindowHwnd{nullptr};
         bool m_mirrorWindowReady{false};

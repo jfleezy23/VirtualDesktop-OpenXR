@@ -351,6 +351,8 @@ namespace virtualdesktop_openxr {
         TraceLoggingWrite(g_traceProvider, "xrLocateViews", TLArg(*viewCountOutput, "ViewCountOutput"));
 
         if (viewCapacityInput && views) {
+            const bool jiggleViewRotations = m_jiggleViewRotations.load(std::memory_order_relaxed);
+            const float worldScale = m_overrideWorldScale.load(std::memory_order_relaxed);
             // Get the HMD pose in the base space.
             XrPosef headPose;
             viewState->viewStateFlags =
@@ -376,7 +378,7 @@ namespace virtualdesktop_openxr {
                     views[i].fov = m_cachedEyeFov[i];
 
                     // Debug option to test reprojection.
-                    if (m_jiggleViewRotations) {
+                    if (jiggleViewRotations) {
                         // To investigate cross-frame or within-frame issues.
                         const bool useSameJiggleForEachDisplayTime = false;
                         if (!useSameJiggleForEachDisplayTime ||
@@ -406,11 +408,11 @@ namespace virtualdesktop_openxr {
                                       TLArg(xr::ToString(views[i].fov).c_str(), "Fov"));
                 }
 
-                if (std::abs(m_overrideWorldScale - 1.f) > FLT_EPSILON) {
+                if (std::abs(worldScale - 1.f) > FLT_EPSILON) {
                     // Patch the views with our IPD before returning to the application.
                     // Store the actual IPD as reported by the runtime so we can restore it later in xrEndFrame().
                     m_lastSeenIpd = overrideIpd(
-                        views[xr::StereoView::Left].pose, views[xr::StereoView::Right].pose, m_overrideWorldScale);
+                        views[xr::StereoView::Left].pose, views[xr::StereoView::Right].pose, worldScale);
                 } else {
                     m_lastSeenIpd.reset();
                 }

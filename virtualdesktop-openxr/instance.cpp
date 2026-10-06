@@ -374,6 +374,7 @@ namespace virtualdesktop_openxr {
         }
 
         if ((startsWith(m_exeName, "Contractors_") && endsWith(m_exeName, "-Win64-Shipping.exe"))) {
+            std::unique_lock lock(m_actionsAndSpacesMutex);
             m_controllerGripOffset.position.z = -0.1f;
             m_quirkedControllerPoses = true;
         }
@@ -543,7 +544,19 @@ namespace virtualdesktop_openxr {
             return XR_SUCCESS;
         }
 
-        if (m_visibilityMaskDirty) {
+        const bool canSendVisibilityChange = has_XR_KHR_visibility_mask && m_sessionCreated;
+        if (!canSendVisibilityChange) {
+            m_visibilityMaskDirty.store(0, std::memory_order_release);
+        }
+        auto visibilityMaskChanges = canSendVisibilityChange
+            ? m_visibilityMaskDirty.load(std::memory_order_acquire) : 0;
+        while (visibilityMaskChanges &&
+               !m_visibilityMaskDirty.compare_exchange_weak(visibilityMaskChanges,
+                                                          visibilityMaskChanges - 1,
+                                                          std::memory_order_acq_rel,
+                                                          std::memory_order_acquire)) {
+        }
+        if (visibilityMaskChanges) {
             XrEventDataVisibilityMaskChangedKHR* const buffer =
                 reinterpret_cast<XrEventDataVisibilityMaskChangedKHR*>(eventData);
             buffer->type = XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR;
@@ -551,15 +564,13 @@ namespace virtualdesktop_openxr {
             buffer->session = (XrSession)1;
             buffer->viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
             buffer->viewIndex =
-                m_visibilityMaskDirty == xr::StereoView::Count ? xr::StereoView::Left : xr::StereoView::Right;
+                visibilityMaskChanges == xr::StereoView::Count ? xr::StereoView::Left : xr::StereoView::Right;
 
             TraceLoggingWrite(g_traceProvider,
                               "VisibilityMaskChanged",
                               TLXArg(buffer->session, "Session"),
                               TLArg(xr::ToCString(buffer->viewConfigurationType), "ViewConfigurationType"),
                               TLArg(buffer->viewIndex, "ViewIndex"));
-
-            m_visibilityMaskDirty--;
 
             return XR_SUCCESS;
         }

@@ -162,8 +162,8 @@ namespace virtualdesktop_openxr {
                 lock.lock();
                 TraceLoggingWriteStop(waitToBeginFrame, "OVR_WaitToBeginFrame");
             } else {
-                if (!m_useDeferredFrameWait) {
-                    waitForAsyncSubmissionIdle(m_useRunningStart);
+                if (!m_useDeferredFrameWait.load(std::memory_order_relaxed)) {
+                    waitForAsyncSubmissionIdle(m_useRunningStart.load(std::memory_order_relaxed));
                 }
                 TraceLoggingWrite(g_traceProvider, "AcquiredFrame", TLArg(ovrFrameId, "FrameId"));
             }
@@ -423,7 +423,7 @@ namespace virtualdesktop_openxr {
             m_precompositor.isFirstProjectionLayer = true;
             m_precompositor.resolvedSwapchainImages.clear();
             m_precompositor.pendingSwapchainCommits.clear();
-            m_precompositor.sharpenFactor = m_sharpenFactor;
+            m_precompositor.sharpenFactor = m_sharpenFactor.load(std::memory_order_relaxed);
             {
                 // Both eyes and all layers in this frame use the same live NR configuration.
                 std::unique_lock lock(m_dlssnrSettingsMutex);
@@ -555,7 +555,7 @@ namespace virtualdesktop_openxr {
 
             // Defer initialization of mirror window resources until they are first needed.
             try {
-                if (!m_isHeadless && m_useMirrorWindow && !m_mirrorWindowThread.joinable()) {
+                if (!m_isHeadless && m_useMirrorWindow.load(std::memory_order_relaxed) && !m_mirrorWindowThread.joinable()) {
                     createMirrorWindow();
                 }
                 updateMirrorWindow(m_precompositor.isProj0SRGB);
@@ -629,7 +629,7 @@ namespace virtualdesktop_openxr {
         // We only upscale the bottom projection layer and only the focus view (when applicable).
         const bool canUpscale = std::abs(m_upscalingMultiplier - 1.f) > FLT_EPSILON;
         const bool canSharpen = m_precompositor.sharpenFactor > 0.f;
-        const bool shouldUseDepth = m_shouldUseDepth || m_isConformanceTest;
+        const bool shouldUseDepth = m_shouldUseDepth.load(std::memory_order_relaxed) || m_isConformanceTest;
         const bool needUpscaling = m_precompositor.isFirstProjectionLayer && (canUpscale || canSharpen);
         const bool needUplifting = m_precompositor.isFirstProjectionLayer && m_precompositor.dlssnrSettings.enabled;
 

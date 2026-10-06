@@ -65,3 +65,57 @@ throw before arming the wait, so constructor unwinding cannot free a live callba
 context. `--constructor-only` runs just that case. The historical regression was
 verified against the captured pre-deferred-arm instance object, then against a
 fresh complete runtime build.
+
+Live controller settings and asymmetric visibility queries have another CPU case:
+
+```powershell
+.\tests\vr_input_build.cmd -TestSource vr_input_settings_regression.cpp
+.\bin\vr-input-tests\vr_input_settings_regression.exe 'C:\path\to\OVRNull\'
+```
+
+The real settings refresh is paused at its final controller pose registry read
+while a consumer holds the production actions/spaces mutex. Publishing all pose
+offsets and cache invalidations must wait for that reader to release its lock. The
+test also calls the real visibility-mask API with a nonzero vertex capacity and
+zero index capacity, both with and without an index pointer. Both capacities must
+be treated as zero: only counts are returned, and caller buffers stay untouched.
+Only the external OVR stencil function is replaced with a fixed count fixture.
+OVRNull is explicitly loaded for that CPU API; no OVR session or graphics device is
+created and no registry value is written.
+
+Opaque NR feature ownership is covered by a CPU cleanup regression:
+
+```powershell
+.\tests\vr_input_build.cmd -TestSource vr_input_feature_ownership_regression.cpp -PerFeatureProvider
+.\bin\vr-input-tests\vr_input_feature_ownership_regression.exe
+```
+
+The fixture seeds separate SDK-owned and manually owned opaque handles, switches
+the global NGX dispatch, and calls the real runtime cleanup. SDK and manual release
+spies require each handle to reach its recorded owner exactly once. A positive
+control detours the actual SDK symbol first; repeated cleanup must release neither
+handle again. Building without `-PerFeatureProvider` against the captured pre-fix
+runtime demonstrates the global-provider failure. This CPU test does not exercise
+creation-time owner capture or the GPU evaluation call; those paths require source
+review and integration coverage.
+
+Two more CPU regressions exercise Vulkan rollback and visibility event lifetime:
+
+```powershell
+.\tests\vr_input_build.cmd -TestSource vr_input_vulkan_cleanup_regression.cpp
+.\bin\vr-input-tests\vr_input_vulkan_cleanup_regression.exe
+.\tests\vr_input_build.cmd -TestSource vr_input_visibility_events_regression.cpp
+.\bin\vr-input-tests\vr_input_visibility_events_regression.exe
+```
+
+The Vulkan case invokes actual initialization with local dispatch functions that
+report an invalid LUID before device ownership is published. Its subsequent real
+cleanup must make no device calls. It also covers device-only and pool-only partial
+initialization, independent fence cleanup, full resource cleanup, and idempotent
+repeat cleanup. Local spies replace all Vulkan APIs reached by the fixture, so no
+driver or graphics device is used.
+
+The visibility case calls real event polling before session creation, without the
+extension, and after actual empty CPU-only session destruction. It requires no
+invalid or unsupported visibility events, cleared pending events at destruction,
+and exactly one event per eye for an enabled live session after a quiescent change.

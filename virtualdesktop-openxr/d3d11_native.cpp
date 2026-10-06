@@ -915,7 +915,7 @@ namespace virtualdesktop_openxr {
     }
 
     void OpenXrRuntime::waitOnSubmissionDevice() {
-        if (!m_syncGpuWorkInEndFrame) {
+        if (!m_syncGpuWorkInEndFrame.load(std::memory_order_relaxed)) {
             CHECK_HRCMD(m_ovrSubmissionContext->Wait(m_ovrSubmissionFence.Get(), m_fenceValue));
         } else {
             CHECK_HRCMD(m_ovrSubmissionFence->SetEventOnCompletion(m_fenceValue, m_eventForSubmissionFence.get()));
