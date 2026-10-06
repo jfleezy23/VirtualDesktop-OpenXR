@@ -170,6 +170,7 @@ namespace virtualdesktop_openxr {
         m_frameTimes.clear();
 
         m_isControllerActive[xr::Side::Left] = m_isControllerActive[xr::Side::Right] = false;
+        m_cachedInputState = {};
         m_cachedControllerType[0].clear();
         m_cachedControllerType[1].clear();
         m_controllerAimPose[xr::Side::Left] = m_controllerGripPose[xr::Side::Left] =

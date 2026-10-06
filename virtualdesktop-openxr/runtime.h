@@ -309,6 +309,8 @@ namespace virtualdesktop_openxr {
                                                  XrViveTrackerPathsHTCX* paths) override;
 
       private:
+        friend struct RuntimeInputRegression;
+
         struct Extension {
             const char* extensionName;
             uint32_t extensionVersion;
@@ -448,8 +450,8 @@ namespace virtualdesktop_openxr {
             std::set<XrPath> subactionPaths;
 
             // A copy of the input state. This is to handle when xrSyncActions() does not update all actionsets at once.
-            ovrInputState cachedInputState;
-            uint64_t generation;
+            ovrInputState cachedInputState{};
+            uint64_t generation{0};
         };
 
         struct Action {
@@ -877,7 +879,7 @@ namespace virtualdesktop_openxr {
         uint64_t m_frameCompleted{0};
         uint64_t m_lastCpuFrameTimeUs{0};
         uint64_t m_lastGpuFrameTimeUs{0};
-        ovrInputState m_cachedInputState;
+        ovrInputState m_cachedInputState{};
         std::set<XrActionSet> m_activeActionSets;
         uint32_t m_actionSourcePriority[(size_t)ActionSourceIndex::Count]{};
         BodyTracking::BodyStateV2 m_cachedBodyState{};

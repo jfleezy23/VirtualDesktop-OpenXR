@@ -949,6 +949,7 @@ namespace virtualdesktop_openxr {
 
         const std::string& subActionPath = getXrPath(getInfo->subactionPath);
         const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
+        state->isActive = XR_FALSE;
         for (const auto& source : xrAction.actionSources) {
             if (!startsWith(source.first, subActionPath)) {
                 continue;
@@ -1074,6 +1075,7 @@ namespace virtualdesktop_openxr {
         }
 
         if (m_sessionState != XR_SESSION_STATE_FOCUSED) {
+            m_activeActionSets.clear();
             return XR_SESSION_NOT_FOCUSED;
         }
 
