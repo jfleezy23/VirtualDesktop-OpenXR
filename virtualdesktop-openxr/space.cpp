@@ -56,11 +56,12 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_HANDLE_INVALID;
         }
 
+        *spaceCountOutput = (uint32_t)referenceSpaces.size();
+
         if (spaceCapacityInput && spaceCapacityInput < referenceSpaces.size()) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *spaceCountOutput = (uint32_t)referenceSpaces.size();
         TraceLoggingWrite(g_traceProvider, "xrEnumerateReferenceSpaces", TLArg(*spaceCountOutput, "SpaceCountOutput"));
 
         if (spaceCapacityInput && spaces) {
@@ -348,6 +349,8 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_VALIDATION_FAILURE;
         }
 
+        *viewCountOutput = xr::StereoView::Count;
+
         if (viewCapacityInput && viewCapacityInput < xr::StereoView::Count) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
@@ -358,7 +361,6 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_HANDLE_INVALID;
         }
 
-        *viewCountOutput = xr::StereoView::Count;
         TraceLoggingWrite(g_traceProvider, "xrLocateViews", TLArg(*viewCountOutput, "ViewCountOutput"));
 
         if (viewCapacityInput && views) {

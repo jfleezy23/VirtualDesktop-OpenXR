@@ -114,11 +114,12 @@ namespace virtualdesktop_openxr {
         }
 
         const auto& str = it->second;
-        if (bufferCapacityInput && bufferCapacityInput < str.length()) {
+        *bufferCountOutput = (uint32_t)str.length() + 1;
+
+        if (bufferCapacityInput && bufferCapacityInput < *bufferCountOutput) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *bufferCountOutput = (uint32_t)str.length() + 1;
         TraceLoggingWrite(g_traceProvider, "xrPathToString", TLArg(*bufferCountOutput, "BufferCountOutput"));
 
         if (bufferCapacityInput && buffer) {
@@ -1301,11 +1302,12 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_ACTIONSET_NOT_ATTACHED;
         }
 
+        *sourceCountOutput = (uint32_t)xrAction.actionSources.size();
+
         if (sourceCapacityInput && sourceCapacityInput < xrAction.actionSources.size()) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *sourceCountOutput = (uint32_t)xrAction.actionSources.size();
         TraceLoggingWrite(
             g_traceProvider, "xrEnumerateBoundSourcesForAction", TLArg(*sourceCountOutput, "SourceCountOutput"));
 
@@ -1422,11 +1424,12 @@ namespace virtualdesktop_openxr {
             }
         }
 
-        if (bufferCapacityInput && bufferCapacityInput < localizedName.length()) {
+        *bufferCountOutput = (uint32_t)localizedName.length() + 1;
+
+        if (bufferCapacityInput && bufferCapacityInput < *bufferCountOutput) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *bufferCountOutput = (uint32_t)localizedName.length() + 1;
         TraceLoggingWrite(
             g_traceProvider, "xrGetInputSourceLocalizedName", TLArg(*bufferCountOutput, "BufferCountOutput"));
 

@@ -219,11 +219,12 @@ namespace virtualdesktop_openxr {
                           TLArg(layerName, "LayerName"),
                           TLArg(propertyCapacityInput, "PropertyCapacityInput"));
 
+        *propertyCountOutput = (uint32_t)m_extensionsTable.size();
+
         if (propertyCapacityInput && propertyCapacityInput < m_extensionsTable.size()) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *propertyCountOutput = (uint32_t)m_extensionsTable.size();
         TraceLoggingWrite(g_traceProvider,
                           "xrEnumerateInstanceExtensionProperties",
                           TLArg(*propertyCountOutput, "PropertyCountOutput"));

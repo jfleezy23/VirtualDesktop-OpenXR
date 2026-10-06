@@ -111,6 +111,9 @@ namespace virtualdesktop_openxr {
                           TLArg(buffer.UsedVertexCount, "VerticesCount"),
                           TLArg(buffer.UsedIndexCount, "IndicesCount"));
 
+        visibilityMask->vertexCountOutput = buffer.UsedVertexCount;
+        visibilityMask->indexCountOutput = buffer.UsedIndexCount / indicesStride;
+
         if (visibilityMask->vertexCapacityInput == 0 || visibilityMask->indexCapacityInput == 0) {
             visibilityMask->vertexCountOutput = buffer.UsedVertexCount;
             visibilityMask->indexCountOutput = buffer.UsedIndexCount / indicesStride;

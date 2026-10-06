@@ -155,11 +155,12 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_VALIDATION_FAILURE;
         }
 
+        *viewCountOutput = xr::StereoView::Count;
+
         if (viewCapacityInput && viewCapacityInput < xr::StereoView::Count) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *viewCountOutput = xr::StereoView::Count;
         TraceLoggingWrite(
             g_traceProvider, "xrEnumerateViewConfigurationViews", TLArg(*viewCountOutput, "ViewCountOutput"));
 
@@ -287,11 +288,12 @@ namespace virtualdesktop_openxr {
                                : isOpenGLSession() ? (uint32_t)glFormats.size()
                                                    : (uint32_t)d3dFormats.size();
 
+        *formatCountOutput = count;
+
         if (formatCapacityInput && formatCapacityInput < count) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *formatCountOutput = count;
         TraceLoggingWrite(
             g_traceProvider, "xrEnumerateSwapchainFormats", TLArg(*formatCountOutput, "FormatCountOutput"));
 
@@ -521,11 +523,12 @@ namespace virtualdesktop_openxr {
 
         int count = !xrSwapchain.ovrDesc.StaticImage ? xrSwapchain.ovrSwapchainLength : 1;
 
+        *imageCountOutput = count;
+
         if (imageCapacityInput && imageCapacityInput < (uint32_t)count) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *imageCountOutput = count;
         TraceLoggingWrite(g_traceProvider, "xrEnumerateSwapchainImages", TLArg(*imageCountOutput, "ImageCountOutput"));
 
         if (imageCapacityInput && images) {

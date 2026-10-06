@@ -65,11 +65,12 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_SYSTEM_INVALID;
         }
 
-        if (bufferCapacityInput && bufferCapacityInput < instanceExtensions.size()) {
+        *bufferCountOutput = (uint32_t)instanceExtensions.size() + 1;
+
+        if (bufferCapacityInput && bufferCapacityInput < *bufferCountOutput) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *bufferCountOutput = (uint32_t)instanceExtensions.size() + 1;
         TraceLoggingWrite(
             g_traceProvider, "xrGetVulkanInstanceExtensionsKHR", TLArg(*bufferCountOutput, "BufferCountOutput"));
 
@@ -111,11 +112,12 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_SYSTEM_INVALID;
         }
 
-        if (bufferCapacityInput && bufferCapacityInput < deviceExtensions.size()) {
+        *bufferCountOutput = (uint32_t)deviceExtensions.size() + 1;
+
+        if (bufferCapacityInput && bufferCapacityInput < *bufferCountOutput) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *bufferCountOutput = (uint32_t)deviceExtensions.size() + 1;
         TraceLoggingWrite(
             g_traceProvider, "xrGetVulkanDeviceExtensionsKHR", TLArg(*bufferCountOutput, "BufferCountOutput"));
 
