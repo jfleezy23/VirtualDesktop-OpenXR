@@ -647,6 +647,7 @@ namespace virtualdesktop_openxr {
         // dlssnr.cpp
         void initializeDlssnrResources();
         void cleanupDlssnrResources();
+        void unloadDlssnrModule();
         void ensureDlssnrSwapchainResources(ovrTextureFormat format, const ovrSizei& resolution);
         void ensureSwapchainDlssnrResources(Swapchain& xrSwapchain, uint32_t slice);
         void upliftLayer(const XrSwapchainSubImage** views,
@@ -711,6 +712,9 @@ namespace virtualdesktop_openxr {
         ComPtr<ID3D11DeviceContext4> m_ovrSubmissionContext;
         ComPtr<ID3DDeviceContextState> m_ovrSubmissionContextState;
         ComPtr<ID3D11Fence> m_ovrSubmissionFence;
+        // Submission work has its own timeline; application signals must not satisfy these waits.
+        ComPtr<ID3D11Fence> m_ovrSubmissionCompletionFence;
+        uint64_t m_submissionFenceValue{0};
         wil::unique_handle m_eventForSubmissionFence;
         UINT m_gpuVendor{0};
         bool m_syncGpuWorkInEndFrame{false};
@@ -882,6 +886,7 @@ namespace virtualdesktop_openxr {
         ovrSizei m_dlssnrFeatureResolution{0, 0};
         NVSDK_NGX_Handle* m_dlssnrFeature[xr::StereoView::Count]{nullptr, nullptr};
         ovrSizei m_dlssnrOutputSwapchainResolution{0, 0};
+        ovrTextureFormat m_dlssnrOutputSwapchainFormat{OVR_FORMAT_UNKNOWN};
         ovrTextureSwapChain m_dlssnrOutputSwapchain{nullptr};
         std::vector<ComPtr<ID3D12Resource>> m_dlssnrOutputSwapchainImages;
         NVSDK_NGX_Parameter* m_ngxParameters{nullptr};

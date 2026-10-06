@@ -253,7 +253,8 @@ namespace virtualdesktop_openxr {
             TraceLoggingWrite(
                 g_traceProvider, "FlushContext_Wait", TLArg("D3D12", "Api"), TLArg(m_fenceValue, "FenceValue"));
             m_d3d12CommandQueue->Signal(m_d3d12Fence.Get(), m_fenceValue);
-            *eventHandle.put() = CreateEventEx(nullptr, L"Flush Fence", 0, EVENT_ALL_ACCESS);
+            *eventHandle.put() = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+            CHECK_MSG(eventHandle.get(), "Failed to create flush event");
             CHECK_HRCMD(m_d3d12Fence->SetEventOnCompletion(m_fenceValue, eventHandle.get()));
             WaitForSingleObject(eventHandle.get(), INFINITE);
             ResetEvent(eventHandle.get());

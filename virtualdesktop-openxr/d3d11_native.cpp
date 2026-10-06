@@ -145,7 +145,8 @@ namespace virtualdesktop_openxr {
         CHECK_HRCMD(m_ovrSubmissionFence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, fenceHandle.put()));
         CHECK_HRCMD(
             m_d3d11Device->OpenSharedFence(fenceHandle.get(), IID_PPV_ARGS(m_d3d11Fence.ReleaseAndGetAddressOf())));
-        *m_eventForSubmissionFence.put() = CreateEventEx(nullptr, L"Submission Fence", 0, EVENT_ALL_ACCESS);
+        *m_eventForSubmissionFence.put() = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+        CHECK_MSG(m_eventForSubmissionFence.get(), "Failed to create submission event");
 
         // Frame timers.
         for (uint32_t i = 0; i < k_numGpuTimers; i++) {
@@ -214,6 +215,9 @@ namespace virtualdesktop_openxr {
         CHECK_HRCMD(m_ovrSubmissionDevice->CreateFence(
             0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(m_ovrSubmissionFence.ReleaseAndGetAddressOf())));
         m_fenceValue = 0;
+        CHECK_HRCMD(m_ovrSubmissionDevice->CreateFence(
+            0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(m_ovrSubmissionCompletionFence.ReleaseAndGetAddressOf())));
+        m_submissionFenceValue = 0;
 
         // Create the resources for pre-processing.
         CHECK_HRCMD(m_ovrSubmissionDevice->CreateVertexShader(
@@ -345,7 +349,11 @@ namespace virtualdesktop_openxr {
         m_dlssnrOutputSwapchainImages.clear();
         if (m_dlssnrOutputSwapchain) {
             ovr_DestroyTextureSwapChain(m_ovrSession, m_dlssnrOutputSwapchain);
+            m_dlssnrOutputSwapchain = nullptr;
         }
+        m_dlssnrOutputSwapchainResolution = {0, 0};
+        m_dlssnrOutputSwapchainFormat = OVR_FORMAT_UNKNOWN;
+        m_dlssnrFeatureResolution = {0, 0};
 
         cleanupDlssnrResources();
         m_dlssnrInFence.Reset();
@@ -354,6 +362,8 @@ namespace virtualdesktop_openxr {
         m_dlssnrDevice.Reset();
 
         m_ovrSubmissionFence.Reset();
+        m_ovrSubmissionCompletionFence.Reset();
+        m_submissionFenceValue = 0;
         m_ovrSubmissionContextState.Reset();
         m_ovrSubmissionContext.Reset();
         m_ovrSubmissionDevice.Reset();
@@ -699,7 +709,7 @@ namespace virtualdesktop_openxr {
                         ID3D11SamplerState* nullSampler[] = {nullptr};
                         m_ovrSubmissionContext->PSSetSamplers(0, 1, nullSampler);
                         ID3D11ShaderResourceView* nullSRV[] = {nullptr};
-                        m_ovrSubmissionContext->PSGetShaderResources(0, 1, nullSRV);
+                        m_ovrSubmissionContext->PSSetShaderResources(0, 1, nullSRV);
                     }
                 }
             }
@@ -840,7 +850,8 @@ namespace virtualdesktop_openxr {
             TraceLoggingWrite(
                 g_traceProvider, "FlushContext_Wait", TLArg("D3D11", "Api"), TLArg(m_fenceValue, "FenceValue"));
             CHECK_HRCMD(m_d3d11Context->Signal(m_d3d11Fence.Get(), m_fenceValue));
-            *eventHandle.put() = CreateEventEx(nullptr, L"Flush Fence", 0, EVENT_ALL_ACCESS);
+            *eventHandle.put() = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+            CHECK_MSG(eventHandle.get(), "Failed to create flush event");
             CHECK_HRCMD(m_d3d11Fence->SetEventOnCompletion(m_fenceValue, eventHandle.get()));
             WaitForSingleObject(eventHandle.get(), INFINITE);
             ResetEvent(eventHandle.get());
@@ -849,14 +860,15 @@ namespace virtualdesktop_openxr {
 
     // Flush any pending work in the submission context.
     void OpenXrRuntime::flushSubmissionContext() {
-        if (m_ovrSubmissionContext && m_ovrSubmissionFence) {
+        if (m_ovrSubmissionContext && m_ovrSubmissionCompletionFence) {
             wil::unique_handle eventHandle;
-            m_fenceValue++;
+            m_submissionFenceValue++;
             TraceLoggingWrite(
-                g_traceProvider, "FlushContext_Wait", TLArg("D3D11", "Api"), TLArg(m_fenceValue, "FenceValue"));
-            CHECK_HRCMD(m_ovrSubmissionContext->Signal(m_ovrSubmissionFence.Get(), m_fenceValue));
-            *eventHandle.put() = CreateEventEx(nullptr, L"Flush Fence", 0, EVENT_ALL_ACCESS);
-            CHECK_HRCMD(m_ovrSubmissionFence->SetEventOnCompletion(m_fenceValue, eventHandle.get()));
+                g_traceProvider, "FlushContext_Wait", TLArg("D3D11 Submission", "Api"), TLArg(m_submissionFenceValue, "FenceValue"));
+            CHECK_HRCMD(m_ovrSubmissionContext->Signal(m_ovrSubmissionCompletionFence.Get(), m_submissionFenceValue));
+            *eventHandle.put() = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+            CHECK_MSG(eventHandle.get(), "Failed to create flush event");
+            CHECK_HRCMD(m_ovrSubmissionCompletionFence->SetEventOnCompletion(m_submissionFenceValue, eventHandle.get()));
             WaitForSingleObject(eventHandle.get(), INFINITE);
             ResetEvent(eventHandle.get());
         }

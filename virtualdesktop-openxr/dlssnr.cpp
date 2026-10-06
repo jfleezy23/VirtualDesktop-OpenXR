@@ -72,6 +72,14 @@ namespace ngx {
 
     const bool forceManualLoad = false;
     wil::unique_hmodule dlssnrModule;
+    using InitExt = NVSDK_NGX_Result(NVSDK_CONV*)(unsigned long long,
+                                                const wchar_t*,
+                                                ID3D12Device*,
+                                                NVSDK_NGX_Version,
+                                                const NVSDK_NGX_Parameter*);
+    InitExt Init_Ext{nullptr};
+    decltype(&::NVSDK_NGX_D3D12_Shutdown1) Shutdown1{nullptr};
+    ComPtr<ID3D12Device> initializedDevice;
     auto NVSDK_NGX_D3D12_CreateFeature = &::NVSDK_NGX_D3D12_CreateFeature;
     auto NVSDK_NGX_D3D12_ReleaseFeature = &::NVSDK_NGX_D3D12_ReleaseFeature;
     auto NVSDK_NGX_D3D12_EvaluateFeature = &::NVSDK_NGX_D3D12_EvaluateFeature;
@@ -116,8 +124,6 @@ namespace virtualdesktop_openxr {
         const ovrSizei foveatedResolution = {(int)xr::math::AlignTo<4>((uint32_t)(resolution.w * foveatedScale)),
                                              (int)xr::math::AlignTo<4>((uint32_t)(resolution.h * foveatedScale))};
         // TODO: Plumb in the eye tracking data.
-        const ovrVector2i offset = {(resolution.w - foveatedResolution.w) / 2,
-                                    (resolution.h - foveatedResolution.h) / 2};
 
         struct BOX {
             int32_t left;
@@ -141,19 +147,19 @@ namespace virtualdesktop_openxr {
                                   views[1]->imageRect.offset.x + views[1]->imageRect.extent.width,
                                   views[1]->imageRect.offset.y + views[1]->imageRect.extent.height}};
 
-        const BOX outputBox[2] = {{0, 0, resolution.w, resolution.h},
-                                  {resolution.w, 0, 2 * resolution.w, resolution.h}};
+        const BOX outputBox[2] = {{0, 0, views[0]->imageRect.extent.width, views[0]->imageRect.extent.height},
+                                  {resolution.w, 0, resolution.w + views[1]->imageRect.extent.width,
+                                   views[1]->imageRect.extent.height}};
 
         // Resize resources if needed.
+        const auto format = ((Swapchain*)views[0]->swapchain)->ovrDesc.Format;
         if (!m_dlssnrOutputSwapchain || m_dlssnrOutputSwapchainResolution.w < resolution.w ||
-            m_dlssnrOutputSwapchainResolution.h < resolution.h) {
+            m_dlssnrOutputSwapchainResolution.h < resolution.h || m_dlssnrOutputSwapchainFormat != format) {
             // Finish in-flight work before releasing the resources.
+            flushSubmissionContext();
             m_dlssnrContext->Flush();
 
-            Swapchain& xrSwapchain = *(Swapchain*)views[0]->swapchain;
-            ensureDlssnrSwapchainResources(xrSwapchain.ovrDesc.Format, resolution);
-
-            m_dlssnrOutputSwapchainResolution = resolution;
+            ensureDlssnrSwapchainResources(format, resolution);
         }
         if (m_dlssnrFeatureResolution.w < foveatedResolution.w || m_dlssnrFeatureResolution.h < foveatedResolution.h) {
             // Finish in-flight work before releasing the resources.
@@ -171,17 +177,19 @@ namespace virtualdesktop_openxr {
         }
 
         // Serialize inputs.
-#if 1
-        m_fenceValue++;
-        CHECK_HRCMD(m_ovrSubmissionContext->Signal(m_ovrSubmissionFence.Get(), m_fenceValue));
-        CHECK_HRCMD(m_dlssnrContext->GetCommandQueue()->Wait(m_dlssnrInFence.Get(), m_fenceValue));
-#else
-        flushSubmissionContext();
-#endif
+        m_submissionFenceValue++;
+        CHECK_HRCMD(m_ovrSubmissionContext->Signal(m_ovrSubmissionCompletionFence.Get(), m_submissionFenceValue));
+        CHECK_HRCMD(m_dlssnrContext->GetCommandQueue()->Wait(m_dlssnrInFence.Get(), m_submissionFenceValue));
 
         // Time to apply the effect.
         auto cmdList = m_dlssnrContext->GetCommandList();
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
+            const ovrSizei eyeResolution = {views[eye]->imageRect.extent.width, views[eye]->imageRect.extent.height};
+            const ovrSizei eyeFoveatedResolution = {
+                std::min(eyeResolution.w, (int)xr::math::AlignTo<4>((uint32_t)(eyeResolution.w * foveatedScale))),
+                std::min(eyeResolution.h, (int)xr::math::AlignTo<4>((uint32_t)(eyeResolution.h * foveatedScale)))};
+            const ovrVector2i offset = {(eyeResolution.w - eyeFoveatedResolution.w) / 2,
+                                       (eyeResolution.h - eyeFoveatedResolution.h) / 2};
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthInverted, nearZ > farZ);
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Enabled, true);
 
@@ -201,11 +209,6 @@ namespace virtualdesktop_openxr {
                     // User might be using an unsigned nvngx_dlssnr.dll that gets bounced by the NGX SDK. Try loading it
                     // manually.
                     if (!ngx::dlssnrModule) {
-                        NVSDK_NGX_Result(NVSDK_CONV * Init_Ext)(unsigned long long,
-                                                                const wchar_t*,
-                                                                ID3D12Device*,
-                                                                NVSDK_NGX_Version,
-                                                                const NVSDK_NGX_Parameter*);
                         DetourDllAttach("Kernel32.dll",
                                         "GetModuleFileNameW",
                                         ngx::hooked_GetModuleFileNameW,
@@ -214,7 +217,10 @@ namespace virtualdesktop_openxr {
                         const auto nvngx_dlssnrPath = virtualdesktop_openxr::dllHome / L"nvngx_dlssnr.dll";
                         *ngx::dlssnrModule.put() = LoadLibraryW(nvngx_dlssnrPath.c_str());
                         // clang-format off
-                        Init_Ext = (decltype(Init_Ext))GetProcAddress(ngx::dlssnrModule.get(), "NVSDK_NGX_D3D12_Init_Ext");
+                        CHECK_MSG(ngx::dlssnrModule.get(), "Failed to load DLSS-NR module");
+                        ngx::Init_Ext = (ngx::InitExt)GetProcAddress(ngx::dlssnrModule.get(), "NVSDK_NGX_D3D12_Init_Ext");
+                        ngx::Shutdown1 = (decltype(ngx::Shutdown1))GetProcAddress(
+                            ngx::dlssnrModule.get(), "NVSDK_NGX_D3D12_Shutdown1");
                         ngx::NVSDK_NGX_D3D12_CreateFeature = (decltype(ngx::NVSDK_NGX_D3D12_CreateFeature))GetProcAddress(
                             ngx::dlssnrModule.get(), "NVSDK_NGX_D3D12_CreateFeature");
                         ngx::NVSDK_NGX_D3D12_ReleaseFeature = (decltype(ngx::NVSDK_NGX_D3D12_ReleaseFeature))GetProcAddress(
@@ -222,12 +228,18 @@ namespace virtualdesktop_openxr {
                         ngx::NVSDK_NGX_D3D12_EvaluateFeature = (decltype(ngx::NVSDK_NGX_D3D12_EvaluateFeature))GetProcAddress(
                             ngx::dlssnrModule.get(), "NVSDK_NGX_D3D12_EvaluateFeature");
                         // clang-format on
+                        CHECK_MSG(ngx::Init_Ext && ngx::Shutdown1 && ngx::NVSDK_NGX_D3D12_CreateFeature &&
+                                      ngx::NVSDK_NGX_D3D12_ReleaseFeature && ngx::NVSDK_NGX_D3D12_EvaluateFeature,
+                                  "DLSS-NR module is missing required exports");
+                    }
 
-                        CHECK_NGXCMD(Init_Ext(123456,
+                    if (ngx::initializedDevice.Get() != m_dlssnrDevice.Get()) {
+                        CHECK_NGXCMD(ngx::Init_Ext(123456,
                                               virtualdesktop_openxr::programData.c_str(),
                                               m_dlssnrDevice.Get(),
                                               NVSDK_NGX_Version_API,
                                               nullptr));
+                        ngx::initializedDevice = m_dlssnrDevice;
                     }
 
                     CHECK_NGXCMD(ngx::NVSDK_NGX_D3D12_CreateFeature(cmdList.Commands.Get(),
@@ -252,8 +264,8 @@ namespace virtualdesktop_openxr {
             BOX colorBox{};
             colorBox.left = views[eye]->imageRect.offset.x + offset.x;
             colorBox.top = views[eye]->imageRect.offset.y + offset.y;
-            colorBox.right = colorBox.left + foveatedResolution.w;
-            colorBox.bottom = colorBox.top + foveatedResolution.h;
+            colorBox.right = colorBox.left + eyeFoveatedResolution.w;
+            colorBox.bottom = colorBox.top + eyeFoveatedResolution.h;
             SafeClamp(colorBox, inputBox[eye]);
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Color, inputImage);
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_ColorSubrectBaseX, colorBox.left);
@@ -264,8 +276,8 @@ namespace virtualdesktop_openxr {
             BOX destBox{};
             destBox.left = eye * resolution.w + offset.x; // Double-wide.
             destBox.top = offset.y;
-            destBox.right = destBox.left + foveatedResolution.w;
-            destBox.bottom = destBox.top + foveatedResolution.h;
+            destBox.right = destBox.left + eyeFoveatedResolution.w;
+            destBox.bottom = destBox.top + eyeFoveatedResolution.h;
             SafeClamp(destBox, outputBox[eye]);
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_OutputSubrectBaseX, destBox.left);
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_OutputSubrectBaseY, destBox.top);
@@ -283,6 +295,12 @@ namespace virtualdesktop_openxr {
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_MVecScaleY, motionVectorScaleY);
 #endif
 
+            // The parameter map persists across frames. Clear optional inputs before rebinding them.
+            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Depth, (ID3D12Resource*)nullptr);
+            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseX, 0);
+            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseY, 0);
+            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectWidth, 0);
+            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectHeight, 0);
             if (depth[0] && depth[1]) {
                 Swapchain& xrDepthSwapchain = *(Swapchain*)depth[eye]->swapchain;
                 m_ngxParameters->Set(
@@ -291,12 +309,14 @@ namespace virtualdesktop_openxr {
                         .dlssnrImages[xrDepthSwapchain.resolvedSlices[depth[eye]->imageArrayIndex].lastCommittedIndex]
                         .Get());
                 BOX depthBox{};
-                depthBox.left = depth[eye]->imageRect.offset.x + offset.x;
-                depthBox.top = depth[eye]->imageRect.offset.y + offset.y;
-                depthBox.right = depthBox.left + foveatedResolution.w;
-                depthBox.bottom = depthBox.top + foveatedResolution.h;
-                SafeClamp(depthBox, inputBox[eye]);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Color, inputImage);
+                const auto& rect = depth[eye]->imageRect;
+                // Map the color crop into the depth image's own coordinates, including its offset.
+                depthBox.left = rect.offset.x + (int)((int64_t)offset.x * rect.extent.width / eyeResolution.w);
+                depthBox.top = rect.offset.y + (int)((int64_t)offset.y * rect.extent.height / eyeResolution.h);
+                depthBox.right = rect.offset.x + (int)(((int64_t)(offset.x + eyeFoveatedResolution.w) *
+                                                       rect.extent.width + eyeResolution.w - 1) / eyeResolution.w);
+                depthBox.bottom = rect.offset.y + (int)(((int64_t)(offset.y + eyeFoveatedResolution.h) *
+                                                        rect.extent.height + eyeResolution.h - 1) / eyeResolution.h);
                 m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseX, depthBox.left);
                 m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseY, depthBox.top);
                 m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectWidth, depthBox.right - depthBox.left);
@@ -334,32 +354,32 @@ namespace virtualdesktop_openxr {
                 BOX box{};
                 box.left = views[eye]->imageRect.offset.x;
                 box.top = views[eye]->imageRect.offset.y;
-                box.right = box.left + resolution.w;
+                box.right = box.left + eyeResolution.w;
                 box.bottom = box.top + offset.y;
                 SafeClamp(box, inputBox[eye]);
                 ToD3dBox(d3dBox, box);
                 cmdList.Commands->CopyTextureRegion(&dst, eye * resolution.w, 0, 0, &src, &d3dBox);
-                box.top = views[eye]->imageRect.offset.y + offset.y + foveatedResolution.h;
-                box.bottom = box.top + resolution.h;
+                box.top = views[eye]->imageRect.offset.y + offset.y + eyeFoveatedResolution.h;
+                box.bottom = views[eye]->imageRect.offset.y + eyeResolution.h;
                 SafeClamp(box, inputBox[eye]);
                 ToD3dBox(d3dBox, box);
                 cmdList.Commands->CopyTextureRegion(
-                    &dst, eye * resolution.w, resolution.h - (box.bottom - box.top), 0, &src, &d3dBox);
+                    &dst, eye * resolution.w, eyeResolution.h - (box.bottom - box.top), 0, &src, &d3dBox);
 
                 box.left = views[eye]->imageRect.offset.x;
                 box.top = views[eye]->imageRect.offset.y + offset.y;
                 box.right = box.left + offset.x;
-                box.bottom = box.top + foveatedResolution.h;
+                box.bottom = box.top + eyeFoveatedResolution.h;
                 SafeClamp(box, inputBox[eye]);
                 ToD3dBox(d3dBox, box);
                 cmdList.Commands->CopyTextureRegion(
                     &dst, eye * resolution.w, box.top - views[eye]->imageRect.offset.y, 0, &src, &d3dBox);
-                box.left = views[eye]->imageRect.offset.x + offset.x + foveatedResolution.w;
-                box.right = box.left + resolution.w;
+                box.left = views[eye]->imageRect.offset.x + offset.x + eyeFoveatedResolution.w;
+                box.right = views[eye]->imageRect.offset.x + eyeResolution.w;
                 SafeClamp(box, inputBox[eye]);
                 ToD3dBox(d3dBox, box);
                 cmdList.Commands->CopyTextureRegion(&dst,
-                                                    (eye + 1) * resolution.w - (box.right - box.left),
+                                                    eye * resolution.w + eyeResolution.w - (box.right - box.left),
                                                     box.top - views[eye]->imageRect.offset.y,
                                                     0,
                                                     &src,
@@ -380,7 +400,7 @@ namespace virtualdesktop_openxr {
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
             layer.ColorTexture[eye] = m_dlssnrOutputSwapchain;
             layer.Viewport[eye].Pos = {(int)eye * resolution.w, 0};
-            layer.Viewport[eye].Size = resolution;
+            layer.Viewport[eye].Size = {views[eye]->imageRect.extent.width, views[eye]->imageRect.extent.height};
         }
 
         TraceLoggingWriteStop(local, "DLSSNR");
@@ -391,7 +411,10 @@ namespace virtualdesktop_openxr {
         if (m_dlssnrOutputSwapchain) {
             m_dlssnrOutputSwapchainImages.clear();
             ovr_DestroyTextureSwapChain(m_ovrSession, m_dlssnrOutputSwapchain);
+            m_dlssnrOutputSwapchain = nullptr;
         }
+        m_dlssnrOutputSwapchainResolution = {0, 0};
+        m_dlssnrOutputSwapchainFormat = OVR_FORMAT_UNKNOWN;
 
         ovrTextureSwapChainDesc desc{};
         desc.Type = ovrTexture_2D;
@@ -436,6 +459,8 @@ namespace virtualdesktop_openxr {
 
             m_dlssnrOutputSwapchainImages.push_back(std::move(d3d12Resource));
         }
+        m_dlssnrOutputSwapchainResolution = resolution;
+        m_dlssnrOutputSwapchainFormat = format;
     }
 
     // For input swapchain(s) resources.
@@ -475,6 +500,7 @@ namespace virtualdesktop_openxr {
         CHECK_HRCMD(m_ovrSubmissionDevice->QueryInterface(IID_PPV_ARGS(dxgiDevice.ReleaseAndGetAddressOf())));
 
         ComPtr<IDXGIAdapter> dxgiAdapter;
+        CHECK_HRCMD(dxgiDevice->GetAdapter(dxgiAdapter.ReleaseAndGetAddressOf()));
         CHECK_HRCMD(D3D12CreateDevice(
             dxgiAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(m_dlssnrDevice.ReleaseAndGetAddressOf())));
 
@@ -483,7 +509,7 @@ namespace virtualdesktop_openxr {
         // We'll use a fence to serialize pre-compositor output to DLSS-NR input.
         {
             wil::unique_handle fenceHandle;
-            CHECK_HRCMD(m_ovrSubmissionFence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, fenceHandle.put()));
+            CHECK_HRCMD(m_ovrSubmissionCompletionFence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, fenceHandle.put()));
             CHECK_HRCMD(m_dlssnrDevice->OpenSharedHandle(fenceHandle.get(),
                                                          IID_PPV_ARGS(m_dlssnrInFence.ReleaseAndGetAddressOf())));
         }
@@ -510,21 +536,45 @@ namespace virtualdesktop_openxr {
             123456, virtualdesktop_openxr::programData.c_str(), m_dlssnrDevice.Get(), &commonInfo));
 
         CHECK_NGXCMD(NVSDK_NGX_D3D12_GetCapabilityParameters(&m_ngxParameters));
+        if (ngx::dlssnrModule) {
+            CHECK_NGXCMD(ngx::Init_Ext(123456,
+                                     virtualdesktop_openxr::programData.c_str(),
+                                     m_dlssnrDevice.Get(),
+                                     NVSDK_NGX_Version_API,
+                                     nullptr));
+            ngx::initializedDevice = m_dlssnrDevice;
+        }
     }
 
     void OpenXrRuntime::cleanupDlssnrResources() {
-        if (m_ngxParameters) {
-            NVSDK_NGX_D3D12_DestroyParameters(m_ngxParameters);
-            m_ngxParameters = nullptr;
-        }
-
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
             if (m_dlssnrFeature[eye]) {
                 ngx::NVSDK_NGX_D3D12_ReleaseFeature(m_dlssnrFeature[eye]);
                 m_dlssnrFeature[eye] = nullptr;
             }
         }
-        // Don't shutdown NGX - the host app might be using DLSS!
+        if (m_ngxParameters) {
+            NVSDK_NGX_D3D12_DestroyParameters(m_ngxParameters);
+            m_ngxParameters = nullptr;
+        }
+        // Shut down only our direct NR module. The public NGX SDK may serve the host's DLSS.
+        if (ngx::initializedDevice) {
+            CHECK_NGXCMD(ngx::Shutdown1(ngx::initializedDevice.Get()));
+            ngx::initializedDevice.Reset();
+        }
+    }
+
+    void OpenXrRuntime::unloadDlssnrModule() {
+        // Device cleanup must finish before FreeLibrary, which invokes DLL destructors under the loader lock.
+        CHECK_MSG(!ngx::initializedDevice, "DLSS-NR device must be shut down before module unload");
+        DetourDllDetach("Kernel32.dll", "GetModuleFileNameW", ngx::hooked_GetModuleFileNameW,
+                        ngx::original_GetModuleFileNameW);
+        ngx::NVSDK_NGX_D3D12_CreateFeature = &::NVSDK_NGX_D3D12_CreateFeature;
+        ngx::NVSDK_NGX_D3D12_ReleaseFeature = &::NVSDK_NGX_D3D12_ReleaseFeature;
+        ngx::NVSDK_NGX_D3D12_EvaluateFeature = &::NVSDK_NGX_D3D12_EvaluateFeature;
+        ngx::Init_Ext = nullptr;
+        ngx::Shutdown1 = nullptr;
+        ngx::dlssnrModule.reset();
     }
 
 } // namespace virtualdesktop_openxr

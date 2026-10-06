@@ -100,6 +100,8 @@ namespace virtualdesktop_openxr {
             // deadlocks.
             xrDestroySession((XrSession)1);
         }
+        // Release manual NR state before the OpenXR loader unloads this DLL.
+        unloadDlssnrModule();
 
         if (m_bodyState) {
             UnmapViewOfFile(m_bodyState);

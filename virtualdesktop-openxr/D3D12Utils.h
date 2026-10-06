@@ -107,9 +107,11 @@ namespace D3D12Utils {
         void Flush() {
             if (m_CompletionFenceValue) {
                 winrt::handle handle;
-                *handle.put() = CreateEventExW(nullptr, L"Destruction Fence", 0, EVENT_ALL_ACCESS);
+                // Each wait must own its event; named auto-reset events can wake an unrelated queue.
+                *handle.put() = CreateEventExW(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+                CHECK_MSG(handle.get(), "Failed to create completion event");
                 CHECK_HRCMD(m_CompletionFence->SetEventOnCompletion(m_CompletionFenceValue, handle.get()));
-                WaitForSingleObject(handle.get(), INFINITE);
+                CHECK_MSG(WaitForSingleObject(handle.get(), INFINITE) == WAIT_OBJECT_0, "Completion wait failed");
             }
         }
 
