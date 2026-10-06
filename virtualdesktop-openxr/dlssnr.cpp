@@ -117,10 +117,11 @@ namespace virtualdesktop_openxr {
                                     ovrLayerEyeFov& layer) {
         TraceLocalActivity(local);
         TraceLoggingWriteStart(local, "DLSSNR");
+        const auto& settings = m_precompositor.dlssnrSettings;
 
         const ovrSizei resolution = {std::max(layer.Viewport[0].Size.w, layer.Viewport[1].Size.w),
                                      std::max(layer.Viewport[0].Size.h, layer.Viewport[1].Size.h)};
-        const float foveatedScale = std::clamp(m_dlssnrFoveationSize, 0.1f, 1.f);
+        const float foveatedScale = std::clamp(settings.foveationSize, 0.1f, 1.f);
         const ovrSizei foveatedResolution = {(int)xr::math::AlignTo<4>((uint32_t)(resolution.w * foveatedScale)),
                                              (int)xr::math::AlignTo<4>((uint32_t)(resolution.h * foveatedScale))};
         // TODO: Plumb in the eye tracking data.
@@ -325,11 +326,11 @@ namespace virtualdesktop_openxr {
 
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Reset, false);
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_UseAutoMask, true);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Style, m_dlssnrStyle);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Intensity, m_dlssnrIntensity);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_LocalToneStrength, m_dlssnrLocalToneStrength);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_LocalStructureStrength, m_dlssnrLocalStructureStrength);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_SkinStructureStrength, m_dlssnrSkinStructureStrength);
+            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Style, settings.style);
+            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Intensity, settings.intensity);
+            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_LocalToneStrength, settings.localToneStrength);
+            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_LocalStructureStrength, settings.localStructureStrength);
+            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_SkinStructureStrength, settings.skinStructureStrength);
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_UICorrection, 0);
 
             if (foveatedScale < 1.f) {

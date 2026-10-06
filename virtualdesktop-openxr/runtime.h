@@ -370,7 +370,18 @@ namespace virtualdesktop_openxr {
             ovrTextureSwapChainDesc ovrDesc;
         };
 
+        struct DlssnrSettings {
+            bool enabled{false};
+            int style{0};
+            float intensity{1.f};
+            float localToneStrength{0.2f};
+            float localStructureStrength{0.7f};
+            float skinStructureStrength{0.5f};
+            float foveationSize{0.66f};
+        };
+
         struct PrecompositorState {
+            DlssnrSettings dlssnrSettings;
             // State for the current frame.
             std::set<std::pair<Swapchain*, uint32_t>> resolvedSwapchainImages;
             XrTime displayTime{0};
@@ -890,13 +901,8 @@ namespace virtualdesktop_openxr {
         ovrTextureSwapChain m_dlssnrOutputSwapchain{nullptr};
         std::vector<ComPtr<ID3D12Resource>> m_dlssnrOutputSwapchainImages;
         NVSDK_NGX_Parameter* m_ngxParameters{nullptr};
-        bool m_dlssnrEnabled{false};
-        int m_dlssnrStyle{0};
-        float m_dlssnrIntensity{1.f};
-        float m_dlssnrLocalToneStrength{0.2f};
-        float m_dlssnrLocalStructureStrength{0.7f};
-        float m_dlssnrSkinStructureStrength{0.5f};
-        float m_dlssnrFoveationSize{0.66f};
+        std::mutex m_dlssnrSettingsMutex;
+        DlssnrSettings m_dlssnrSettings;
 
         // Statistics.
         double m_sessionStartTime{0.0};

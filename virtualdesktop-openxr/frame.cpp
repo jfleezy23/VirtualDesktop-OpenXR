@@ -422,6 +422,11 @@ namespace virtualdesktop_openxr {
             m_precompositor.displayTime = frameEndInfo->displayTime;
             m_precompositor.isFirstProjectionLayer = true;
             m_precompositor.resolvedSwapchainImages.clear();
+            {
+                // Both eyes and all layers in this frame use the same live NR configuration.
+                std::unique_lock lock(m_dlssnrSettingsMutex);
+                m_precompositor.dlssnrSettings = m_dlssnrSettings;
+            }
 
             // Construct the list of layers.
             std::vector<ovrLayer_Union> layersAllocator;
@@ -623,7 +628,7 @@ namespace virtualdesktop_openxr {
         const bool canUpscale = std::abs(m_upscalingMultiplier - 1.f) > FLT_EPSILON;
         const bool canSharpen = m_sharpenFactor > 0.f;
         const bool needUpscaling = m_precompositor.isFirstProjectionLayer && (canUpscale || canSharpen);
-        const bool needUplifting = m_precompositor.isFirstProjectionLayer && m_dlssnrEnabled;
+        const bool needUplifting = m_precompositor.isFirstProjectionLayer && m_precompositor.dlssnrSettings.enabled;
 
         const XrSwapchainSubImage* subImages[xr::StereoView::Count] = {};
         const XrSwapchainSubImage* depthSubImages[xr::StereoView::Count] = {};
