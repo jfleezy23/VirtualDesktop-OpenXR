@@ -730,7 +730,7 @@ namespace virtualdesktop_openxr {
                         createInfo.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
                     }
                     if (xrSwapchain.xrDesc.usageFlags & XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT) {
-                        createInfo.usage |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+                        createInfo.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
                     }
                     createInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
                     CHECK_VKCMD(m_vkDispatch.vkCreateImage(
@@ -787,6 +787,10 @@ namespace virtualdesktop_openxr {
                     if (xrSwapchain.xrDesc.usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) {
                         barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
                         barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+                        if (xrSwapchain.xrDesc.format == VK_FORMAT_D24_UNORM_S8_UINT ||
+                            xrSwapchain.xrDesc.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+                            barrier.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+                        }
                     }
                     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;

@@ -654,7 +654,7 @@ namespace virtualdesktop_openxr {
                     0,
                     0,
                     xrSwapchain.appSwapchain.images[lastReleasedIndex].Get(),
-                    slice,
+                    D3D11CalcSubresource(0, slice, xrSwapchain.xrDesc.mipCount),
                     nullptr);
             } else {
                 // Resolve MSAA. For depth buffers, this requires a shader.
@@ -663,7 +663,7 @@ namespace virtualdesktop_openxr {
                         xrSwapchain.resolvedSlices[slice].images[ovrDestIndex].Get(),
                         0,
                         xrSwapchain.appSwapchain.images[lastReleasedIndex].Get(),
-                        slice,
+                        D3D11CalcSubresource(0, slice, xrSwapchain.xrDesc.mipCount),
                         xrSwapchain.dxgiFormatForSubmission);
                 } else {
                     // We are about to do something destructive to the application context. Save the context. It will be
