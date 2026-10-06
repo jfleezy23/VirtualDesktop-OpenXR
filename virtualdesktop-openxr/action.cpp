@@ -601,7 +601,8 @@ namespace virtualdesktop_openxr {
 
         std::optional<bool> combinedState;
         const std::string& subActionPath = getXrPath(getInfo->subactionPath);
-        const int subActionSide = std::max(0, getActionSide(subActionPath));
+        const int subActionSide =
+            getInfo->subactionPath == XR_NULL_PATH ? xr::Side::Count : std::max(0, getActionSide(subActionPath));
         const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
         for (const auto& source : xrAction.actionSources) {
             if (!startsWith(source.first, subActionPath)) {
@@ -713,7 +714,8 @@ namespace virtualdesktop_openxr {
 
         std::optional<float> combinedState;
         const std::string& subActionPath = getXrPath(getInfo->subactionPath);
-        const int subActionSide = std::max(0, getActionSide(subActionPath));
+        const int subActionSide =
+            getInfo->subactionPath == XR_NULL_PATH ? xr::Side::Count : std::max(0, getActionSide(subActionPath));
         const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
         for (const auto& source : xrAction.actionSources) {
             if (!startsWith(source.first, subActionPath)) {
@@ -741,16 +743,11 @@ namespace virtualdesktop_openxr {
             if (isBound && side >= 0) {
                 if (m_isControllerActive[side]) {
                     // Per spec, the combined state is the absolute maximum of all values.
-                    if (value.floatValue) {
-                        combinedState = std::max(combinedState.value_or(-std::numeric_limits<float>::infinity()),
-                                                 value.floatValue[side]);
-                    } else if (value.buttonMap) {
-                        combinedState = std::max(combinedState.value_or(-std::numeric_limits<float>::infinity()),
-                                                 *value.buttonMap & value.buttonType ? 1.f : 0.f);
-                    } else if (value.vector2fValue) {
-                        combinedState = std::max(combinedState.value_or(-std::numeric_limits<float>::infinity()),
-                                                 value.vector2fIndex == 0 ? value.vector2fValue[side].x
-                                                                          : value.vector2fValue[side].y);
+                    const float sourceState = value.floatValue ? value.floatValue[side]
+                        : value.buttonMap ? (*value.buttonMap & value.buttonType ? 1.f : 0.f)
+                        : value.vector2fIndex == 0 ? value.vector2fValue[side].x : value.vector2fValue[side].y;
+                    if (!combinedState || std::abs(sourceState) > std::abs(*combinedState)) {
+                        combinedState = sourceState;
                     }
                 }
             }
@@ -834,7 +831,8 @@ namespace virtualdesktop_openxr {
 
         std::optional<XrVector2f> combinedState;
         const std::string& subActionPath = getXrPath(getInfo->subactionPath);
-        const int subActionSide = std::max(0, getActionSide(subActionPath));
+        const int subActionSide =
+            getInfo->subactionPath == XR_NULL_PATH ? xr::Side::Count : std::max(0, getActionSide(subActionPath));
         const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
         for (const auto& source : xrAction.actionSources) {
             if (!startsWith(source.first, subActionPath)) {

@@ -481,16 +481,17 @@ namespace virtualdesktop_openxr {
             std::string localizedName;
 
             XrActionSet actionSet{XR_NULL_HANDLE};
-            uint64_t lastChangedGeneration[xr::Side::Count]{0, 0};
+            // The aggregate query has its own history, independent of either hand.
+            uint64_t lastChangedGeneration[xr::Side::Count + 1]{};
 
-            float lastFloatValue[xr::Side::Count]{0.f, 0.f};
-            XrTime lastFloatValueChangedTime[xr::Side::Count]{0, 0};
+            float lastFloatValue[xr::Side::Count + 1]{};
+            XrTime lastFloatValueChangedTime[xr::Side::Count + 1]{};
 
-            XrVector2f lastVector2fValue[xr::Side::Count]{{0.f, 0.f}, {0.f, 0.f}};
-            XrTime lastVector2fValueChangedTime[xr::Side::Count]{0, 0};
+            XrVector2f lastVector2fValue[xr::Side::Count + 1]{};
+            XrTime lastVector2fValueChangedTime[xr::Side::Count + 1]{};
 
-            bool lastBoolValue[xr::Side::Count]{false, false};
-            XrTime lastBoolValueChangedTime[xr::Side::Count]{0, 0};
+            bool lastBoolValue[xr::Side::Count + 1]{};
+            XrTime lastBoolValueChangedTime[xr::Side::Count + 1]{};
 
             std::set<XrPath> subactionPaths;
             std::map<std::string, ActionSource> actionSources;
