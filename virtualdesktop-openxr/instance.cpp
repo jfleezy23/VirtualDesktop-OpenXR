@@ -173,13 +173,8 @@ namespace virtualdesktop_openxr {
             delete xrActionSet;
         }
 
-        if (m_sessionCreated) {
-            // TODO: Ideally we do not invoke OpenXR public APIs to avoid confusing event tracing and possible
-            // deadlocks.
-            xrDestroySession((XrSession)1);
-        }
-        // Release manual NR state before the OpenXR loader unloads this DLL.
-        unloadDlssnrModule();
+        // Fallible GPU/session teardown belongs to xrDestroyInstance, before ResetInstance invokes this noexcept
+        // destructor. In particular, a vendor Shutdown1 failure must become an API error, not std::terminate.
 
         if (m_bodyState) {
             UnmapViewOfFile(m_bodyState);
@@ -409,9 +404,22 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_HANDLE_INVALID;
         }
 
-        stopRegistryWatcher();
-
-        // The caller will destroy this class next, which will take care of all the cleanup.
+        try {
+            stopRegistryWatcher();
+            if (m_sessionCreated) {
+                CHECK_XRCMD(xrDestroySession((XrSession)1));
+            } else {
+                // A failed CreateSession can allocate devices and initialize NR before setting m_sessionCreated.
+                cleanupSessionResources();
+            }
+            unloadDlssnrModule();
+        } catch (...) {
+            // The OpenXR loader ignores a downstream DestroyInstance error before unloading the runtime. Retain
+            // unsafe NR/device state and our code so that it cannot unload under a surviving vendor worker/import.
+            retainDlssnrRuntimeOnCleanupFailure();
+            ErrorLog("Instance cleanup failed; retaining the runtime until process exit. Restart the VR application.\n");
+            throw;
+        }
 
         return XR_SUCCESS;
     }

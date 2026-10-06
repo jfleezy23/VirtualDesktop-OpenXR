@@ -54,141 +54,153 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_SYSTEM_INVALID;
         }
 
-        CHECK_MSG(ensureOVRSession(), "Failed to re-create OVR session\n");
-
         // We only support one concurrent session.
         if (m_sessionCreated) {
             return XR_ERROR_LIMIT_REACHED;
         }
+        *session = XR_NULL_HANDLE;
 
-        // Get the graphics device and initialize the necessary resources.
-        bool hasGraphicsBindings = false;
-        const XrBaseInStructure* entry = reinterpret_cast<const XrBaseInStructure*>(createInfo->next);
-        while (entry) {
-            if (has_XR_KHR_D3D11_enable && entry->type == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR) {
-                if (!m_graphicsRequirementQueried) {
-                    return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
+        // A failed rollback must be completed before another attempt can overwrite its resources.
+        const auto rollback = [this]() {
+            try {
+                cleanupSessionResources();
+            } catch (...) {
+                retainDlssnrRuntimeOnCleanupFailure();
+                throw;
+            }
+        };
+        if (m_sessionResourcesRequireCleanup) {
+            rollback();
+        }
+        m_sessionResourcesRequireCleanup = true;
+        const auto initialize = [&]() -> XrResult {
+            CHECK_MSG(ensureOVRSession(), "Failed to re-create OVR session\n");
+
+            // Get the graphics device and initialize the necessary resources.
+            bool hasGraphicsBindings = false;
+            const XrBaseInStructure* entry = reinterpret_cast<const XrBaseInStructure*>(createInfo->next);
+            while (entry) {
+                if (has_XR_KHR_D3D11_enable && entry->type == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR) {
+                    if (!m_graphicsRequirementQueried) {
+                        return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
+                    }
+
+                    const XrGraphicsBindingD3D11KHR* d3dBindings =
+                        reinterpret_cast<const XrGraphicsBindingD3D11KHR*>(entry);
+
+                    const auto result = initializeD3D11(*d3dBindings);
+                    if (XR_FAILED(result)) {
+                        return result;
+                    }
+
+                    hasGraphicsBindings = true;
+                    break;
+                } else if (has_XR_KHR_D3D12_enable && entry->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
+                    if (!m_graphicsRequirementQueried) {
+                        return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
+                    }
+
+                    const XrGraphicsBindingD3D12KHR* d3dBindings =
+                        reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(entry);
+
+                    const auto result = initializeD3D12(*d3dBindings);
+                    if (XR_FAILED(result)) {
+                        return result;
+                    }
+
+                    hasGraphicsBindings = true;
+                    break;
+                } else if ((has_XR_KHR_vulkan_enable || has_XR_KHR_vulkan_enable2) &&
+                           entry->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR) {
+                    if (!m_graphicsRequirementQueried) {
+                        return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
+                    }
+
+                    const XrGraphicsBindingVulkanKHR* vkBindings =
+                        reinterpret_cast<const XrGraphicsBindingVulkanKHR*>(entry);
+
+                    const auto result = initializeVulkan(*vkBindings);
+                    if (XR_FAILED(result)) {
+                        return result;
+                    }
+
+                    hasGraphicsBindings = true;
+                    break;
+                } else if (has_XR_KHR_opengl_enable && entry->type == XR_TYPE_GRAPHICS_BINDING_OPENGL_WIN32_KHR) {
+                    if (!m_graphicsRequirementQueried) {
+                        return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
+                    }
+
+                    const XrGraphicsBindingOpenGLWin32KHR* glBindings =
+                        reinterpret_cast<const XrGraphicsBindingOpenGLWin32KHR*>(entry);
+
+                    const auto result = initializeOpenGL(*glBindings);
+                    if (XR_FAILED(result)) {
+                        return result;
+                    }
+
+                    hasGraphicsBindings = true;
+                    break;
                 }
 
-                const XrGraphicsBindingD3D11KHR* d3dBindings =
-                    reinterpret_cast<const XrGraphicsBindingD3D11KHR*>(entry);
-
-                const auto result = initializeD3D11(*d3dBindings);
-                if (XR_FAILED(result)) {
-                    return result;
-                }
-
-                hasGraphicsBindings = true;
-                break;
-            } else if (has_XR_KHR_D3D12_enable && entry->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
-                if (!m_graphicsRequirementQueried) {
-                    return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
-                }
-
-                const XrGraphicsBindingD3D12KHR* d3dBindings =
-                    reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(entry);
-
-                const auto result = initializeD3D12(*d3dBindings);
-                if (XR_FAILED(result)) {
-                    return result;
-                }
-
-                hasGraphicsBindings = true;
-                break;
-            } else if ((has_XR_KHR_vulkan_enable || has_XR_KHR_vulkan_enable2) &&
-                       entry->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR) {
-                if (!m_graphicsRequirementQueried) {
-                    return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
-                }
-
-                const XrGraphicsBindingVulkanKHR* vkBindings =
-                    reinterpret_cast<const XrGraphicsBindingVulkanKHR*>(entry);
-
-                const auto result = initializeVulkan(*vkBindings);
-                if (XR_FAILED(result)) {
-                    return result;
-                }
-
-                hasGraphicsBindings = true;
-                break;
-            } else if (has_XR_KHR_opengl_enable && entry->type == XR_TYPE_GRAPHICS_BINDING_OPENGL_WIN32_KHR) {
-                if (!m_graphicsRequirementQueried) {
-                    return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
-                }
-
-                const XrGraphicsBindingOpenGLWin32KHR* glBindings =
-                    reinterpret_cast<const XrGraphicsBindingOpenGLWin32KHR*>(entry);
-
-                const auto result = initializeOpenGL(*glBindings);
-                if (XR_FAILED(result)) {
-                    return result;
-                }
-
-                hasGraphicsBindings = true;
-                break;
+                entry = entry->next;
             }
 
-            entry = entry->next;
-        }
-
-        m_isHeadless = !hasGraphicsBindings;
-        if (m_isHeadless && !has_XR_MND_headless) {
-            return XR_ERROR_GRAPHICS_DEVICE_INVALID;
-        }
-
-        if (!m_isHeadless) {
-            // This should never happen if the app is properly polling xrGetSystem(). But there is still a tiny race
-            // condition window even if it does.
-            if (!ensureOVRSession()) {
-                return XR_ERROR_INITIALIZATION_FAILED;
+            m_isHeadless = !hasGraphicsBindings;
+            if (m_isHeadless && !has_XR_MND_headless) {
+                return XR_ERROR_GRAPHICS_DEVICE_INVALID;
             }
 
-            if (has_XR_MND_headless) {
-                // If we pre-emptively enabled invisible mode, re-initialize OVR for visible session.
-                enterVisibleMode();
+            if (!m_isHeadless) {
+                // This should never happen if the app is properly polling xrGetSystem(). But there is still a tiny race
+                // condition window even if it does.
+                if (!ensureOVRSession()) {
+                    return XR_ERROR_INITIALIZATION_FAILED;
+                }
+
+                if (has_XR_MND_headless) {
+                    // If we pre-emptively enabled invisible mode, re-initialize OVR for visible session.
+                    enterVisibleMode();
+                }
+
+                initializePrecompositorResources();
+                initializeDlssnrResources();
+            } else {
+                // We initialize a submission device since OVR needs one to create a swapchain before being able to wait
+                // frames.
+                initializeSubmissionDevice("Headless");
             }
 
-            initializePrecompositorResources();
-            initializeDlssnrResources();
-        } else {
-            // We initialize a submission device since OVR needs one to create a swapchain before being able to wait
-            // frames.
-            initializeSubmissionDevice("Headless");
-        }
+            // Read configuration and set up the session accordingly.
+            refreshSettings();
 
-        // Read configuration and set up the session accordingly.
-        refreshSettings();
+            // FIXME: Reset the session and frame state here.
+            m_frameWaited = m_frameBegun = m_frameCompleted = 0;
 
-        m_sessionCreated = true;
+            m_frameTimes.clear();
 
-        // FIXME: Reset the session and frame state here.
-        m_frameWaited = m_frameBegun = m_frameCompleted = 0;
+            {
+                std::unique_lock lock(m_actionsAndSpacesMutex);
+                m_isControllerActive[xr::Side::Left] = m_isControllerActive[xr::Side::Right] = false;
+                m_cachedInputState = {};
+                m_cachedControllerType[0].clear();
+                m_cachedControllerType[1].clear();
+                m_controllerAimPose[xr::Side::Left] = m_controllerGripPose[xr::Side::Left] =
+                    m_controllerPalmPose[xr::Side::Left] = m_controllerHandPose[xr::Side::Left] =
+                        m_controllerAimPose[xr::Side::Right] = m_controllerGripPose[xr::Side::Right] =
+                            m_controllerPalmPose[xr::Side::Right] = m_controllerHandPose[xr::Side::Right] = Pose::Identity();
+                m_currentInteractionProfile[xr::Side::Left] = m_currentInteractionProfile[xr::Side::Right] = XR_NULL_PATH;
+                rebindControllerActions(xr::Side::Left);
+                rebindControllerActions(xr::Side::Right);
+                m_attachedActionSets.clear();
+                m_activeActionSets.clear();
+            }
 
-        m_sessionState = XR_SESSION_STATE_IDLE;
-        updateSessionState(true);
+            m_sessionStartTime = ovr_GetTimeInSeconds();
+            m_sessionTotalFrameCount = 0;
 
-        m_frameTimes.clear();
+            m_lastControllerSeenTime[xr::Side::Left] = m_lastControllerSeenTime[xr::Side::Right] = {};
 
-        m_isControllerActive[xr::Side::Left] = m_isControllerActive[xr::Side::Right] = false;
-        m_cachedInputState = {};
-        m_cachedControllerType[0].clear();
-        m_cachedControllerType[1].clear();
-        m_controllerAimPose[xr::Side::Left] = m_controllerGripPose[xr::Side::Left] =
-            m_controllerPalmPose[xr::Side::Left] = m_controllerHandPose[xr::Side::Left] =
-                m_controllerAimPose[xr::Side::Right] = m_controllerGripPose[xr::Side::Right] =
-                    m_controllerPalmPose[xr::Side::Right] = m_controllerHandPose[xr::Side::Right] = Pose::Identity();
-        m_currentInteractionProfile[xr::Side::Left] = m_currentInteractionProfile[xr::Side::Right] = XR_NULL_PATH;
-        rebindControllerActions(xr::Side::Left);
-        rebindControllerActions(xr::Side::Right);
-        m_attachedActionSets.clear();
-        m_activeActionSets.clear();
-
-        m_sessionStartTime = ovr_GetTimeInSeconds();
-        m_sessionTotalFrameCount = 0;
-
-        m_lastControllerSeenTime[xr::Side::Left] = m_lastControllerSeenTime[xr::Side::Right] = {};
-
-        try {
             // Create a reference space with the origin and the HMD pose.
             m_originSpace = new Space;
             m_originSpace->referenceType = ovr_GetTrackingOriginType(m_ovrSession) == ovrTrackingOrigin_FloorLevel
@@ -198,16 +210,27 @@ namespace virtualdesktop_openxr {
             m_viewSpace = new Space;
             m_viewSpace->referenceType = XR_REFERENCE_SPACE_TYPE_VIEW;
             m_viewSpace->poseInSpace = Pose::Identity();
-        } catch (std::exception& exc) {
-            m_sessionCreated = false;
-            throw exc;
+
+            m_sessionState = XR_SESSION_STATE_IDLE;
+            updateSessionState(true);
+            m_sessionCreated = true;
+            *session = (XrSession)1;
+
+            TraceLoggingWrite(g_traceProvider, "xrCreateSession", TLXArg(*session, "Session"));
+
+            return XR_SUCCESS;
+        };
+        XrResult result;
+        try {
+            result = initialize();
+        } catch (...) {
+            rollback();
+            throw;
         }
-
-        *session = (XrSession)1;
-
-        TraceLoggingWrite(g_traceProvider, "xrCreateSession", TLXArg(*session, "Session"));
-
-        return XR_SUCCESS;
+        if (XR_FAILED(result)) {
+            rollback();
+        }
+        return result;
     }
 
     // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrDestroySession
@@ -218,6 +241,12 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_HANDLE_INVALID;
         }
 
+        cleanupSessionResources();
+        return XR_SUCCESS;
+    }
+
+    // Also used after a partially initialized CreateSession, before m_sessionCreated has been published.
+    void OpenXrRuntime::cleanupSessionResources() {
         if (m_useAsyncSubmission && !m_needStartAsyncSubmissionThread) {
             {
                 std::unique_lock lock(m_asyncSubmissionMutex);
@@ -287,6 +316,7 @@ namespace virtualdesktop_openxr {
         }
         if (m_headlessSwapchain) {
             ovr_DestroyTextureSwapChain(m_ovrSession, m_headlessSwapchain);
+            m_headlessSwapchain = nullptr;
         }
 
         // We do not destroy actionsets and actions, since they are tied to the instance.
@@ -299,6 +329,7 @@ namespace virtualdesktop_openxr {
         cleanupD3D11();
         cleanupSubmissionDevice();
         m_sessionState = XR_SESSION_STATE_UNKNOWN;
+        m_sessionEventQueue.clear();
         m_sessionCreated = false;
         m_sessionBegun = false;
         m_sessionLossPending = false;
@@ -307,10 +338,11 @@ namespace virtualdesktop_openxr {
 
         // Workaround: OVR ties the last use D3D device to the OVR session, and therefore we must teardown the previous
         // OVR session to clear that state.
-        ovr_Destroy(m_ovrSession);
-        m_ovrSession = nullptr;
-
-        return XR_SUCCESS;
+        if (m_ovrSession) {
+            ovr_Destroy(m_ovrSession);
+            m_ovrSession = nullptr;
+        }
+        m_sessionResourcesRequireCleanup = false;
     }
 
     // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrBeginSession

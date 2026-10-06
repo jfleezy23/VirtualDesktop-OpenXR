@@ -84,23 +84,122 @@ namespace ngx {
     auto NVSDK_NGX_D3D12_ReleaseFeature = &::NVSDK_NGX_D3D12_ReleaseFeature;
     auto NVSDK_NGX_D3D12_EvaluateFeature = &::NVSDK_NGX_D3D12_EvaluateFeature;
 
-    // Hack to avoid NVSDK_NGX_Result_FAIL_PlatformError when loading the DLSS-NR DLL outside of NGX. Pretend that the
-    // caller is NGX.
-    DEFINE_DETOUR_FUNCTION(DWORD, GetModuleFileNameW, HMODULE hModule, LPWSTR lpFilename, DWORD nSize) {
-        HMODULE callerModule;
-        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCSTR)_ReturnAddress(),
-                           &callerModule);
-        if (callerModule == dlssnrModule.get()) {
-            static const std::wstring nvngx = L"nvngx.dll";
-            _snwprintf_s(lpFilename, nSize, _TRUNCATE, nvngx.c_str());
-            if (nSize < nvngx.size() + 1) {
-                SetLastError(ERROR_INSUFFICIENT_BUFFER);
-            }
-            return nSize;
-        }
+    struct ImportPatch {
+        PVOID* slot;
+        PVOID original;
+    };
+    std::vector<ImportPatch> moduleNameImports;
 
-        return original_GetModuleFileNameW(hModule, lpFilename, nSize);
+    // The loader can unload a runtime even after DestroyInstance fails. Retain our code only on unsafe teardown;
+    // otherwise a surviving NR import or device could refer to an unmapped DLL. Recovery then needs a process restart.
+    void retainRuntimeOnCleanupFailure() noexcept {
+        HMODULE runtime;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                               reinterpret_cast<LPCWSTR>(&retainRuntimeOnCleanupFailure), &runtime)) {
+            OutputDebugStringA("VDXR: could not retain runtime after NR cleanup failure\n");
+        }
+    }
+
+    // Spoof only this NR module's import, rather than changing Kernel32 code for every thread in the host.
+    DWORD WINAPI nrGetModuleFileNameW(HMODULE, LPWSTR filename, DWORD size) {
+        constexpr wchar_t name[] = L"nvngx.dll";
+        constexpr DWORD length = static_cast<DWORD>(std::size(name) - 1);
+        if (!size) {
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        if (!filename) {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const DWORD copied = std::min(length, size - 1);
+        std::copy_n(name, copied, filename);
+        filename[copied] = L'\0';
+        if (size <= length) {
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            return size;
+        }
+        return length;
+    }
+
+    void restoreModuleNameImports() {
+        while (!moduleNameImports.empty()) {
+            const auto patch = moduleNameImports.back();
+            DWORD protection;
+            CHECK_MSG(VirtualProtect(patch.slot, sizeof(PVOID), PAGE_READWRITE, &protection),
+                      "Cannot restore NR import protection");
+            const bool restored = InterlockedCompareExchangePointer(
+                patch.slot, patch.original, reinterpret_cast<PVOID>(&nrGetModuleFileNameW)) ==
+                reinterpret_cast<PVOID>(&nrGetModuleFileNameW);
+            // A later importer may still call our shim. Preserve its slot and retain both modules on failure.
+            if (restored) {
+                moduleNameImports.pop_back();
+            }
+            DWORD ignored;
+            CHECK_MSG(VirtualProtect(patch.slot, sizeof(PVOID), protection, &ignored),
+                      "Cannot restore NR import page protection");
+            CHECK_MSG(restored, "NR import was replaced by another owner");
+        }
+    }
+
+    void installModuleNameImports(HMODULE module) {
+        std::vector<ImportPatch> imports;
+        CHECK_MSG(DetourEnumerateImportsEx(module, &imports, nullptr,
+            [](PVOID context, DWORD, LPCSTR name, PVOID* slot) -> BOOL {
+                if (name && slot && std::string_view(name) == "GetModuleFileNameW") {
+                    static_cast<std::vector<ImportPatch>*>(context)->push_back({slot, *slot});
+                }
+                return TRUE;
+            }), "Cannot enumerate NR imports");
+        moduleNameImports.reserve(imports.size());
+        for (const auto& patch : imports) {
+            DWORD protection;
+            CHECK_MSG(VirtualProtect(patch.slot, sizeof(PVOID), PAGE_READWRITE, &protection),
+                      "Cannot update NR import protection");
+            const bool installed = InterlockedCompareExchangePointer(
+                patch.slot, reinterpret_cast<PVOID>(&nrGetModuleFileNameW), patch.original) == patch.original;
+            if (installed) {
+                moduleNameImports.push_back(patch);
+            }
+            DWORD ignored;
+            CHECK_MSG(VirtualProtect(patch.slot, sizeof(PVOID), protection, &ignored),
+                      "Cannot restore NR import page protection");
+            CHECK_MSG(installed, "NR import changed during installation");
+        }
+    }
+
+    void loadModule(const std::filesystem::path& path) {
+        wil::unique_hmodule candidate(LoadLibraryW(path.c_str()));
+        CHECK_MSG(candidate.get(), "Failed to load DLSS-NR module");
+        const auto init = reinterpret_cast<InitExt>(GetProcAddress(candidate.get(), "NVSDK_NGX_D3D12_Init_Ext"));
+        const auto shutdown = reinterpret_cast<decltype(Shutdown1)>(
+            GetProcAddress(candidate.get(), "NVSDK_NGX_D3D12_Shutdown1"));
+        const auto create = reinterpret_cast<decltype(NVSDK_NGX_D3D12_CreateFeature)>(
+            GetProcAddress(candidate.get(), "NVSDK_NGX_D3D12_CreateFeature"));
+        const auto release = reinterpret_cast<decltype(NVSDK_NGX_D3D12_ReleaseFeature)>(
+            GetProcAddress(candidate.get(), "NVSDK_NGX_D3D12_ReleaseFeature"));
+        const auto evaluate = reinterpret_cast<decltype(NVSDK_NGX_D3D12_EvaluateFeature)>(
+            GetProcAddress(candidate.get(), "NVSDK_NGX_D3D12_EvaluateFeature"));
+        CHECK_MSG(init && shutdown && create && release && evaluate, "DLSS-NR module is missing required exports");
+        try {
+            installModuleNameImports(candidate.get());
+        } catch (...) {
+            try {
+                restoreModuleNameImports();
+            } catch (...) {
+                // A live import must never outlive its target. Keep both modules if rollback itself fails.
+                retainRuntimeOnCleanupFailure();
+                dlssnrModule = std::move(candidate);
+            }
+            throw;
+        }
+        // Publish only the complete table. A rejected DLL must leave the SDK fallback callable for the next frame.
+        dlssnrModule = std::move(candidate);
+        Init_Ext = init;
+        Shutdown1 = shutdown;
+        NVSDK_NGX_D3D12_CreateFeature = create;
+        NVSDK_NGX_D3D12_ReleaseFeature = release;
+        NVSDK_NGX_D3D12_EvaluateFeature = evaluate;
     }
 
 } // namespace ngx
@@ -169,8 +268,10 @@ namespace virtualdesktop_openxr {
             // Destroy DLSS-NR feature - it will be re-created in the loop further below.
             for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
                 if (m_dlssnrFeature[eye]) {
-                    ngx::NVSDK_NGX_D3D12_ReleaseFeature(m_dlssnrFeature[eye]);
+                    CHECK_NGXCMD(m_dlssnrFeatureRelease[eye](m_dlssnrFeature[eye]));
                     m_dlssnrFeature[eye] = nullptr;
+                    m_dlssnrFeatureRelease[eye] = nullptr;
+                    m_dlssnrFeatureEvaluate[eye] = nullptr;
                 }
             }
 
@@ -202,6 +303,9 @@ namespace virtualdesktop_openxr {
                 m_ngxParameters->Set(NVSDK_NGX_Parameter_CreationNodeMask, 1u);
                 m_ngxParameters->Set(NVSDK_NGX_Parameter_VisibilityNodeMask, 1u);
 
+                // Keep each opaque feature paired with the dispatch table that created it.
+                auto release = ngx::NVSDK_NGX_D3D12_ReleaseFeature;
+                auto evaluate = ngx::NVSDK_NGX_D3D12_EvaluateFeature;
                 if (ngx::forceManualLoad ||
                     NVSDK_NGX_FAILED(ngx::NVSDK_NGX_D3D12_CreateFeature(cmdList.Commands.Get(),
                                                                         NVSDK_NGX_Feature_Reserved18 /* DLSS-NR */,
@@ -210,31 +314,12 @@ namespace virtualdesktop_openxr {
                     // User might be using an unsigned nvngx_dlssnr.dll that gets bounced by the NGX SDK. Try loading it
                     // manually.
                     if (!ngx::dlssnrModule) {
-                        DetourDllAttach("Kernel32.dll",
-                                        "GetModuleFileNameW",
-                                        ngx::hooked_GetModuleFileNameW,
-                                        ngx::original_GetModuleFileNameW);
-
                         const auto nvngx_dlssnrPath = virtualdesktop_openxr::dllHome / L"nvngx_dlssnr.dll";
-                        *ngx::dlssnrModule.put() = LoadLibraryW(nvngx_dlssnrPath.c_str());
-                        // clang-format off
-                        CHECK_MSG(ngx::dlssnrModule.get(), "Failed to load DLSS-NR module");
-                        ngx::Init_Ext = (ngx::InitExt)GetProcAddress(ngx::dlssnrModule.get(), "NVSDK_NGX_D3D12_Init_Ext");
-                        ngx::Shutdown1 = (decltype(ngx::Shutdown1))GetProcAddress(
-                            ngx::dlssnrModule.get(), "NVSDK_NGX_D3D12_Shutdown1");
-                        ngx::NVSDK_NGX_D3D12_CreateFeature = (decltype(ngx::NVSDK_NGX_D3D12_CreateFeature))GetProcAddress(
-                            ngx::dlssnrModule.get(), "NVSDK_NGX_D3D12_CreateFeature");
-                        ngx::NVSDK_NGX_D3D12_ReleaseFeature = (decltype(ngx::NVSDK_NGX_D3D12_ReleaseFeature))GetProcAddress(
-                            ngx::dlssnrModule.get(), "NVSDK_NGX_D3D12_ReleaseFeature");
-                        ngx::NVSDK_NGX_D3D12_EvaluateFeature = (decltype(ngx::NVSDK_NGX_D3D12_EvaluateFeature))GetProcAddress(
-                            ngx::dlssnrModule.get(), "NVSDK_NGX_D3D12_EvaluateFeature");
-                        // clang-format on
-                        CHECK_MSG(ngx::Init_Ext && ngx::Shutdown1 && ngx::NVSDK_NGX_D3D12_CreateFeature &&
-                                      ngx::NVSDK_NGX_D3D12_ReleaseFeature && ngx::NVSDK_NGX_D3D12_EvaluateFeature,
-                                  "DLSS-NR module is missing required exports");
+                        ngx::loadModule(nvngx_dlssnrPath);
                     }
 
                     if (ngx::initializedDevice.Get() != m_dlssnrDevice.Get()) {
+                        CHECK_MSG(ngx::Init_Ext && ngx::Shutdown1, "DLSS-NR module load did not complete");
                         CHECK_NGXCMD(ngx::Init_Ext(123456,
                                               virtualdesktop_openxr::programData.c_str(),
                                               m_dlssnrDevice.Get(),
@@ -243,11 +328,15 @@ namespace virtualdesktop_openxr {
                         ngx::initializedDevice = m_dlssnrDevice;
                     }
 
+                    release = ngx::NVSDK_NGX_D3D12_ReleaseFeature;
+                    evaluate = ngx::NVSDK_NGX_D3D12_EvaluateFeature;
                     CHECK_NGXCMD(ngx::NVSDK_NGX_D3D12_CreateFeature(cmdList.Commands.Get(),
                                                                     NVSDK_NGX_Feature_Reserved18 /* DLSS-NR */,
                                                                     m_ngxParameters,
                                                                     &m_dlssnrFeature[eye]));
                 }
+                m_dlssnrFeatureRelease[eye] = release;
+                m_dlssnrFeatureEvaluate[eye] = evaluate;
             }
 
             // Prepare swapchain outputs.
@@ -388,7 +477,7 @@ namespace virtualdesktop_openxr {
             }
 
             // Go!
-            CHECK_NGXCMD(ngx::NVSDK_NGX_D3D12_EvaluateFeature(
+            CHECK_NGXCMD(m_dlssnrFeatureEvaluate[eye](
                 cmdList.Commands.Get(), m_dlssnrFeature[eye], m_ngxParameters, nullptr));
         }
 
@@ -538,6 +627,7 @@ namespace virtualdesktop_openxr {
 
         CHECK_NGXCMD(NVSDK_NGX_D3D12_GetCapabilityParameters(&m_ngxParameters));
         if (ngx::dlssnrModule) {
+            CHECK_MSG(ngx::Init_Ext && ngx::Shutdown1, "DLSS-NR module load did not complete");
             CHECK_NGXCMD(ngx::Init_Ext(123456,
                                      virtualdesktop_openxr::programData.c_str(),
                                      m_dlssnrDevice.Get(),
@@ -550,12 +640,14 @@ namespace virtualdesktop_openxr {
     void OpenXrRuntime::cleanupDlssnrResources() {
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
             if (m_dlssnrFeature[eye]) {
-                ngx::NVSDK_NGX_D3D12_ReleaseFeature(m_dlssnrFeature[eye]);
+                CHECK_NGXCMD(m_dlssnrFeatureRelease[eye](m_dlssnrFeature[eye]));
                 m_dlssnrFeature[eye] = nullptr;
+                m_dlssnrFeatureRelease[eye] = nullptr;
+                m_dlssnrFeatureEvaluate[eye] = nullptr;
             }
         }
         if (m_ngxParameters) {
-            NVSDK_NGX_D3D12_DestroyParameters(m_ngxParameters);
+            CHECK_NGXCMD(NVSDK_NGX_D3D12_DestroyParameters(m_ngxParameters));
             m_ngxParameters = nullptr;
         }
         // Shut down only our direct NR module. The public NGX SDK may serve the host's DLSS.
@@ -568,14 +660,17 @@ namespace virtualdesktop_openxr {
     void OpenXrRuntime::unloadDlssnrModule() {
         // Device cleanup must finish before FreeLibrary, which invokes DLL destructors under the loader lock.
         CHECK_MSG(!ngx::initializedDevice, "DLSS-NR device must be shut down before module unload");
-        DetourDllDetach("Kernel32.dll", "GetModuleFileNameW", ngx::hooked_GetModuleFileNameW,
-                        ngx::original_GetModuleFileNameW);
+        ngx::restoreModuleNameImports();
         ngx::NVSDK_NGX_D3D12_CreateFeature = &::NVSDK_NGX_D3D12_CreateFeature;
         ngx::NVSDK_NGX_D3D12_ReleaseFeature = &::NVSDK_NGX_D3D12_ReleaseFeature;
         ngx::NVSDK_NGX_D3D12_EvaluateFeature = &::NVSDK_NGX_D3D12_EvaluateFeature;
         ngx::Init_Ext = nullptr;
         ngx::Shutdown1 = nullptr;
         ngx::dlssnrModule.reset();
+    }
+
+    void OpenXrRuntime::retainDlssnrRuntimeOnCleanupFailure() noexcept {
+        ngx::retainRuntimeOnCleanupFailure();
     }
 
 } // namespace virtualdesktop_openxr

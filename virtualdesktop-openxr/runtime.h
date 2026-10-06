@@ -610,6 +610,7 @@ namespace virtualdesktop_openxr {
         void initializeSubmissionDevice(const std::string& appGraphicsApi);
         void initializeSubmissionResources();
         void cleanupSubmissionDevice();
+        void cleanupSessionResources();
         std::vector<HANDLE> getSwapchainImages(Swapchain& xrSwapchain);
         XrResult getSwapchainImagesD3D11(Swapchain& xrSwapchain, XrSwapchainImageD3D11KHR* d3d11Images, uint32_t count);
         void resolveSwapchainImage(Swapchain& xrSwapchain,
@@ -673,6 +674,7 @@ namespace virtualdesktop_openxr {
         // dlssnr.cpp
         void initializeDlssnrResources();
         void cleanupDlssnrResources();
+        void retainDlssnrRuntimeOnCleanupFailure() noexcept;
         void unloadDlssnrModule();
         void ensureDlssnrSwapchainResources(ovrTextureFormat format, const ovrSizei& resolution);
         void ensureSwapchainDlssnrResources(Swapchain& xrSwapchain, uint32_t slice);
@@ -757,6 +759,7 @@ namespace virtualdesktop_openxr {
         ComPtr<ID3D11Buffer> m_upscalerConstants;
         ComPtr<IDXGISwapChain1> m_dxgiSwapchain;
         bool m_sessionCreated{false};
+        bool m_sessionResourcesRequireCleanup{false};
         XrSessionState m_sessionState{XR_SESSION_STATE_UNKNOWN};
         std::deque<std::pair<XrSessionState, double>> m_sessionEventQueue;
         ovrSessionStatus m_hmdStatus{};
@@ -911,6 +914,10 @@ namespace virtualdesktop_openxr {
         std::unique_ptr<D3D12Utils::CommandContext> m_dlssnrContext;
         ovrSizei m_dlssnrFeatureResolution{0, 0};
         NVSDK_NGX_Handle* m_dlssnrFeature[xr::StereoView::Count]{nullptr, nullptr};
+        decltype(&::NVSDK_NGX_D3D12_ReleaseFeature) m_dlssnrFeatureRelease[xr::StereoView::Count]{
+            &::NVSDK_NGX_D3D12_ReleaseFeature, &::NVSDK_NGX_D3D12_ReleaseFeature};
+        decltype(&::NVSDK_NGX_D3D12_EvaluateFeature) m_dlssnrFeatureEvaluate[xr::StereoView::Count]{
+            &::NVSDK_NGX_D3D12_EvaluateFeature, &::NVSDK_NGX_D3D12_EvaluateFeature};
         ovrSizei m_dlssnrOutputSwapchainResolution{0, 0};
         ovrTextureFormat m_dlssnrOutputSwapchainFormat{OVR_FORMAT_UNKNOWN};
         ovrTextureSwapChain m_dlssnrOutputSwapchain{nullptr};

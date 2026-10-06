@@ -4,6 +4,7 @@ param(
     [switch]$RecompileInputSources,
     [string]$TestSource = 'vr_input_regression.cpp',
     [switch]$BaselineWatcher,
+    [switch]$PerFeatureProvider,
     [switch]$UseExistingInputObjects
 )
 $ErrorActionPreference = 'Stop'
@@ -37,6 +38,7 @@ $compileOptions = @('/nologo', '/std:c++17', '/EHsc', '/W3', '/MT', '/O2', '/Gy'
     '/D', '_UNICODE', '/D', '_CRT_SECURE_NO_WARNINGS', '/D', 'USING_GAMEINPUT')
 foreach ($directory in $includeDirectories) { $compileOptions += "/I$directory" }
 if ($BaselineWatcher) { $compileOptions += '/DVDXR_WATCHER_BASELINE' }
+if ($PerFeatureProvider) { $compileOptions += '/DVDXR_PER_FEATURE_PROVIDER' }
 $testName = [IO.Path]::GetFileNameWithoutExtension($TestSource)
 $testObject = Join-Path $output "$testName.obj"
 & cl.exe @compileOptions (Join-Path $PSScriptRoot $TestSource) "/Fo$testObject"

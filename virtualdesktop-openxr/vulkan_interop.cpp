@@ -577,29 +577,31 @@ namespace virtualdesktop_openxr {
     }
 
     void OpenXrRuntime::cleanupVulkan() {
-        if (m_vkDispatch.vkDeviceWaitIdle) {
+        if (m_vkDevice && m_vkDispatch.vkDeviceWaitIdle) {
             m_vkDispatch.vkDeviceWaitIdle(m_vkDevice);
         }
 
         for (uint32_t i = 0; i < k_numGpuTimers; i++) {
             m_gpuTimerApp[i].reset();
         }
-        if (m_vkDispatch.vkDestroySemaphore) {
+        if (m_vkDevice && m_vkTimelineSemaphore && m_vkDispatch.vkDestroySemaphore) {
             m_vkDispatch.vkDestroySemaphore(
                 m_vkDevice, m_vkTimelineSemaphore, m_vkAllocator ? &m_vkAllocator.value() : nullptr);
             m_vkTimelineSemaphore = VK_NULL_HANDLE;
+        }
+        if (m_vkDevice && m_vkFenceForFlush && m_vkDispatch.vkDestroyFence) {
             m_vkDispatch.vkDestroyFence(
                 m_vkDevice, m_vkFenceForFlush, m_vkAllocator ? &m_vkAllocator.value() : nullptr);
             m_vkFenceForFlush = VK_NULL_HANDLE;
         }
-        if (m_vkDispatch.vkResetCommandBuffer) {
+        if (m_vkDevice && m_vkCmdBuffer && m_vkDispatch.vkResetCommandBuffer) {
             m_vkDispatch.vkResetCommandBuffer(m_vkCmdBuffer, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
         }
-        if (m_vkDispatch.vkFreeCommandBuffers) {
+        if (m_vkDevice && m_vkCmdPool && m_vkCmdBuffer && m_vkDispatch.vkFreeCommandBuffers) {
             m_vkDispatch.vkFreeCommandBuffers(m_vkDevice, m_vkCmdPool, 1, &m_vkCmdBuffer);
             m_vkCmdBuffer = VK_NULL_HANDLE;
         }
-        if (m_vkDispatch.vkDestroyCommandPool) {
+        if (m_vkDevice && m_vkCmdPool && m_vkDispatch.vkDestroyCommandPool) {
             m_vkDispatch.vkDestroyCommandPool(
                 m_vkDevice, m_vkCmdPool, m_vkAllocator ? &m_vkAllocator.value() : nullptr);
             m_vkCmdPool = VK_NULL_HANDLE;
