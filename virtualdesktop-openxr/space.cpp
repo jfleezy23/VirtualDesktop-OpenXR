@@ -134,6 +134,9 @@ namespace virtualdesktop_openxr {
         if (createInfo->type != XR_TYPE_ACTION_SPACE_CREATE_INFO) {
             return XR_ERROR_VALIDATION_FAILURE;
         }
+        if (!Quaternion::IsNormalized(createInfo->poseInActionSpace.orientation)) {
+            return XR_ERROR_POSE_INVALID;
+        }
 
         TraceLoggingWrite(g_traceProvider,
                           "xrCreateActionSpace",
@@ -157,6 +160,14 @@ namespace virtualdesktop_openxr {
 
             if (xrAction.type != XR_ACTION_TYPE_POSE_INPUT) {
                 return XR_ERROR_ACTION_TYPE_MISMATCH;
+            }
+            if (createInfo->subactionPath != XR_NULL_PATH) {
+                if (m_strings.find(createInfo->subactionPath) == m_strings.cend()) {
+                    return XR_ERROR_PATH_INVALID;
+                }
+                if (!xrAction.subactionPaths.count(createInfo->subactionPath)) {
+                    return XR_ERROR_PATH_UNSUPPORTED;
+                }
             }
         }
 
@@ -508,6 +519,10 @@ namespace virtualdesktop_openxr {
                                                     XrPosef& pose,
                                                     XrSpaceVelocity* velocity,
                                                     XrEyeGazeSampleTimeEXT* gazeSampleTime) const {
+        if (velocity) {
+            velocity->velocityFlags = 0;
+            velocity->angularVelocity = velocity->linearVelocity = {};
+        }
         XrPosef spaceToVirtual = Pose::Identity();
         XrSpaceVelocity spaceToVirtualVelocity{};
         XrPosef baseSpaceToVirtual = Pose::Identity();
@@ -553,15 +568,30 @@ namespace virtualdesktop_openxr {
         // Combine the poses.
         pose = Pose::Multiply(spaceToVirtual, Pose::Invert(baseSpaceToVirtual));
         if (velocity) {
+            const auto inverseBaseOrientation =
+                DirectX::XMQuaternionConjugate(LoadXrQuaternion(baseSpaceToVirtual.orientation));
             velocity->velocityFlags = spaceToVirtualVelocity.velocityFlags & baseSpaceToVirtualVelocity.velocityFlags;
             if (velocity->velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) {
-                velocity->angularVelocity =
-                    spaceToVirtualVelocity.angularVelocity - baseSpaceToVirtualVelocity.angularVelocity;
+                StoreXrVector3(&velocity->angularVelocity, DirectX::XMVector3Rotate(
+                    LoadXrVector3(spaceToVirtualVelocity.angularVelocity - baseSpaceToVirtualVelocity.angularVelocity),
+                    inverseBaseOrientation));
             }
             if (velocity->velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) {
-                // TODO: Does not account for centripetral forces.
-                velocity->linearVelocity =
-                    spaceToVirtualVelocity.linearVelocity - baseSpaceToVirtualVelocity.linearVelocity;
+                auto relativeLinear =
+                    LoadXrVector3(spaceToVirtualVelocity.linearVelocity - baseSpaceToVirtualVelocity.linearVelocity);
+                const auto separation = spaceToVirtual.position - baseSpaceToVirtual.position;
+                if (separation.x != 0.f || separation.y != 0.f || separation.z != 0.f) {
+                    if (baseSpaceToVirtualVelocity.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) {
+                        relativeLinear = DirectX::XMVectorSubtract(relativeLinear, DirectX::XMVector3Cross(
+                            LoadXrVector3(baseSpaceToVirtualVelocity.angularVelocity), LoadXrVector3(separation)));
+                    } else {
+                        velocity->velocityFlags &= ~XR_SPACE_VELOCITY_LINEAR_VALID_BIT;
+                    }
+                }
+                if (velocity->velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) {
+                    StoreXrVector3(&velocity->linearVelocity,
+                                  DirectX::XMVector3Rotate(relativeLinear, inverseBaseOrientation));
+                }
             }
         }
 
@@ -574,6 +604,7 @@ namespace virtualdesktop_openxr {
                                                             XrSpaceVelocity* velocity,
                                                             XrEyeGazeSampleTimeEXT* gazeSampleTime) const {
         XrSpaceLocationFlags result = 0;
+        XrVector3f velocityOrigin{};
 
         if (velocity) {
             velocity->angularVelocity = velocity->linearVelocity = {0, 0, 0};
@@ -591,6 +622,7 @@ namespace virtualdesktop_openxr {
         if (xrSpace.referenceType == XR_REFERENCE_SPACE_TYPE_VIEW) {
             // VIEW space if the headset pose.
             result = getHmdPose(time, pose, velocity);
+            velocityOrigin = pose.position;
         } else if (xrSpace.referenceType == XR_REFERENCE_SPACE_TYPE_LOCAL) {
             // LOCAL space is the origin at eye level.
             if (ovr_GetTrackingOriginType(m_ovrSession) == ovrTrackingOrigin_FloorLevel && !ignoreFloorHeight) {
@@ -686,11 +718,17 @@ namespace virtualdesktop_openxr {
                         const int side = getActionSide(fullPath);
                         if ((isGripPose || isAimPose || isPalmPose) && side >= 0) {
                             result = getControllerPose(side, time, pose, velocity);
+                            velocityOrigin = pose.position;
 
                             // Apply the pose offsets.
                             if (isAimPose) {
                                 // Try using the hand tracking first.
-                                if (!(m_supportsHandTracking && getPinchPose(side, pose, pose))) {
+                                if (m_supportsHandTracking && getPinchPose(side, pose, pose)) {
+                                    // Hand aim is a separate moving pose, not a fixed controller offset.
+                                    if (velocity) {
+                                        velocity->velocityFlags = 0;
+                                    }
+                                } else {
                                     pose = Pose::Multiply(m_controllerAimPose[side], pose);
                                 }
                             } else if (isGripPose) {
@@ -709,6 +747,18 @@ namespace virtualdesktop_openxr {
 
         // Apply the offset transform.
         pose = Pose::Multiply(xrSpace.poseInSpace, pose);
+        if (velocity && (velocity->velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT)) {
+            const auto offset = pose.position - velocityOrigin;
+            if (offset.x != 0.f || offset.y != 0.f || offset.z != 0.f) {
+                if (velocity->velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) {
+                    StoreXrVector3(&velocity->linearVelocity, DirectX::XMVectorAdd(
+                        LoadXrVector3(velocity->linearVelocity), DirectX::XMVector3Cross(
+                            LoadXrVector3(velocity->angularVelocity), LoadXrVector3(offset))));
+                } else {
+                    velocity->velocityFlags &= ~XR_SPACE_VELOCITY_LINEAR_VALID_BIT;
+                }
+            }
+        }
 
         return result;
     }
@@ -763,9 +813,16 @@ namespace virtualdesktop_openxr {
             velocity->velocityFlags = 0;
 
             if (isTracked) {
-                velocity->velocityFlags |= XR_SPACE_VELOCITY_ANGULAR_VALID_BIT | XR_SPACE_VELOCITY_LINEAR_VALID_BIT;
-                velocity->angularVelocity = ovrVector3fToXrVector3f(state.AngularVelocity);
-                velocity->linearVelocity = ovrVector3fToXrVector3f(state.LinearVelocity);
+                if (std::isfinite(state.AngularVelocity.x) && std::isfinite(state.AngularVelocity.y) &&
+                    std::isfinite(state.AngularVelocity.z)) {
+                    velocity->velocityFlags |= XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+                    velocity->angularVelocity = ovrVector3fToXrVector3f(state.AngularVelocity);
+                }
+                if (std::isfinite(state.LinearVelocity.x) && std::isfinite(state.LinearVelocity.y) &&
+                    std::isfinite(state.LinearVelocity.z)) {
+                    velocity->velocityFlags |= XR_SPACE_VELOCITY_LINEAR_VALID_BIT;
+                    velocity->linearVelocity = ovrVector3fToXrVector3f(state.LinearVelocity);
+                }
             }
         }
 
@@ -846,15 +903,17 @@ namespace virtualdesktop_openxr {
             if (isTracked) {
                 // Some devices like AndroidXR seem to like returning NaNs. The OVR API doesn't have validity bits. We
                 // need to check manually.
-                const bool isAngularVelocityValid = !(isnan(state.AngularVelocity.x) ||
-                                                      isnan(state.AngularVelocity.y) || isnan(state.AngularVelocity.z));
+                const bool isAngularVelocityValid = std::isfinite(state.AngularVelocity.x) &&
+                                                    std::isfinite(state.AngularVelocity.y) &&
+                                                    std::isfinite(state.AngularVelocity.z);
                 if (isAngularVelocityValid) {
                     velocity->velocityFlags |= XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
                     velocity->angularVelocity = ovrVector3fToXrVector3f(state.AngularVelocity);
                 }
 
-                const bool isLinearVelocityValid =
-                    !(isnan(state.LinearVelocity.x) || isnan(state.LinearVelocity.y) || isnan(state.LinearVelocity.z));
+                const bool isLinearVelocityValid = std::isfinite(state.LinearVelocity.x) &&
+                                                   std::isfinite(state.LinearVelocity.y) &&
+                                                   std::isfinite(state.LinearVelocity.z);
                 if (isLinearVelocityValid) {
                     velocity->velocityFlags |= XR_SPACE_VELOCITY_LINEAR_VALID_BIT;
                     velocity->linearVelocity = ovrVector3fToXrVector3f(state.LinearVelocity);
