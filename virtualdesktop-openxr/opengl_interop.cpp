@@ -121,8 +121,10 @@ namespace virtualdesktop_openxr {
 
         // On the OpenGL side, it is called a semaphore.
         m_glDispatch.glGenSemaphoresEXT(1, &m_glSemaphore);
+        CHECK_MSG(glGetError() == GL_NO_ERROR, "OpenGL semaphore creation failed");
         m_glDispatch.glImportSemaphoreWin32HandleEXT(
             m_glSemaphore, GL_HANDLE_TYPE_D3D12_FENCE_EXT, m_fenceHandleForAMDWorkaround.get());
+        CHECK_MSG(glGetError() == GL_NO_ERROR, "OpenGL semaphore import failed");
 
         // Frame timers.
         for (uint32_t i = 0; i < k_numGpuTimers; i++) {
@@ -194,6 +196,30 @@ namespace virtualdesktop_openxr {
 
         // Detect whether this is the first call for this swapchain.
         const bool initialized = !xrSwapchain.glImages.empty();
+        bool imported = initialized;
+        auto rollback = MakeScopeGuard([&] {
+            if (!imported) {
+                // The outer context is already current. Cleanup must not construct a
+                // second fallible context guard while propagating the original error.
+                while (!xrSwapchain.glImages.empty()) {
+                    const auto image = xrSwapchain.glImages.back();
+                    glDeleteTextures(1, &image);
+                    xrSwapchain.glImages.pop_back();
+                }
+                while (!xrSwapchain.glMemory.empty()) {
+                    const auto memory = xrSwapchain.glMemory.back();
+                    m_glDispatch.glDeleteMemoryObjectsEXT(1, &memory);
+                    xrSwapchain.glMemory.pop_back();
+                }
+            }
+        });
+        for (uint32_t i = 0; i < count; i++) {
+            if (glImages[i].type != XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR) {
+                return XR_ERROR_VALIDATION_FAILURE;
+            }
+        }
+        xrSwapchain.glImages.reserve(count);
+        xrSwapchain.glMemory.reserve(count);
 
         std::vector<HANDLE> textureHandles;
         if (!initialized) {
@@ -209,9 +235,12 @@ namespace virtualdesktop_openxr {
 
             if (!initialized) {
                 // Import the device memory from D3D.
-                GLuint memory;
+                GLuint memory{};
                 m_glDispatch.glCreateMemoryObjectsEXT(1, &memory);
-                xrSwapchain.glMemory.push_back(memory);
+                if (memory) {
+                    xrSwapchain.glMemory.push_back(memory);
+                }
+                CHECK_MSG(glGetError() == GL_NO_ERROR, "OpenGL memory object creation failed");
 
                 const size_t bytePerPixels = glGetBytePerPixels((GLenum)xrSwapchain.xrDesc.format);
 
@@ -224,12 +253,21 @@ namespace virtualdesktop_openxr {
                                                           !requireNTHandleSharing() ? GL_HANDLE_TYPE_D3D11_IMAGE_KMT_EXT
                                                                                     : GL_HANDLE_TYPE_D3D11_IMAGE_EXT,
                                                           textureHandles[i]);
+                CHECK_MSG(glGetError() == GL_NO_ERROR, "OpenGL memory import failed");
 
                 // Create the texture that the app will use.
-                GLuint image;
+                GLuint image{};
+                const GLenum target = xrSwapchain.xrDesc.arraySize == 1
+                                          ? (xrSwapchain.xrDesc.sampleCount == 1 ? GL_TEXTURE_2D : GL_TEXTURE_2D_MULTISAMPLE)
+                                          : (xrSwapchain.xrDesc.sampleCount == 1 ? GL_TEXTURE_2D_ARRAY
+                                                                                : GL_TEXTURE_2D_MULTISAMPLE_ARRAY);
+                m_glDispatch.glCreateTextures(target, 1, &image);
+                if (image) {
+                    xrSwapchain.glImages.push_back(image);
+                }
+                CHECK_MSG(glGetError() == GL_NO_ERROR, "OpenGL texture creation failed");
                 if (xrSwapchain.xrDesc.arraySize == 1) {
                     if (xrSwapchain.xrDesc.sampleCount == 1) {
-                        m_glDispatch.glCreateTextures(GL_TEXTURE_2D, 1, &image);
                         m_glDispatch.glTextureStorageMem2DEXT(image,
                                                               xrSwapchain.xrDesc.mipCount,
                                                               (GLenum)xrSwapchain.xrDesc.format,
@@ -238,7 +276,6 @@ namespace virtualdesktop_openxr {
                                                               memory,
                                                               0);
                     } else {
-                        m_glDispatch.glCreateTextures(GL_TEXTURE_2D_MULTISAMPLE, 1, &image);
                         m_glDispatch.glTextureStorageMem2DMultisampleEXT(image,
                                                                          xrSwapchain.xrDesc.sampleCount,
                                                                          (GLenum)xrSwapchain.xrDesc.format,
@@ -250,7 +287,6 @@ namespace virtualdesktop_openxr {
                     }
                 } else {
                     if (xrSwapchain.xrDesc.sampleCount == 1) {
-                        m_glDispatch.glCreateTextures(GL_TEXTURE_2D_ARRAY, 1, &image);
                         m_glDispatch.glTextureStorageMem3DEXT(image,
                                                               xrSwapchain.xrDesc.mipCount,
                                                               (GLenum)xrSwapchain.xrDesc.format,
@@ -260,7 +296,6 @@ namespace virtualdesktop_openxr {
                                                               memory,
                                                               0);
                     } else {
-                        m_glDispatch.glCreateTextures(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, 1, &image);
                         m_glDispatch.glTextureStorageMem3DMultisampleEXT(image,
                                                                          xrSwapchain.xrDesc.sampleCount,
                                                                          (GLenum)xrSwapchain.xrDesc.format,
@@ -272,7 +307,6 @@ namespace virtualdesktop_openxr {
                                                                          0);
                     }
                 }
-                xrSwapchain.glImages.push_back(image);
             }
 
             glImages[i].image = xrSwapchain.glImages[i];
@@ -283,6 +317,10 @@ namespace virtualdesktop_openxr {
                               TLArg(glImages[i].image, "Texture"));
         }
 
+        // Detect import/storage errors before marking the cache ready for reuse.
+        const auto error = glGetError();
+        CHECK_MSG(error == GL_NO_ERROR, fmt::format("OpenGL image import error: 0x{:x}", error));
+        imported = true;
         return XR_SUCCESS;
     }
 

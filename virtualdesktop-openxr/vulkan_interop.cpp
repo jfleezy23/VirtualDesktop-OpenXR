@@ -628,6 +628,23 @@ namespace virtualdesktop_openxr {
                                                      uint32_t count) {
         // Detect whether this is the first call for this swapchain.
         const bool initialized = !xrSwapchain.vkImages.empty();
+        bool imported = initialized;
+        bool recording = false;
+        auto rollback = MakeScopeGuard([&] {
+            if (!imported) {
+                if (recording) {
+                    m_vkDispatch.vkResetCommandBuffer(m_vkCmdBuffer, 0);
+                }
+                cleanupSwapchainImagesVulkan(xrSwapchain);
+            }
+        });
+        for (uint32_t i = 0; i < count; i++) {
+            if (vkImages[i].type != XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR) {
+                return XR_ERROR_VALIDATION_FAILURE;
+            }
+        }
+        xrSwapchain.vkImages.reserve(count);
+        xrSwapchain.vkDeviceMemory.reserve(count);
 
         const bool needTransition = xrSwapchain.xrDesc.usageFlags & (XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
                                                                      XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
@@ -646,6 +663,7 @@ namespace virtualdesktop_openxr {
                 VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
                 beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
                 CHECK_VKCMD(m_vkDispatch.vkBeginCommandBuffer(m_vkCmdBuffer, &beginInfo));
+                recording = true;
             }
         }
 
@@ -802,12 +820,14 @@ namespace virtualdesktop_openxr {
         if (!initialized && needTransition) {
             // Transition all images to the desired state.
             CHECK_VKCMD(m_vkDispatch.vkEndCommandBuffer(m_vkCmdBuffer));
+            recording = false;
             VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
             submitInfo.commandBufferCount = 1;
             submitInfo.pCommandBuffers = &m_vkCmdBuffer;
             CHECK_VKCMD(m_vkDispatch.vkQueueSubmit(m_vkQueue, 1, &submitInfo, VK_NULL_HANDLE));
         }
 
+        imported = true;
         return XR_SUCCESS;
     }
 

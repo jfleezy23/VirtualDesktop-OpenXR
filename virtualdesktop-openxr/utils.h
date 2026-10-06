@@ -364,7 +364,11 @@ namespace virtualdesktop_openxr::utils {
                 m_glDC = wglGetCurrentDC();
                 m_glRC = wglGetCurrentContext();
 
-                wglMakeCurrent(context.glDC, context.glRC);
+                if (!wglMakeCurrent(context.glDC, context.glRC)) {
+                    // A failed switch leaves this thread without a current context.
+                    wglMakeCurrent(m_glDC, m_glRC);
+                    CHECK_MSG(false, "Failed to make the runtime OpenGL context current");
+                }
 
                 if (!m_ignoreErrors) {
                     // Reset error codes.
@@ -378,10 +382,11 @@ namespace virtualdesktop_openxr::utils {
             if (m_valid) {
                 const auto error = glGetError();
 
-                wglMakeCurrent(m_glDC, m_glRC);
+                const auto restored = wglMakeCurrent(m_glDC, m_glRC);
 
-                if (!m_ignoreErrors) {
+                if (!m_ignoreErrors && std::uncaught_exceptions() == 0) {
                     CHECK_MSG(error == GL_NO_ERROR, fmt::format("OpenGL error: 0x{:x}", error));
+                    CHECK_MSG(restored, "Failed to restore the application OpenGL context");
                 }
             }
         }

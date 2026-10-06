@@ -377,6 +377,8 @@ namespace virtualdesktop_openxr {
 
             // Resources needed for interop.
             std::vector<ComPtr<ID3D11Texture2D>> d3d11Images;
+            // NT exports are owned by the swapchain; import APIs only borrow them.
+            std::vector<wil::unique_handle> ntTextureHandles;
             std::vector<ComPtr<ID3D12Resource>> d3d12Images;
             std::vector<VkDeviceMemory> vkDeviceMemory;
             std::vector<VkImage> vkImages;
@@ -625,7 +627,7 @@ namespace virtualdesktop_openxr {
                                    std::set<std::pair<Swapchain*, uint32_t>>& resolved,
                                    bool skipCommit = false);
         void ensureSwapchainSliceResources(Swapchain& xrSwapchain, uint32_t slice) const;
-        void ensureSwapchainPrecompositorResources(Swapchain& xrSwapchain, const ovrSizei& resolution) const;
+        void ensureSwapchainPrecompositorResources(Swapchain& xrSwapchain, const ovrSizei& resolution);
         void populateSwapchainSlice(const Swapchain& xrSwapchain,
                                     const ovrTextureSwapChainDesc& desc,
                                     SwapchainSlice& slice,

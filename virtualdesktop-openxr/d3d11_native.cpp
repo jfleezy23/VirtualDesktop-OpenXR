@@ -320,6 +320,7 @@ namespace virtualdesktop_openxr {
 
         m_d3d11ContextState.Reset();
         m_d3d11Context.Reset();
+        m_d3d11Fence.Reset();
         m_d3d11Device.Reset();
     }
 
@@ -459,6 +460,9 @@ namespace virtualdesktop_openxr {
     std::vector<HANDLE> OpenXrRuntime::getSwapchainImages(Swapchain& xrSwapchain) {
         ensureAppSwapchainImages(xrSwapchain);
         std::vector<HANDLE> handles;
+        if (requireNTHandleSharing()) {
+            xrSwapchain.ntTextureHandles.resize(xrSwapchain.ovrSwapchainLength);
+        }
         for (int i = 0; i < xrSwapchain.ovrSwapchainLength; i++) {
             // Export the HANDLE.
             const auto texture = xrSwapchain.appSwapchain.images[i];
@@ -470,7 +474,11 @@ namespace virtualdesktop_openxr {
             if (!requireNTHandleSharing()) {
                 CHECK_HRCMD(dxgiResource->GetSharedHandle(&textureHandle));
             } else {
-                CHECK_HRCMD(dxgiResource->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &textureHandle));
+                auto& ownedHandle = xrSwapchain.ntTextureHandles[i];
+                if (!ownedHandle) {
+                    CHECK_HRCMD(dxgiResource->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, ownedHandle.put()));
+                }
+                textureHandle = ownedHandle.get();
             }
 
             handles.push_back(textureHandle);
@@ -485,6 +493,18 @@ namespace virtualdesktop_openxr {
                                                     uint32_t count) {
         // Detect whether this is the first call for this swapchain.
         const bool initialized = !xrSwapchain.d3d11Images.empty();
+        bool imported = initialized;
+        auto rollback = MakeScopeGuard([&] {
+            if (!imported) {
+                xrSwapchain.d3d11Images.clear();
+            }
+        });
+        for (uint32_t i = 0; i < count; i++) {
+            if (d3d11Images[i].type != XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR) {
+                return XR_ERROR_VALIDATION_FAILURE;
+            }
+        }
+        xrSwapchain.d3d11Images.reserve(count);
         const bool skipSharing = m_ovrSubmissionDevice == m_d3d11Device;
 
         std::vector<HANDLE> textureHandles;
@@ -509,8 +529,6 @@ namespace virtualdesktop_openxr {
                     } else {
                         CHECK_HRCMD(m_d3d11Device->OpenSharedResource1(
                             textureHandles[i], IID_PPV_ARGS(d3d11Texture.ReleaseAndGetAddressOf())));
-                        // TODO: We do not CloseHandle() if an error occured.
-                        CloseHandle(textureHandles[i]);
                     }
                 } else {
                     d3d11Texture = xrSwapchain.appSwapchain.images[i];
@@ -548,6 +566,7 @@ namespace virtualdesktop_openxr {
                               TLPArg(d3d11Images[i].texture, "Texture"));
         }
 
+        imported = true;
         return XR_SUCCESS;
     }
 
@@ -757,13 +776,14 @@ namespace virtualdesktop_openxr {
     // when resolving MSAA.
     void OpenXrRuntime::ensureSwapchainSliceResources(Swapchain& xrSwapchain, uint32_t slice) const {
         if (xrSwapchain.resolvedSlices.size() <= slice) {
-            if (slice == 0 && xrSwapchain.appSwapchain.ovrSwapchain) {
-                xrSwapchain.resolvedSlices.push_back(xrSwapchain.appSwapchain);
-            } else {
-                xrSwapchain.resolvedSlices.resize(slice + 1);
-            }
+            xrSwapchain.resolvedSlices.resize(slice + 1);
         }
         if (!xrSwapchain.resolvedSlices[slice].ovrSwapchain) {
+            if (slice == 0 && xrSwapchain.appSwapchain.ovrSwapchain) {
+                SwapchainSlice candidate = xrSwapchain.appSwapchain;
+                xrSwapchain.resolvedSlices[slice] = std::move(candidate);
+                return;
+            }
             auto desc = xrSwapchain.ovrDesc;
             // Resolve multisampling.
             desc.SampleCount = 1;
@@ -774,7 +794,7 @@ namespace virtualdesktop_openxr {
     }
 
     void OpenXrRuntime::ensureSwapchainPrecompositorResources(Swapchain& xrSwapchain,
-                                                              const ovrSizei& resolution) const {
+                                                              const ovrSizei& resolution) {
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
             ovrSizei currentResolution{};
             if (xrSwapchain.stereoProjection[eye].ovrSwapchain) {
@@ -787,11 +807,12 @@ namespace virtualdesktop_openxr {
 
             if (!xrSwapchain.stereoProjection[eye].ovrSwapchain || currentResolution.w != resolution.w ||
                 currentResolution.h != resolution.h) {
-                if (xrSwapchain.stereoProjection[eye].ovrSwapchain) {
-                    xrSwapchain.stereoProjection[eye].rtvs.clear();
-                    xrSwapchain.stereoProjection[eye].uavs.clear();
-                    ovr_DestroyTextureSwapChain(m_ovrSession, xrSwapchain.stereoProjection[eye].ovrSwapchain);
-                }
+                SwapchainSlice candidate;
+                auto releaseCandidate = MakeScopeGuard([&] {
+                    if (candidate.ovrSwapchain) {
+                        ovr_DestroyTextureSwapChain(m_ovrSession, candidate.ovrSwapchain);
+                    }
+                });
 
                 DXGI_FORMAT format;
                 {
@@ -811,20 +832,20 @@ namespace virtualdesktop_openxr {
                     }
                     desc.BindFlags = ovrTextureBind_DX_RenderTarget | ovrTextureBind_DX_UnorderedAccess;
                     desc.MiscFlags = ovrTextureMisc_DX_Typeless;
-                    populateSwapchainSlice(xrSwapchain, desc, xrSwapchain.stereoProjection[eye], eye, "Precompositor");
+                    populateSwapchainSlice(xrSwapchain, desc, candidate, eye, "Precompositor");
                 }
 
-                for (uint32_t i = 0; i < xrSwapchain.stereoProjection[eye].images.size(); i++) {
+                for (uint32_t i = 0; i < candidate.images.size(); i++) {
                     {
                         D3D11_RENDER_TARGET_VIEW_DESC desc{};
                         desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
                         desc.Format = format;
                         ComPtr<ID3D11RenderTargetView> rtv;
                         CHECK_HRCMD(m_ovrSubmissionDevice->CreateRenderTargetView(
-                            xrSwapchain.stereoProjection[eye].images[i].Get(), &desc, rtv.ReleaseAndGetAddressOf()));
+                            candidate.images[i].Get(), &desc, rtv.ReleaseAndGetAddressOf()));
                         setDebugName(rtv.Get(),
                                      fmt::format("Precompositor RTV [{}, {}, {}]", eye, i, (void*)&xrSwapchain));
-                        xrSwapchain.stereoProjection[eye].rtvs.push_back(std::move(rtv));
+                        candidate.rtvs.push_back(std::move(rtv));
                     }
                     {
                         D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};
@@ -832,12 +853,19 @@ namespace virtualdesktop_openxr {
                         desc.Format = getUnorderedAccessViewFormat(format);
                         ComPtr<ID3D11UnorderedAccessView> uav;
                         CHECK_HRCMD(m_ovrSubmissionDevice->CreateUnorderedAccessView(
-                            xrSwapchain.stereoProjection[eye].images[i].Get(), &desc, uav.ReleaseAndGetAddressOf()));
+                            candidate.images[i].Get(), &desc, uav.ReleaseAndGetAddressOf()));
                         setDebugName(uav.Get(),
                                      fmt::format("Precompositor UAV [{}, {}, {}]", eye, i, (void*)&xrSwapchain));
-                        xrSwapchain.stereoProjection[eye].uavs.push_back(std::move(uav));
+                        candidate.uavs.push_back(std::move(uav));
                     }
                 }
+                if (xrSwapchain.stereoProjection[eye].ovrSwapchain) {
+                    // Retire queued reads before replacing this generation of output resources.
+                    flushSubmissionContext();
+                    ovr_DestroyTextureSwapChain(m_ovrSession, xrSwapchain.stereoProjection[eye].ovrSwapchain);
+                }
+                xrSwapchain.stereoProjection[eye] = std::move(candidate);
+                releaseCandidate.Deactivate();
             }
         }
     }
@@ -847,27 +875,35 @@ namespace virtualdesktop_openxr {
                                                SwapchainSlice& slice,
                                                uint32_t sliceIndex,
                                                const char* debugName) const {
+        SwapchainSlice candidate;
+        auto releaseCandidate = MakeScopeGuard([&] {
+            if (candidate.ovrSwapchain) {
+                ovr_DestroyTextureSwapChain(m_ovrSession, candidate.ovrSwapchain);
+            }
+        });
         CHECK_OVRCMD(
-            ovr_CreateTextureSwapChainDX(m_ovrSession, m_ovrSubmissionDevice.Get(), &desc, &slice.ovrSwapchain));
+            ovr_CreateTextureSwapChainDX(m_ovrSession, m_ovrSubmissionDevice.Get(), &desc, &candidate.ovrSwapchain));
 
         int count = -1;
-        CHECK_OVRCMD(ovr_GetTextureSwapChainLength(m_ovrSession, slice.ovrSwapchain, &count));
+        CHECK_OVRCMD(ovr_GetTextureSwapChainLength(m_ovrSession, candidate.ovrSwapchain, &count));
         if (count != xrSwapchain.ovrSwapchainLength) {
             throw std::runtime_error("Swapchain image count mismatch");
         }
 
         // Query the textures for the swapchain.
-        slice.images.clear();
+        candidate.images.reserve(count);
         for (int i = 0; i < count; i++) {
             ComPtr<ID3D11Texture2D> texture;
             CHECK_OVRCMD(ovr_GetTextureSwapChainBufferDX(
-                m_ovrSession, slice.ovrSwapchain, i, IID_PPV_ARGS(texture.ReleaseAndGetAddressOf())));
+                m_ovrSession, candidate.ovrSwapchain, i, IID_PPV_ARGS(texture.ReleaseAndGetAddressOf())));
             setDebugName(
                 texture.Get(),
                 fmt::format(std::string(debugName) + " Texture[{}, {}, {}]", sliceIndex, i, (void*)&xrSwapchain));
 
-            slice.images.push_back(std::move(texture));
+            candidate.images.push_back(std::move(texture));
         }
+        slice = std::move(candidate);
+        releaseCandidate.Deactivate();
     }
 
     // Flush any pending work in the app context.

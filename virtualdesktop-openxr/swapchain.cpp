@@ -389,6 +389,11 @@ namespace virtualdesktop_openxr {
         }
 
         ovrTextureSwapChain ovrSwapchain{};
+        auto releaseCandidate = MakeScopeGuard([&] {
+            if (ovrSwapchain) {
+                ovr_DestroyTextureSwapChain(m_ovrSession, ovrSwapchain);
+            }
+        });
         int length = 0;
         // If and only if the swapchain images are directly usable by LibOVR, we create an OVR swapchain. Otherwise, we
         // will create images ourselves.
@@ -411,21 +416,22 @@ namespace virtualdesktop_openxr {
         }
 
         // Create the internal struct.
-        Swapchain& xrSwapchain = *new Swapchain;
+        auto candidate = std::make_unique<Swapchain>();
+        Swapchain& xrSwapchain = *candidate;
         xrSwapchain.appSwapchain.ovrSwapchain = ovrSwapchain;
         xrSwapchain.ovrSwapchainLength = length;
         xrSwapchain.ovrDesc = desc;
         xrSwapchain.xrDesc = *createInfo;
         xrSwapchain.dxgiFormatForSubmission = dxgiFormatForSubmission;
 
-        *swapchain = (XrSwapchain)&xrSwapchain;
-
         // Maintain a list of known swapchains for validation and cleanup.
         {
             std::unique_lock lock(m_swapchainsMutex);
 
-            m_swapchains.insert(*swapchain);
+            m_swapchains.insert((XrSwapchain)&xrSwapchain);
         }
+        *swapchain = (XrSwapchain)candidate.release();
+        releaseCandidate.Deactivate();
 
         TraceLoggingWrite(g_traceProvider, "xrCreateSwapchain", TLXArg(*swapchain, "Swapchain"));
 
@@ -459,8 +465,9 @@ namespace virtualdesktop_openxr {
 
         Swapchain& xrSwapchain = *(Swapchain*)swapchain;
 
-        if (!xrSwapchain.resolvedSlices.empty() && xrSwapchain.appSwapchain.ovrSwapchain &&
-            xrSwapchain.resolvedSlices[0].ovrSwapchain != xrSwapchain.appSwapchain.ovrSwapchain) {
+        if (xrSwapchain.appSwapchain.ovrSwapchain &&
+            (xrSwapchain.resolvedSlices.empty() ||
+             xrSwapchain.resolvedSlices[0].ovrSwapchain != xrSwapchain.appSwapchain.ovrSwapchain)) {
             ovr_DestroyTextureSwapChain(m_ovrSession, xrSwapchain.appSwapchain.ovrSwapchain);
         }
         while (!xrSwapchain.resolvedSlices.empty()) {

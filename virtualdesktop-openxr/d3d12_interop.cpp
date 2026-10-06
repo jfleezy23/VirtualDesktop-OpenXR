@@ -163,6 +163,22 @@ namespace virtualdesktop_openxr {
                                                     uint32_t count) {
         // Detect whether this is the first call for this swapchain.
         const bool initialized = !xrSwapchain.d3d12Images.empty();
+        bool imported = initialized;
+        bool recording = false;
+        auto rollback = MakeScopeGuard([&] {
+            if (!imported) {
+                if (recording) {
+                    m_d3d12CommandList->Close();
+                }
+                xrSwapchain.d3d12Images.clear();
+            }
+        });
+        for (uint32_t i = 0; i < count; i++) {
+            if (d3d12Images[i].type != XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR) {
+                return XR_ERROR_VALIDATION_FAILURE;
+            }
+        }
+        xrSwapchain.d3d12Images.reserve(count);
 
         const bool needTransition = xrSwapchain.xrDesc.usageFlags & (XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
                                                                      XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
@@ -179,6 +195,7 @@ namespace virtualdesktop_openxr {
 
                 // Prepare to execute barriers.
                 CHECK_HRCMD(m_d3d12CommandList->Reset(m_d3d12CommandAllocator.Get(), nullptr));
+                recording = true;
             }
         }
 
@@ -238,10 +255,12 @@ namespace virtualdesktop_openxr {
         if (!initialized && needTransition) {
             // Transition all images to the desired state.
             CHECK_HRCMD(m_d3d12CommandList->Close());
+            recording = false;
             m_d3d12CommandQueue->ExecuteCommandLists(
                 1, reinterpret_cast<ID3D12CommandList**>(m_d3d12CommandList.GetAddressOf()));
         }
 
+        imported = true;
         return XR_SUCCESS;
     }
 
