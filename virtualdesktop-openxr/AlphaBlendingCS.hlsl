@@ -38,7 +38,7 @@ RWTexture2D<unorm float4> inoutTexture : register(u0);
 [numthreads(32, 32, 1)]
 void main(uint2 pos : SV_DispatchThreadID)
 {
-    if (any(pos > dimension))
+    if (any(pos >= dimension))
     {
         return;
     }

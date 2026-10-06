@@ -38,10 +38,14 @@ namespace virtualdesktop_openxr {
     struct AlphaBlendingCSConstants {
         alignas(8) XrOffset2Di offset;
         alignas(8) XrExtent2Di dimension;
-        alignas(4) bool ignoreAlpha;
-        alignas(4) bool isPremultipliedAlpha;
-        alignas(4) bool isSRGB;
+        uint32_t ignoreAlpha;
+        uint32_t isPremultipliedAlpha;
+        uint32_t isSRGB;
     };
+    static_assert(offsetof(AlphaBlendingCSConstants, ignoreAlpha) == 16);
+    static_assert(offsetof(AlphaBlendingCSConstants, isPremultipliedAlpha) == 20);
+    static_assert(offsetof(AlphaBlendingCSConstants, isSRGB) == 24);
+    static_assert(sizeof(AlphaBlendingCSConstants) == 32);
 
     // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrWaitFrame
     XrResult OpenXrRuntime::xrWaitFrame(XrSession session,
@@ -1089,7 +1093,7 @@ namespace virtualdesktop_openxr {
                 constants.dimension = viewport.extent;
                 constants.ignoreAlpha = needClearAlpha;
                 constants.isPremultipliedAlpha = !needPremultiplyAlpha;
-                constants.isSRGB = isSRGBFormat((DXGI_FORMAT)xrSwapchain.xrDesc.format);
+                constants.isSRGB = isSRGBFormat(xrSwapchain.dxgiFormatForSubmission);
 
                 D3D11_MAPPED_SUBRESOURCE mappedResources;
                 CHECK_HRCMD(m_ovrSubmissionContext->Map(
