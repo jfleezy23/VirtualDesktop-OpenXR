@@ -1030,24 +1030,26 @@ namespace virtualdesktop_openxr {
         // TODO: Try to reduce contention here.
         std::unique_lock lock(m_actionsAndSpacesMutex);
 
+        // A rejected activation request must preserve the previous successful sync.
+        for (uint32_t i = 0; i < syncInfo->countActiveActionSets; i++) {
+            const auto& activeSet = syncInfo->activeActionSets[i];
+            if (!m_attachedActionSets.count(activeSet.actionSet)) {
+                return XR_ERROR_ACTIONSET_NOT_ATTACHED;
+            }
+            if (activeSet.subactionPath != XR_NULL_PATH &&
+                !((ActionSet*)activeSet.actionSet)->subactionPaths.count(activeSet.subactionPath)) {
+                return XR_ERROR_PATH_UNSUPPORTED;
+            }
+        }
+
         m_activeActionSets.clear();
         uint32_t maxPriority = UINT32_MAX;
         uint32_t minPriority = 0;
         bool doSide[xr::Side::Count] = {false, false};
         for (uint32_t i = 0; i < syncInfo->countActiveActionSets; i++) {
-            if (!m_attachedActionSets.count(syncInfo->activeActionSets[i].actionSet)) {
-                return XR_ERROR_ACTIONSET_NOT_ATTACHED;
-            }
-
             if (syncInfo->activeActionSets[i].subactionPath == XR_NULL_PATH) {
                 doSide[xr::Side::Left] = doSide[xr::Side::Right] = true;
             } else {
-                const ActionSet& xrActionSet = *(ActionSet*)syncInfo->activeActionSets[i].actionSet;
-
-                if (!xrActionSet.subactionPaths.count(syncInfo->activeActionSets[i].subactionPath)) {
-                    return XR_ERROR_PATH_UNSUPPORTED;
-                }
-
                 const int side = getActionSide(getXrPath(syncInfo->activeActionSets[i].subactionPath));
                 if (side == xr::Side::Left || side == xr::Side::Right) {
                     doSide[side] = true;
