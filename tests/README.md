@@ -2,6 +2,10 @@
 
 These tests require Windows, the MSVC x64 tools, and a D3D12-capable GPU.
 
+`build-runtime-redirect-regression.cmd` builds a CPU-only actual-DLL negotiation test and isolated success/failure targets. Run `bin/tests/redirect/runtime_redirect_regression.exe <bundle-runtime.dll> bin/tests/redirect/vdxr_redirect_failure_test.dll failure`, then the same command with `vdxr_redirect_success_test.dll success`. A read-only registry detour supplies the test redirect: no registry value, VR instance, session, or graphics device is created. Failed negotiation must unload the target and preserve its error; successful negotiation must retain callable target dispatch.
+
+`build-module-failure-regression.cmd` also builds `runtime_path_regression.exe`. Pass an isolated copied runtime's fully qualified Windows path longer than MAX_PATH, using an extended path when needed. Actual negotiation must return initialization failure with no dispatch pointer, rather than overflowing its filename buffer. This checks safe rejection, not general long-path support.
+
 `run-fence-regression.cmd` compiles and runs the production CommandContext against two concurrent GPU queues. Each queue's Flush must wait for its own completion. The original named-event implementation returned prematurely on the first attempt; the unnamed-event implementation passes 32 attempts.
 
 `build-openxr-regression.cmd` builds a black-box OpenXR application. Pass an OpenXR loader DLL and one case: `restart`, `instance-restart`, `transitions`, `pending-resize`, `depth-offset`, `depth-scale`, `unequal`, or `crop-depth-stress`. An optional build-script argument selects an isolated output directory.

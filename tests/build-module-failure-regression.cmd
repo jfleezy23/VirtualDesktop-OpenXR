@@ -23,4 +23,5 @@ cl.exe /nologo /std:c++17 /EHsc /W4 /LD /DNR_TEST_FOREIGN_IMPORT /I"external\DLS
 if errorlevel 1 exit /b %errorlevel%
 cl.exe /nologo /std:c++17 /EHsc /W4 /I"external\OpenXR-SDK\include" /I"packages\Detours.4.0.1\lib\native\include" tests\nr_module_failure_regression.cpp /Fe:bin\tests\nr_module_failure_regression.exe /Fo:bin\tests\nr_module_failure_regression.obj /link d3d11.lib dxgi.lib advapi32.lib "packages\Detours.4.0.1\lib\native\libs\x64\detours.lib"
 if errorlevel 1 exit /b %errorlevel%
+cl.exe /nologo /std:c++17 /EHsc /W4 /I"external\OpenXR-SDK\include" tests\runtime_path_regression.cpp /Fe:bin\tests\runtime_path_regression.exe /Fo:bin\tests\runtime_path_regression.obj
 exit /b %errorlevel%
