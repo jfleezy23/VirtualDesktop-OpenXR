@@ -22,6 +22,8 @@
 
 #pragma once
 
+#include <exception>
+
 #include "pch.h"
 
 #include "BodyState.h"

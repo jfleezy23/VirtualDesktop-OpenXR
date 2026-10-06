@@ -211,10 +211,13 @@ namespace virtualdesktop_openxr {
             m_viewSpace->referenceType = XR_REFERENCE_SPACE_TYPE_VIEW;
             m_viewSpace->poseInSpace = Pose::Identity();
 
-            m_sessionState = XR_SESSION_STATE_IDLE;
-            updateSessionState(true);
-            m_sessionCreated = true;
-            *session = (XrSession)1;
+            {
+                std::unique_lock frameLock(m_frameMutex);
+                m_sessionState = XR_SESSION_STATE_IDLE;
+                updateSessionState(true);
+                m_sessionCreated = true;
+                *session = (XrSession)1;
+            }
 
             TraceLoggingWrite(g_traceProvider, "xrCreateSession", TLXArg(*session, "Session"));
 
@@ -247,7 +250,7 @@ namespace virtualdesktop_openxr {
 
     // Also used after a partially initialized CreateSession, before m_sessionCreated has been published.
     void OpenXrRuntime::cleanupSessionResources() {
-        if (m_useAsyncSubmission && !m_needStartAsyncSubmissionThread) {
+        if (m_asyncSubmissionThread.joinable()) {
             {
                 std::unique_lock lock(m_asyncSubmissionMutex);
 
@@ -328,14 +331,20 @@ namespace virtualdesktop_openxr {
         cleanupD3D12();
         cleanupD3D11();
         cleanupSubmissionDevice();
-        m_sessionState = XR_SESSION_STATE_UNKNOWN;
-        m_sessionEventQueue.clear();
-        m_visibilityMaskDirty.store(0, std::memory_order_release);
-        m_sessionCreated = false;
-        m_sessionBegun = false;
-        m_sessionLossPending = false;
-        m_sessionStopping = false;
-        m_sessionExiting = false;
+        {
+            std::unique_lock frameLock(m_frameMutex);
+            m_sessionState = XR_SESSION_STATE_UNKNOWN;
+            m_sessionEventQueue.clear();
+            m_currentInteractionProfileDirty = false;
+            m_shouldRecenter = 0;
+            m_recenterTime = 0;
+            m_visibilityMaskDirty.store(0, std::memory_order_release);
+            m_sessionCreated = false;
+            m_sessionBegun = false;
+            m_sessionLossPending = false;
+            m_sessionStopping = false;
+            m_sessionExiting = false;
+        }
 
         // Workaround: OVR ties the last use D3D device to the OVR session, and therefore we must teardown the previous
         // OVR session to clear that state.
@@ -358,6 +367,7 @@ namespace virtualdesktop_openxr {
             TLXArg(session, "Session"),
             TLArg(xr::ToCString(beginInfo->primaryViewConfigurationType), "PrimaryViewConfigurationType"));
 
+        std::unique_lock frameLock(m_frameMutex);
         if (!m_sessionCreated || session != (XrSession)1) {
             return XR_ERROR_HANDLE_INVALID;
         }
@@ -404,6 +414,8 @@ namespace virtualdesktop_openxr {
     XrResult OpenXrRuntime::xrEndSession(XrSession session) {
         TraceLoggingWrite(g_traceProvider, "xrEndSession", TLXArg(session, "Session"));
 
+        std::unique_lock frameLock(m_frameMutex);
+
         if (!m_sessionCreated || session != (XrSession)1) {
             return XR_ERROR_HANDLE_INVALID;
         }
@@ -426,6 +438,8 @@ namespace virtualdesktop_openxr {
     XrResult OpenXrRuntime::xrRequestExitSession(XrSession session) {
         TraceLoggingWrite(g_traceProvider, "xrRequestExitSession", TLXArg(session, "Session"));
 
+        std::unique_lock frameLock(m_frameMutex);
+
         if (!m_sessionCreated || session != (XrSession)1) {
             return XR_ERROR_HANDLE_INVALID;
         }
@@ -443,11 +457,11 @@ namespace virtualdesktop_openxr {
     // Update the session state machine.
     void OpenXrRuntime::updateSessionState(bool forceSendEvent) {
         if (forceSendEvent) {
-            m_sessionEventQueue.push_back(std::make_pair(m_sessionState, ovr_GetTimeInSeconds()));
+            m_sessionEventQueue.push_back(std::make_pair(m_sessionState.load(), ovr_GetTimeInSeconds()));
         }
 
         while (true) {
-            const auto oldSessionState = m_sessionState;
+            const auto oldSessionState = m_sessionState.load();
             switch (m_sessionState) {
             case XR_SESSION_STATE_IDLE:
                 if (m_sessionExiting) {
@@ -493,7 +507,7 @@ namespace virtualdesktop_openxr {
                                   TLArg(xr::ToCString(oldSessionState), "From"),
                                   TLArg(xr::ToCString(m_sessionState), "To"));
 
-                m_sessionEventQueue.push_back(std::make_pair(m_sessionState, ovr_GetTimeInSeconds()));
+                m_sessionEventQueue.push_back(std::make_pair(m_sessionState.load(), ovr_GetTimeInSeconds()));
             } else {
                 break;
             }

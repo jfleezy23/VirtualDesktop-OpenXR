@@ -608,7 +608,7 @@ namespace virtualdesktop_openxr {
                                       XrRect2Di viewport);
         void ensurePreprocessResources();
         void asyncSubmissionThread();
-        void waitForAsyncSubmissionIdle(bool doRunningStart = false);
+        void waitForAsyncSubmissionIdle(bool doRunningStart = false, double predictedFrameDuration = 0.);
 
         // d3d11_native.cpp
         XrResult initializeD3D11(const XrGraphicsBindingD3D11KHR& d3dBindings);
@@ -771,10 +771,10 @@ namespace virtualdesktop_openxr {
         ComPtr<IDXGISwapChain1> m_dxgiSwapchain;
         bool m_sessionCreated{false};
         bool m_sessionResourcesRequireCleanup{false};
-        XrSessionState m_sessionState{XR_SESSION_STATE_UNKNOWN};
+        std::atomic<XrSessionState> m_sessionState{XR_SESSION_STATE_UNKNOWN};
         std::deque<std::pair<XrSessionState, double>> m_sessionEventQueue;
         ovrSessionStatus m_hmdStatus{};
-        bool m_sessionBegun{false};
+        std::atomic<bool> m_sessionBegun{false};
         bool m_sessionLossPending{false};
         bool m_sessionStopping{false};
         bool m_sessionExiting{false};
@@ -809,7 +809,7 @@ namespace virtualdesktop_openxr {
         bool m_quirkedControllerPoses{false};
         std::string m_localizedControllerType[xr::Side::Count];
         XrPath m_currentInteractionProfile[xr::Side::Count]{XR_NULL_PATH, XR_NULL_PATH};
-        bool m_currentInteractionProfileDirty{false};
+        std::atomic<bool> m_currentInteractionProfileDirty{false};
         bool m_hasEyeTrackerBindings{false};
         bool m_hasViveTrackerBindings{false};
         Haptic m_currentVibration[xr::Side::Count];
@@ -847,7 +847,11 @@ namespace virtualdesktop_openxr {
         // Async submission thread.
         bool m_useAsyncSubmission{false};
         bool m_needStartAsyncSubmissionThread{false};
+        // Worker readiness, frame ID, error, termination and timestamp share this mutex.
         bool m_terminateAsyncThread{false};
+        bool m_asyncSubmissionReady{false};
+        long long m_asyncNextFrameId{0};
+        std::exception_ptr m_asyncSubmissionError;
         std::thread m_asyncSubmissionThread;
         std::mutex m_asyncSubmissionMutex;
         std::condition_variable m_asyncSubmissionCondVar;

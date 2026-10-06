@@ -481,6 +481,15 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_HANDLE_INVALID;
         }
 
+        // Session state transitions and their queue share the frame mutex.
+        std::unique_lock frameLock(m_frameMutex);
+        if (!m_sessionCreated) {
+            m_currentInteractionProfileDirty = false;
+            m_shouldRecenter = 0;
+            m_visibilityMaskDirty = 0;
+            return XR_EVENT_UNAVAILABLE;
+        }
+
         // Generate session events.
         updateSessionState();
         if (!m_sessionEventQueue.empty()) {
@@ -502,7 +511,7 @@ namespace virtualdesktop_openxr {
             return XR_SUCCESS;
         }
 
-        if (m_currentInteractionProfileDirty) {
+        if (m_currentInteractionProfileDirty.exchange(false)) {
             XrEventDataInteractionProfileChanged* const buffer =
                 reinterpret_cast<XrEventDataInteractionProfileChanged*>(eventData);
             buffer->type = XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED;
@@ -513,8 +522,6 @@ namespace virtualdesktop_openxr {
                               "xrPollEvent",
                               TLArg("InteractionProfileChanged", "Type"),
                               TLXArg(buffer->session, "Session"));
-
-            m_currentInteractionProfileDirty = false;
 
             return XR_SUCCESS;
         }

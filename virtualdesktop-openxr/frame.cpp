@@ -62,42 +62,6 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_SESSION_NOT_RUNNING;
         }
 
-        // Check for user presence and exit conditions.
-        CHECK_OVRCMD(ovr_GetSessionStatus(m_ovrSession, &m_hmdStatus));
-        TraceLoggingWrite(g_traceProvider,
-                          "OVR_SessionStatus",
-                          TLArg(!!m_hmdStatus.HmdPresent, "HmdPresent"),
-                          TLArg(!!m_hmdStatus.HmdMounted, "HmdMounted"),
-                          TLArg(!!m_hmdStatus.IsVisible, "IsVisible"),
-                          TLArg(!!m_hmdStatus.DisplayLost, "DisplayLost"),
-                          TLArg(!!m_hmdStatus.ShouldRecenter, "ShouldRecenter"),
-                          TLArg(!!m_hmdStatus.ShouldQuit, "ShouldQuit"));
-        if (!m_sessionLossPending) {
-            m_sessionLossPending = !m_hmdStatus.HmdPresent || m_hmdStatus.DisplayLost || m_hmdStatus.ShouldQuit;
-        }
-        if (!m_shouldRecenter && m_hmdStatus.ShouldRecenter) {
-            // We will send one event for each world-locked reference space (LOCAL, STAGE and LOCAL_FLOOR_EXT).
-            m_shouldRecenter = !(has_XR_EXT_local_floor || m_apiMinor >= 1) ? 2 : 3;
-            m_recenterTime = ovrTimeToXrTime(ovr_GetTimeInSeconds());
-
-            ovr_ClearShouldRecenterFlag(m_ovrSession);
-        }
-        updateSessionState();
-
-        // Check for changes in display refresh rate.
-        const ovrHmdDesc hmdInfo = ovr_GetHmdDesc(m_ovrSession);
-        TraceLoggingWrite(g_traceProvider, "OVR_HmdDesc", TLArg(hmdInfo.DisplayRefreshRate, "DisplayRefreshRate"));
-        if (hmdInfo.DisplayRefreshRate != m_displayRefreshRate) {
-            m_displayRefreshRateChanged = m_displayRefreshRate;
-            m_displayRefreshRate = hmdInfo.DisplayRefreshRate;
-            m_idealFrameDuration = m_predictedFrameDuration = 1.0 / hmdInfo.DisplayRefreshRate;
-        }
-
-        frameState->shouldRender =
-            (!m_isHeadless && !m_sessionStopping && !m_sessionExiting && !m_sessionLossPending && m_hmdStatus.IsVisible)
-                ? XR_TRUE
-                : XR_FALSE;
-
         // Critical section.
         {
             CpuTimer waitTimer;
@@ -106,6 +70,42 @@ namespace virtualdesktop_openxr {
             }
 
             std::unique_lock lock(m_frameMutex);
+
+            // Check for user presence and exit conditions.
+            CHECK_OVRCMD(ovr_GetSessionStatus(m_ovrSession, &m_hmdStatus));
+            TraceLoggingWrite(g_traceProvider,
+                              "OVR_SessionStatus",
+                              TLArg(!!m_hmdStatus.HmdPresent, "HmdPresent"),
+                              TLArg(!!m_hmdStatus.HmdMounted, "HmdMounted"),
+                              TLArg(!!m_hmdStatus.IsVisible, "IsVisible"),
+                              TLArg(!!m_hmdStatus.DisplayLost, "DisplayLost"),
+                              TLArg(!!m_hmdStatus.ShouldRecenter, "ShouldRecenter"),
+                              TLArg(!!m_hmdStatus.ShouldQuit, "ShouldQuit"));
+            if (!m_sessionLossPending) {
+                m_sessionLossPending = !m_hmdStatus.HmdPresent || m_hmdStatus.DisplayLost || m_hmdStatus.ShouldQuit;
+            }
+            if (!m_shouldRecenter && m_hmdStatus.ShouldRecenter) {
+                // We will send one event for each world-locked reference space (LOCAL, STAGE and LOCAL_FLOOR_EXT).
+                m_shouldRecenter = !(has_XR_EXT_local_floor || m_apiMinor >= 1) ? 2 : 3;
+                m_recenterTime = ovrTimeToXrTime(ovr_GetTimeInSeconds());
+
+                ovr_ClearShouldRecenterFlag(m_ovrSession);
+            }
+            updateSessionState();
+
+            // Check for changes in display refresh rate.
+            const ovrHmdDesc hmdInfo = ovr_GetHmdDesc(m_ovrSession);
+            TraceLoggingWrite(g_traceProvider, "OVR_HmdDesc", TLArg(hmdInfo.DisplayRefreshRate, "DisplayRefreshRate"));
+            if (hmdInfo.DisplayRefreshRate != m_displayRefreshRate) {
+                m_displayRefreshRateChanged = m_displayRefreshRate;
+                m_displayRefreshRate = hmdInfo.DisplayRefreshRate;
+                m_idealFrameDuration = m_predictedFrameDuration = 1.0 / hmdInfo.DisplayRefreshRate;
+            }
+
+            frameState->shouldRender =
+                (!m_isHeadless && !m_sessionStopping && !m_sessionExiting && !m_sessionLossPending && m_hmdStatus.IsVisible)
+                    ? XR_TRUE
+                    : XR_FALSE;
 
             m_frameTimerApp.stop();
             m_lastCpuFrameTimeUs = m_frameTimerApp.query();
@@ -131,7 +131,7 @@ namespace virtualdesktop_openxr {
 
             // Workaround: OVR cannot wait for a frame without having a device. If no swapchain was created up to this
             // point, we must create one to initialize OVR.
-            if (m_frameWaited == 0) {
+            if (m_frameWaited == 0 && !m_headlessSwapchain) {
                 // Make as small as possible of a memory footprint...
                 ovrTextureSwapChainDesc desc{};
                 desc.Type = ovrTexture_2D;
@@ -147,7 +147,15 @@ namespace virtualdesktop_openxr {
             }
 
             if (m_needStartAsyncSubmissionThread) {
-                m_terminateAsyncThread = false;
+                {
+                    std::unique_lock submissionLock(m_asyncSubmissionMutex);
+                    m_terminateAsyncThread = false;
+                    m_asyncSubmissionReady = false;
+                    m_asyncNextFrameId = m_frameCompleted;
+                    m_asyncSubmissionError = nullptr;
+                    m_lastWaitToBeginFrameTime = {};
+                    m_layersForAsyncSubmission.clear();
+                }
                 m_asyncSubmissionThread = std::thread([&]() { asyncSubmissionThread(); });
                 m_needStartAsyncSubmissionThread = false;
             }
@@ -163,7 +171,11 @@ namespace virtualdesktop_openxr {
                 TraceLoggingWriteStop(waitToBeginFrame, "OVR_WaitToBeginFrame");
             } else {
                 if (!m_useDeferredFrameWait.load(std::memory_order_relaxed)) {
-                    waitForAsyncSubmissionIdle(m_useRunningStart.load(std::memory_order_relaxed));
+                    const bool doRunningStart = m_useRunningStart.load(std::memory_order_relaxed);
+                    const double predictedFrameDuration = m_predictedFrameDuration;
+                    lock.unlock();
+                    waitForAsyncSubmissionIdle(doRunningStart, predictedFrameDuration);
+                    lock.lock();
                 }
                 TraceLoggingWrite(g_traceProvider, "AcquiredFrame", TLArg(ovrFrameId, "FrameId"));
             }
@@ -387,7 +399,10 @@ namespace virtualdesktop_openxr {
 
             // Make sure the previous frame finished submission.
             if (m_useAsyncSubmission) {
+                // Polling and exit requests must still progress while the backend is waiting.
+                lock2.unlock();
                 waitForAsyncSubmissionIdle();
+                lock2.lock();
 
                 // From this point, we know that the asynchronous thread is waiting, and we may use the submission
                 // context.
@@ -579,6 +594,8 @@ namespace virtualdesktop_openxr {
 
                 std::unique_lock lock(m_asyncSubmissionMutex);
                 m_layersForAsyncSubmission = layersAllocator;
+                m_asyncNextFrameId = m_frameBegun;
+                m_asyncSubmissionReady = false;
 
                 m_asyncSubmissionCondVar.notify_all();
 
@@ -1133,95 +1150,126 @@ namespace virtualdesktop_openxr {
         TraceLocalActivity(local);
         TraceLoggingWriteStart(local, "AsyncSubmissionThread");
 
-        SetThreadPriority(GetCurrentThread(),
-                          getSetting("async_submission_priority").value_or(THREAD_PRIORITY_TIME_CRITICAL));
+        try {
+            SetThreadPriority(GetCurrentThread(),
+                              getSetting("async_submission_priority").value_or(THREAD_PRIORITY_TIME_CRITICAL));
 
-        std::optional<long long> lastWaitedFrameId;
-        while (true) {
-            const long long ovrFrameId = m_frameCompleted;
-            {
-                TraceLocalActivity(waitToBeginFrame);
-                TraceLoggingWriteStart(waitToBeginFrame, "OVR_WaitToBeginFrame", TLArg(ovrFrameId, "FrameId"));
-                const auto result = ovr_WaitToBeginFrame(m_ovrSession, ovrFrameId);
-                TraceLoggingWriteStop(waitToBeginFrame, "OVR_WaitToBeginFrame", TLArg((int)result, "Result"));
-                if (result == ovrError_Timeout) {
-                    ErrorLog("Timeout in async submission thread! This is normal if you have a debugger attached.\n");
-                } else if (result == ovrError_NotInitialized) {
-                    ErrorLog("Not initialized in async sybmission thread! Retrying...\n");
-                    std::this_thread::sleep_for(1ms);
-                    continue;
-                } else {
-                    CHECK_OVRCMD(result);
+            while (true) {
+                long long ovrFrameId;
+                {
+                    std::unique_lock lock(m_asyncSubmissionMutex);
+                    if (m_terminateAsyncThread) {
+                        break;
+                    }
+                    ovrFrameId = m_asyncNextFrameId;
                 }
-            }
-            m_lastWaitToBeginFrameTime = std::chrono::high_resolution_clock::now();
+                {
+                    TraceLocalActivity(waitToBeginFrame);
+                    TraceLoggingWriteStart(waitToBeginFrame, "OVR_WaitToBeginFrame", TLArg(ovrFrameId, "FrameId"));
+                    const auto result = ovr_WaitToBeginFrame(m_ovrSession, ovrFrameId);
+                    TraceLoggingWriteStop(waitToBeginFrame, "OVR_WaitToBeginFrame", TLArg((int)result, "Result"));
+                    if (result == ovrError_Timeout) {
+                        ErrorLog("Timeout in async submission thread! This is normal if you have a debugger attached.\n");
+                    } else if (result == ovrError_NotInitialized) {
+                        ErrorLog("Not initialized in async sybmission thread! Retrying...\n");
+                        std::this_thread::sleep_for(1ms);
+                        continue;
+                    } else {
+                        CHECK_OVRCMD(result);
+                    }
+                }
+                const auto waitCompletedTime = std::chrono::high_resolution_clock::now();
 
-            {
-                TraceLocalActivity(beginFrame);
-                TraceLoggingWriteStart(beginFrame, "OVR_BeginFrame", TLArg(ovrFrameId, "FrameId"));
-                CHECK_OVRCMD(ovr_BeginFrame(m_ovrSession, ovrFrameId));
-                TraceLoggingWriteStop(beginFrame, "OVR_BeginFrame");
-            }
-
-            {
-                std::unique_lock lock(m_asyncSubmissionMutex);
-
-                // Mark us as ready to accept a new frame.
-                m_layersForAsyncSubmission.clear();
-                m_asyncSubmissionCondVar.notify_all();
-
-                // Wait for the frame.
-                m_asyncSubmissionCondVar.wait(
-                    lock, [&] { return m_terminateAsyncThread || !m_layersForAsyncSubmission.empty(); });
-            }
-            if (m_terminateAsyncThread) {
-                break;
-            }
-
-            {
-                std::vector<ovrLayerHeader*> layers;
-                for (auto& layer : m_layersForAsyncSubmission) {
-                    layers.push_back(&layer.Header);
-
-                    if (layers.size() == ovrMaxLayerCount) {
-                        ErrorLog("Too many layers in this frame (%u)\n", m_layersForAsyncSubmission.size());
+                {
+                    std::unique_lock lock(m_asyncSubmissionMutex);
+                    if (m_terminateAsyncThread) {
                         break;
                     }
                 }
 
-                TraceLocalActivity(endFrame);
-                TraceLoggingWriteStart(
-                    endFrame, "OVR_EndFrame", TLArg(ovrFrameId, "FrameId"), TLArg(layers.size(), "NumLayers"));
-                ovrViewScaleDesc scaleDesc{};
-                scaleDesc.HmdToEyePose[xr::StereoView::Left] = m_cachedEyeInfo[xr::StereoView::Left].HmdToEyePose;
-                scaleDesc.HmdToEyePose[xr::StereoView::Right] = m_cachedEyeInfo[xr::StereoView::Right].HmdToEyePose;
-                scaleDesc.HmdSpaceToWorldScaleInMeters = 1.f;
-                CHECK_OVRCMD(
-                    ovr_EndFrame(m_ovrSession, ovrFrameId, &scaleDesc, layers.data(), (unsigned int)layers.size()));
-                TraceLoggingWriteStop(endFrame, "OVR_EndFrame");
+                {
+                    TraceLocalActivity(beginFrame);
+                    TraceLoggingWriteStart(beginFrame, "OVR_BeginFrame", TLArg(ovrFrameId, "FrameId"));
+                    CHECK_OVRCMD(ovr_BeginFrame(m_ovrSession, ovrFrameId));
+                    TraceLoggingWriteStop(beginFrame, "OVR_BeginFrame");
+                }
+
+                {
+                    std::unique_lock lock(m_asyncSubmissionMutex);
+
+                    // Mark us as ready to accept a new frame.
+                    m_layersForAsyncSubmission.clear();
+                    m_lastWaitToBeginFrameTime = waitCompletedTime;
+                    m_asyncSubmissionReady = true;
+                    m_asyncSubmissionCondVar.notify_all();
+
+                    // Wait for the frame.
+                    m_asyncSubmissionCondVar.wait(
+                        lock, [&] { return m_terminateAsyncThread || !m_layersForAsyncSubmission.empty(); });
+                    if (m_terminateAsyncThread) {
+                        break;
+                    }
+                }
+
+                {
+                    std::vector<ovrLayerHeader*> layers;
+                    for (auto& layer : m_layersForAsyncSubmission) {
+                        layers.push_back(&layer.Header);
+
+                        if (layers.size() == ovrMaxLayerCount) {
+                            if (m_layersForAsyncSubmission.size() > ovrMaxLayerCount) {
+                                ErrorLog("Too many layers in this frame (%zu)\n", m_layersForAsyncSubmission.size());
+                            }
+                            break;
+                        }
+                    }
+
+                    TraceLocalActivity(endFrame);
+                    TraceLoggingWriteStart(
+                        endFrame, "OVR_EndFrame", TLArg(ovrFrameId, "FrameId"), TLArg(layers.size(), "NumLayers"));
+                    ovrViewScaleDesc scaleDesc{};
+                    scaleDesc.HmdToEyePose[xr::StereoView::Left] = m_cachedEyeInfo[xr::StereoView::Left].HmdToEyePose;
+                    scaleDesc.HmdToEyePose[xr::StereoView::Right] = m_cachedEyeInfo[xr::StereoView::Right].HmdToEyePose;
+                    scaleDesc.HmdSpaceToWorldScaleInMeters = 1.f;
+                    CHECK_OVRCMD(
+                        ovr_EndFrame(m_ovrSession, ovrFrameId, &scaleDesc, layers.data(), (unsigned int)layers.size()));
+                    TraceLoggingWriteStop(endFrame, "OVR_EndFrame");
+                }
             }
+        } catch (...) {
+            std::unique_lock lock(m_asyncSubmissionMutex);
+            m_asyncSubmissionError = std::current_exception();
+            m_asyncSubmissionReady = false;
+            m_asyncSubmissionCondVar.notify_all();
         }
 
         TraceLoggingWriteStop(local, "AsyncSubmissionThread");
     }
 
-    void OpenXrRuntime::waitForAsyncSubmissionIdle(bool doRunningStart) {
+    void OpenXrRuntime::waitForAsyncSubmissionIdle(bool doRunningStart, double predictedFrameDuration) {
         TraceLocalActivity(waitToBeginFrame);
         TraceLoggingWriteStart(waitToBeginFrame, "WaitForAsyncSubmissionIdle", TLArg(doRunningStart, "DoRunningStart"));
 
         std::unique_lock lock(m_asyncSubmissionMutex);
 
         bool wokeUpEarly = false;
-        if (doRunningStart) {
+        const auto ready = [&] {
+            return m_asyncSubmissionReady || m_terminateAsyncThread || m_asyncSubmissionError;
+        };
+        if (doRunningStart && m_lastWaitToBeginFrameTime != std::chrono::high_resolution_clock::time_point{}) {
             constexpr double RunningStart = 0.002;
             const auto timeout =
-                m_lastWaitToBeginFrameTime + std::chrono::duration<double>(m_predictedFrameDuration - RunningStart);
+                m_lastWaitToBeginFrameTime + std::chrono::duration<double>(predictedFrameDuration - RunningStart);
 
             wokeUpEarly =
-                !m_asyncSubmissionCondVar.wait_until(lock, timeout, [&] { return m_layersForAsyncSubmission.empty(); });
+                !m_asyncSubmissionCondVar.wait_until(lock, timeout, ready);
         } else {
-            m_asyncSubmissionCondVar.wait(lock, [&] { return m_layersForAsyncSubmission.empty(); });
+            m_asyncSubmissionCondVar.wait(lock, ready);
         }
+        if (m_asyncSubmissionError) {
+            std::rethrow_exception(m_asyncSubmissionError);
+        }
+        CHECK_MSG(!m_terminateAsyncThread, "Asynchronous submission is stopping");
 
         TraceLoggingWriteStop(
             waitToBeginFrame, "WaitForAsyncSubmissionIdle", TLArg(wokeUpEarly, "WokeUpForRunningStart"));
