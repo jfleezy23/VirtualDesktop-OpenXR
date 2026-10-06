@@ -338,6 +338,8 @@ namespace virtualdesktop_openxr {
         m_alphaCorrectConstants.Reset();
         m_sharpenShader.Reset();
         m_upscaleShader.Reset();
+        m_alignDepthShader.Reset();
+        m_alignDepthConstants.Reset();
         m_upscalerConstants.Reset();
         m_linearClampSampler.Reset();
         m_pointClampSampler.Reset();
@@ -347,6 +349,8 @@ namespace virtualdesktop_openxr {
             m_dlssnrContext->Flush();
         }
         m_dlssnrOutputSwapchainImages.clear();
+        m_dlssnrOutputSwapchainSrvs.clear();
+        m_dlssnrOutputSwapchainLastWrittenIndex = -1;
         if (m_dlssnrOutputSwapchain) {
             ovr_DestroyTextureSwapChain(m_ovrSession, m_dlssnrOutputSwapchain);
             m_dlssnrOutputSwapchain = nullptr;
@@ -370,13 +374,14 @@ namespace virtualdesktop_openxr {
         m_eventForSubmissionFence.reset();
     }
 
-    // Retrieve generic handles to the swapchain images to import into the application device.
-    std::vector<HANDLE> OpenXrRuntime::getSwapchainImages(Swapchain& xrSwapchain) {
-        // Detect whether this is the first call for this swapchain.
-        const bool initialized = !xrSwapchain.appSwapchain.images.empty();
+    // Submission can use released images before the application ever exports them.
+    void OpenXrRuntime::ensureAppSwapchainImages(Swapchain& xrSwapchain) {
+        if (!xrSwapchain.appSwapchain.images.empty()) {
+            return;
+        }
 
         D3D11_TEXTURE2D_DESC textureDesc{};
-        if (!initialized && !xrSwapchain.appSwapchain.ovrSwapchain) {
+        if (!xrSwapchain.appSwapchain.ovrSwapchain) {
             textureDesc.Format = getTypelessFormat(xrSwapchain.dxgiFormatForSubmission);
             textureDesc.Width = xrSwapchain.ovrDesc.Width;
             textureDesc.Height = xrSwapchain.ovrDesc.Height;
@@ -408,9 +413,9 @@ namespace virtualdesktop_openxr {
         }
 
         // Query the textures for the swapchain.
-        std::vector<HANDLE> handles;
+        std::vector<ComPtr<ID3D11Texture2D>> images;
         for (int i = 0; i < xrSwapchain.ovrSwapchainLength; i++) {
-            if (!initialized) {
+            {
                 ComPtr<ID3D11Texture2D> swapchainTexture;
                 if (xrSwapchain.appSwapchain.ovrSwapchain) {
                     CHECK_OVRCMD(
@@ -425,7 +430,7 @@ namespace virtualdesktop_openxr {
                 setDebugName(swapchainTexture.Get(),
                              fmt::format("OVR Swapchain Texture[{}, {}]", i, (void*)&xrSwapchain));
 
-                xrSwapchain.appSwapchain.images.push_back(swapchainTexture);
+                images.push_back(swapchainTexture);
                 if (i == 0) {
                     D3D11_TEXTURE2D_DESC desc;
                     swapchainTexture->GetDesc(&desc);
@@ -446,6 +451,15 @@ namespace virtualdesktop_openxr {
                 }
             }
 
+        }
+        xrSwapchain.appSwapchain.images = std::move(images);
+    }
+
+    // Retrieve generic handles to the swapchain images to import into the application device.
+    std::vector<HANDLE> OpenXrRuntime::getSwapchainImages(Swapchain& xrSwapchain) {
+        ensureAppSwapchainImages(xrSwapchain);
+        std::vector<HANDLE> handles;
+        for (int i = 0; i < xrSwapchain.ovrSwapchainLength; i++) {
             // Export the HANDLE.
             const auto texture = xrSwapchain.appSwapchain.images[i];
 
@@ -470,7 +484,7 @@ namespace virtualdesktop_openxr {
                                                     XrSwapchainImageD3D11KHR* d3d11Images,
                                                     uint32_t count) {
         // Detect whether this is the first call for this swapchain.
-        const bool initialized = !xrSwapchain.appSwapchain.images.empty();
+        const bool initialized = !xrSwapchain.d3d11Images.empty();
         const bool skipSharing = m_ovrSubmissionDevice == m_d3d11Device;
 
         std::vector<HANDLE> textureHandles;
@@ -542,15 +556,24 @@ namespace virtualdesktop_openxr {
                                               uint32_t slice,
                                               std::set<std::pair<Swapchain*, uint32_t>>& resolved,
                                               bool skipCommit) {
+        ensureAppSwapchainImages(xrSwapchain);
         ensureSwapchainSliceResources(xrSwapchain, slice);
 
-        // If the texture was never used or already committed, do nothing.
         const auto tuple = std::make_pair(&xrSwapchain, slice);
-        if (xrSwapchain.appSwapchain.images.empty() || resolved.count(tuple)) {
-            return;
-        }
-
         const bool needCopy = (slice > 0 || !xrSwapchain.appSwapchain.ovrSwapchain);
+        if (resolved.count(tuple)) {
+            if (skipCommit || !m_precompositor.pendingSwapchainCommits.count(tuple)) {
+                return;
+            }
+            if (needCopy) {
+                // A previous processed layer wrote this image but did not submit it.
+                // Commit that same destination without advancing and recopying it.
+                CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, xrSwapchain.resolvedSlices[slice].ovrSwapchain));
+                m_precompositor.pendingSwapchainCommits.erase(tuple);
+                return;
+            }
+            // Direct swapchains still need the existing released-index synchronization.
+        }
 
         const int lastReleasedIndex = xrSwapchain.lastReleasedIndex;
 
@@ -723,6 +746,11 @@ namespace virtualdesktop_openxr {
         }
 
         resolved.insert(tuple);
+        if (skipCommit) {
+            m_precompositor.pendingSwapchainCommits.insert(tuple);
+        } else {
+            m_precompositor.pendingSwapchainCommits.erase(tuple);
+        }
     }
 
     // Ensure necessary resources for submission: lazily create a second swapchain for this slice of the array or
@@ -774,7 +802,7 @@ namespace virtualdesktop_openxr {
                     desc.Height = resolution.h;
                     desc.MipLevels = 1;
                     desc.SampleCount = 1;
-                    if (isSRGBFormat((DXGI_FORMAT)xrSwapchain.xrDesc.format)) {
+                    if (isSRGBFormat(xrSwapchain.dxgiFormatForSubmission)) {
                         desc.Format = OVR_FORMAT_B8G8R8A8_UNORM_SRGB;
                         format = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
                     } else {

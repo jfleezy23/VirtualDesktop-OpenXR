@@ -475,6 +475,15 @@ namespace virtualdesktop_openxr {
                 ovr_DestroyTextureSwapChain(m_ovrSession, xrSwapchain.stereoProjection[eye].ovrSwapchain);
             }
         }
+        for (auto& [layerIndex, slices] : xrSwapchain.depthProjection) {
+            for (auto& slice : slices) {
+                slice.dsvs.clear();
+                slice.images.clear();
+                if (slice.ovrSwapchain) {
+                    ovr_DestroyTextureSwapChain(m_ovrSession, slice.ovrSwapchain);
+                }
+            }
+        }
 
         cleanupSwapchainImagesVulkan(xrSwapchain);
         cleanupSwapchainImagesOpenGL(xrSwapchain);

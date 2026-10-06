@@ -123,15 +123,28 @@ void fillImages(Images& images, ID3D11Device* device, ID3D11DeviceContext* conte
 
 void submitFrames(XrSession session, XrSpace space, Images& color, Images* depth,
                   ID3D11Device* device, ID3D11DeviceContext* context,
-                  int width, int height, bool unequalEyes = false, bool offsetDepth = false, bool scaledDepth = false) {
-    for (int frame = 0; frame < 8; ++frame) {
+                  int width, int height, bool unequalEyes = false, bool offsetDepth = false, bool scaledDepth = false,
+                  bool cropDepthStress = false) {
+    uint32_t randomState = 0x4e525631u;
+    const auto nextRandom = [&] { randomState = randomState * 1664525u + 1013904223u; return randomState; };
+    const auto crop = [&](int size) {
+        XrRect2Di rect{};
+        rect.extent.width = size/2 + nextRandom() % (size/2+1);
+        rect.extent.height = size/2 + nextRandom() % (size/2+1);
+        rect.offset.x = nextRandom() % (size-rect.extent.width+1);
+        rect.offset.y = nextRandom() % (size-rect.extent.height+1);
+        return rect;
+    };
+    if (cropDepthStress) std::cout << "STRESS seed=0x4e525631 frames=128 color=768x768 depth=384x384\n";
+    for (int frame = 0; frame < (cropDepthStress ? 128 : 8); ++frame) {
+        const bool submitDepth = depth && (!cropDepthStress || (frame % 4 != 0));
         XrFrameWaitInfo wait{XR_TYPE_FRAME_WAIT_INFO};
         XrFrameState state{XR_TYPE_FRAME_STATE};
         XR_CHECK(xrWaitFrame(session, &wait, &state));
         XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
         XR_CHECK(xrBeginFrame(session, &begin));
         fillImages(color, device, context);
-        if (depth) fillImages(*depth, device, context);
+        if (submitDepth) fillImages(*depth, device, context);
         XrCompositionLayerProjectionView views[2] = {
             {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
         XrCompositionLayerDepthInfoKHR depths[2] = {
@@ -142,16 +155,30 @@ void submitFrames(XrSession session, XrSpace space, Images& color, Images* depth
             views[eye].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
             views[eye].subImage = {color.swapchain, {{0, 0}, {width, height}}, eye};
             if (unequalEyes && eye) views[eye].subImage.imageRect.extent = {width - 32, height - 16};
-            if (depth) {
+            if (cropDepthStress) views[eye].subImage.imageRect = crop(width);
+            if (submitDepth) {
                 depths[eye].subImage = {depth->swapchain,
                     {{offsetDepth ? 64 : 0, offsetDepth ? 32 : 0},
                      {scaledDepth ? width / 2 : width, scaledDepth ? height / 2 : height}}, eye};
+                if (cropDepthStress) depths[eye].subImage.imageRect = crop(384);
                 depths[eye].minDepth = 0.f;
                 depths[eye].maxDepth = 1.f;
                 depths[eye].nearZ = 0.1f;
                 depths[eye].farZ = 100.f;
                 views[eye].next = &depths[eye];
             }
+        }
+        if (cropDepthStress) {
+            std::cout << "STRESS frame=" << frame << " depth=" << submitDepth;
+            for (uint32_t eye = 0; eye < 2; ++eye) {
+                const auto printRect = [&](const char* label, const XrRect2Di& rect) {
+                    std::cout << ' ' << label << eye << '=' << rect.offset.x << ',' << rect.offset.y
+                        << ':' << rect.extent.width << 'x' << rect.extent.height;
+                };
+                printRect("color", views[eye].subImage.imageRect);
+                if (submitDepth) printRect("depth", depths[eye].subImage.imageRect);
+            }
+            std::cout << '\n';
         }
         XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
         layer.space = space;
@@ -229,19 +256,22 @@ int main(int argc, char** argv) {
             reference.poseInReferenceSpace.orientation.w = 1.f;
             XrSpace space{};
             XR_CHECK(xrCreateReferenceSpace(session, &reference, &space));
-            const int width = pass == 2 ? 384 : 512;
+            const bool cropDepthStress = mode == "crop-depth-stress";
+            const int width = cropDepthStress ? 768 : pass == 2 ? 384 : 512;
             Images color = createImages(session, DXGI_FORMAT_R8G8B8A8_UNORM, width, width, 1, false);
             Images depth = createImages(session, DXGI_FORMAT_D32_FLOAT,
-                mode == "depth-offset" ? width + 64 : mode == "depth-scale" ? width / 2 : width,
-                mode == "depth-offset" ? width + 32 : mode == "depth-scale" ? width / 2 : width, 1, true);
-            std::cout << "FRAMES with depth\n";
+                cropDepthStress ? 384 : mode == "depth-offset" ? width + 64 : mode == "depth-scale" ? width / 2 : width,
+                cropDepthStress ? 384 : mode == "depth-offset" ? width + 32 : mode == "depth-scale" ? width / 2 : width, 1, true);
+            std::cout << (cropDepthStress ? "FRAMES crop/depth stress\n" : "FRAMES with depth\n");
             submitFrames(session, space, color, &depth, device.Get(), context.Get(), width, width,
-                mode == "unequal", mode == "depth-offset", mode == "depth-scale");
+                mode == "unequal", mode == "depth-offset", mode == "depth-scale", cropDepthStress);
             if (!GetModuleHandleA("nvngx_dlssnr.dll"))
                 throw std::runtime_error("NR module was not loaded; this is not an NR test");
             destroyImages(depth);
-            std::cout << "FRAMES after depth removal\n";
-            submitFrames(session, space, color, nullptr, device.Get(), context.Get(), width, width, mode == "unequal");
+            if (!cropDepthStress) {
+                std::cout << "FRAMES after depth removal\n";
+                submitFrames(session, space, color, nullptr, device.Get(), context.Get(), width, width, mode == "unequal");
+            }
             if (mode == "transitions") {
                 destroyImages(color);
                 color = createImages(session, DXGI_FORMAT_R16G16B16A16_FLOAT, width, width, 1, false);

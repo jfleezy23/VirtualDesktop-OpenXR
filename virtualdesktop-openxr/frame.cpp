@@ -422,6 +422,8 @@ namespace virtualdesktop_openxr {
             m_precompositor.displayTime = frameEndInfo->displayTime;
             m_precompositor.isFirstProjectionLayer = true;
             m_precompositor.resolvedSwapchainImages.clear();
+            m_precompositor.pendingSwapchainCommits.clear();
+            m_precompositor.sharpenFactor = m_sharpenFactor;
             {
                 // Both eyes and all layers in this frame use the same live NR configuration.
                 std::unique_lock lock(m_dlssnrSettingsMutex);
@@ -626,7 +628,8 @@ namespace virtualdesktop_openxr {
 
         // We only upscale the bottom projection layer and only the focus view (when applicable).
         const bool canUpscale = std::abs(m_upscalingMultiplier - 1.f) > FLT_EPSILON;
-        const bool canSharpen = m_sharpenFactor > 0.f;
+        const bool canSharpen = m_precompositor.sharpenFactor > 0.f;
+        const bool shouldUseDepth = m_shouldUseDepth || m_isConformanceTest;
         const bool needUpscaling = m_precompositor.isFirstProjectionLayer && (canUpscale || canSharpen);
         const bool needUplifting = m_precompositor.isFirstProjectionLayer && m_precompositor.dlssnrSettings.enabled;
 
@@ -739,7 +742,7 @@ namespace virtualdesktop_openxr {
                         // Some games (like WRC) will not properly submit depth. We bypass all the checks if the runtime
                         // does not care about depth.
                         // We check the input and we resolve the images regardless (for correctness).
-                        if (m_shouldUseDepth || m_isConformanceTest) {
+                        if (shouldUseDepth) {
                             layer.Header.Type = ovrLayerType_EyeFovDepth;
                         } else {
                             TraceLoggingWrite(g_traceProvider, "xrEndFrame_View_IgnoreDepth");
@@ -808,6 +811,10 @@ namespace virtualdesktop_openxr {
         // Run the upscaler or sharpening if needed.
         if (needUpscaling) {
             upscaler(subImages, layer.EyeFov);
+        }
+
+        if (layer.Header.Type == ovrLayerType_EyeFovDepth) {
+            alignDepthLayer(subImages, depthSubImages, layer.EyeFovDepth);
         }
 
         return XR_SUCCESS;

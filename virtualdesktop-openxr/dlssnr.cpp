@@ -285,6 +285,8 @@ namespace virtualdesktop_openxr {
 
         // Time to apply the effect.
         auto cmdList = m_dlssnrContext->GetCommandList();
+        int imageIndex = 0;
+        CHECK_OVRCMD(ovr_GetTextureSwapChainCurrentIndex(m_ovrSession, m_dlssnrOutputSwapchain, &imageIndex));
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
             const ovrSizei eyeResolution = {views[eye]->imageRect.extent.width, views[eye]->imageRect.extent.height};
             const ovrSizei eyeFoveatedResolution = {
@@ -338,10 +340,6 @@ namespace virtualdesktop_openxr {
                 m_dlssnrFeatureRelease[eye] = release;
                 m_dlssnrFeatureEvaluate[eye] = evaluate;
             }
-
-            // Prepare swapchain outputs.
-            int imageIndex = 0;
-            CHECK_OVRCMD(ovr_GetTextureSwapChainCurrentIndex(m_ovrSession, m_dlssnrOutputSwapchain, &imageIndex));
 
             // Prepare feature evaluation.
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Output, m_dlssnrOutputSwapchainImages[imageIndex].Get());
@@ -485,6 +483,7 @@ namespace virtualdesktop_openxr {
         const auto fenceValue = m_dlssnrContext->SubmitCommandList(cmdList);
         CHECK_HRCMD(m_ovrSubmissionContext->Wait(m_dlssnrOutFence.Get(), fenceValue));
         CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, m_dlssnrOutputSwapchain));
+        m_dlssnrOutputSwapchainLastWrittenIndex = imageIndex;
 
         // Patch the layer.
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
@@ -500,9 +499,11 @@ namespace virtualdesktop_openxr {
     void OpenXrRuntime::ensureDlssnrSwapchainResources(ovrTextureFormat format, const ovrSizei& resolution) {
         if (m_dlssnrOutputSwapchain) {
             m_dlssnrOutputSwapchainImages.clear();
+            m_dlssnrOutputSwapchainSrvs.clear();
             ovr_DestroyTextureSwapChain(m_ovrSession, m_dlssnrOutputSwapchain);
             m_dlssnrOutputSwapchain = nullptr;
         }
+        m_dlssnrOutputSwapchainLastWrittenIndex = -1;
         m_dlssnrOutputSwapchainResolution = {0, 0};
         m_dlssnrOutputSwapchainFormat = OVR_FORMAT_UNKNOWN;
 
@@ -527,6 +528,15 @@ namespace virtualdesktop_openxr {
             ComPtr<ID3D11Texture2D> texture;
             CHECK_OVRCMD(ovr_GetTextureSwapChainBufferDX(
                 m_ovrSession, m_dlssnrOutputSwapchain, i, IID_PPV_ARGS(texture.ReleaseAndGetAddressOf())));
+
+            // A typed SRV preserves the same sRGB decoding used by the compositor.
+            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            srvDesc.Format = getShaderResourceViewFormat(ovrToDxgiTextureFormat(format));
+            srvDesc.Texture2D.MipLevels = 1;
+            ComPtr<ID3D11ShaderResourceView> srv;
+            CHECK_HRCMD(m_ovrSubmissionDevice->CreateShaderResourceView(texture.Get(), &srvDesc, srv.GetAddressOf()));
+            m_dlssnrOutputSwapchainSrvs.push_back(std::move(srv));
 
             // Export to the DLSS context.
             ComPtr<IDXGIResource1> dxgiResource;

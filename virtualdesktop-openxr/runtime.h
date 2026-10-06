@@ -367,6 +367,8 @@ namespace virtualdesktop_openxr {
             // For precompositor needs (drawing our own stereo projection).
             SwapchainSlice stereoProjection[xr::StereoView::Count];
             IntermediateTexture intermediate[xr::StereoView::Count];
+            // Different projection layers may share the same input color swapchain.
+            std::map<uint32_t, std::array<SwapchainSlice, xr::StereoView::Count>> depthProjection;
 
             // Whether a static image swapchain has been acquired at least once.
             bool frozen{false};
@@ -397,8 +399,10 @@ namespace virtualdesktop_openxr {
 
         struct PrecompositorState {
             DlssnrSettings dlssnrSettings;
+            float sharpenFactor{0.f};
             // State for the current frame.
             std::set<std::pair<Swapchain*, uint32_t>> resolvedSwapchainImages;
+            std::set<std::pair<Swapchain*, uint32_t>> pendingSwapchainCommits;
             XrTime displayTime{0};
             bool isProj0SRGB{false};
             bool isFirstProjectionLayer{true};
@@ -611,6 +615,7 @@ namespace virtualdesktop_openxr {
         void initializeSubmissionResources();
         void cleanupSubmissionDevice();
         void cleanupSessionResources();
+        void ensureAppSwapchainImages(Swapchain& xrSwapchain);
         std::vector<HANDLE> getSwapchainImages(Swapchain& xrSwapchain);
         XrResult getSwapchainImagesD3D11(Swapchain& xrSwapchain, XrSwapchainImageD3D11KHR* d3d11Images, uint32_t count);
         void resolveSwapchainImage(Swapchain& xrSwapchain,
@@ -660,6 +665,8 @@ namespace virtualdesktop_openxr {
 
         // precompositor.cpp
         void upscaler(const XrSwapchainSubImage** subImages, ovrLayerEyeFov& layer);
+        void alignDepthLayer(const XrSwapchainSubImage** color, const XrSwapchainSubImage** depth,
+                             ovrLayerEyeFovDepth& layer);
         void initializePrecompositorResources();
 
         // visibility_mask.cpp
@@ -756,6 +763,8 @@ namespace virtualdesktop_openxr {
         ComPtr<ID3D11Buffer> m_alphaCorrectConstants;
         ComPtr<ID3D11ComputeShader> m_sharpenShader;
         ComPtr<ID3D11ComputeShader> m_upscaleShader;
+        ComPtr<ID3D11PixelShader> m_alignDepthShader;
+        ComPtr<ID3D11Buffer> m_alignDepthConstants;
         ComPtr<ID3D11Buffer> m_upscalerConstants;
         ComPtr<IDXGISwapChain1> m_dxgiSwapchain;
         bool m_sessionCreated{false};
@@ -922,6 +931,8 @@ namespace virtualdesktop_openxr {
         ovrTextureFormat m_dlssnrOutputSwapchainFormat{OVR_FORMAT_UNKNOWN};
         ovrTextureSwapChain m_dlssnrOutputSwapchain{nullptr};
         std::vector<ComPtr<ID3D12Resource>> m_dlssnrOutputSwapchainImages;
+        std::vector<ComPtr<ID3D11ShaderResourceView>> m_dlssnrOutputSwapchainSrvs;
+        int m_dlssnrOutputSwapchainLastWrittenIndex{-1};
         NVSDK_NGX_Parameter* m_ngxParameters{nullptr};
         std::mutex m_dlssnrSettingsMutex;
         DlssnrSettings m_dlssnrSettings;

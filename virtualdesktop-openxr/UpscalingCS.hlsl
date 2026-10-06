@@ -29,6 +29,10 @@ cbuffer config : register(b0)
     float2 topLeftNormalized;
     bool isSRGB;
     uint padding;
+    int2 sourceMin;
+    int2 sourceMax;
+    uint2 sourceSize;
+    uint2 outputSize;
     uint4 const0; // FSR
     uint4 const1; // FSR
     uint4 const2; // FSR
@@ -47,26 +51,75 @@ RWTexture2D<float4> upscaledTexture : register(u0);
 
 #define FSR_EASU_F 1
 
+AF4 FsrGatherClamped(ASU2 base, AU1 channel)
+{
+    // Gather order is bottom-left, bottom-right, top-right, top-left. Clamp each
+    // tap independently: clamping only the normalized center still crosses an eye seam.
+    AF4 values = AF4_(0.0);
+    values.x = sourceTexture.Load(int3(clamp(base + int2(0, 1), sourceMin, sourceMax), 0))[channel];
+    values.y = sourceTexture.Load(int3(clamp(base + int2(1, 1), sourceMin, sourceMax), 0))[channel];
+    values.z = sourceTexture.Load(int3(clamp(base + int2(1, 0), sourceMin, sourceMax), 0))[channel];
+    values.w = sourceTexture.Load(int3(clamp(base, sourceMin, sourceMax), 0))[channel];
+    return values;
+}
+
 AF4 FsrEasuRF(AF2 p)
 {
     p += topLeftNormalized;
-    return sourceTexture.GatherRed(linearClamp, p, int2(0, 0));
+    ASU2 base = ASU2(floor(p * AF2(sourceSize) - AF2_(0.5)));
+    AF4 values = AF4_(0.0);
+    [branch]
+    if (any(base < sourceMin) || any(base + 1 > sourceMax))
+    {
+        values = FsrGatherClamped(base, 0);
+    }
+    else
+    {
+        values = sourceTexture.GatherRed(linearClamp, p, int2(0, 0));
+    }
+    return values;
 }
 AF4 FsrEasuGF(AF2 p)
 {
     p += topLeftNormalized;
-    return sourceTexture.GatherGreen(linearClamp, p, int2(0, 0));
+    ASU2 base = ASU2(floor(p * AF2(sourceSize) - AF2_(0.5)));
+    AF4 values = AF4_(0.0);
+    [branch]
+    if (any(base < sourceMin) || any(base + 1 > sourceMax))
+    {
+        values = FsrGatherClamped(base, 1);
+    }
+    else
+    {
+        values = sourceTexture.GatherGreen(linearClamp, p, int2(0, 0));
+    }
+    return values;
 }
 AF4 FsrEasuBF(AF2 p)
 {
     p += topLeftNormalized;
-    return sourceTexture.GatherBlue(linearClamp, p, int2(0, 0));
+    ASU2 base = ASU2(floor(p * AF2(sourceSize) - AF2_(0.5)));
+    AF4 values = AF4_(0.0);
+    [branch]
+    if (any(base < sourceMin) || any(base + 1 > sourceMax))
+    {
+        values = FsrGatherClamped(base, 2);
+    }
+    else
+    {
+        values = sourceTexture.GatherBlue(linearClamp, p, int2(0, 0));
+    }
+    return values;
 }
 
 #include <ffx_fsr1.h>
 
 void FsrStore(AU2 p, AF3 c)
 {
+    if (any(p >= outputSize))
+    {
+        return;
+    }
     if (isSRGB)
     {
         c = ToSRGB(c);
