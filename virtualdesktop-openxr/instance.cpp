@@ -168,7 +168,7 @@ namespace virtualdesktop_openxr {
             Action* xrAction = (Action*)action;
             delete xrAction;
         }
-        for (auto actionSet : m_actionSets) {
+        for (auto actionSet : m_actionSetsForCleanup) {
             ActionSet* xrActionSet = (ActionSet*)actionSet;
             delete xrActionSet;
         }

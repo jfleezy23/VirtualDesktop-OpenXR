@@ -176,15 +176,19 @@ namespace virtualdesktop_openxr {
         }
 
         // Create the internal struct.
-        ActionSet& xrActionSet = *new ActionSet;
+        auto owner = std::make_unique<ActionSet>();
+        ActionSet& xrActionSet = *owner;
         xrActionSet.name = name;
         xrActionSet.localizedName = localizedName;
         xrActionSet.effectivePriority = xrActionSet.priority = createInfo->priority;
 
-        *actionSet = (XrActionSet)&xrActionSet;
-
         // Maintain a list of known actionsets for validation.
-        m_actionSets.insert(*actionSet);
+        const auto handle = (XrActionSet)&xrActionSet;
+        m_actionSetsForCleanup.insert(handle);
+        auto rollback = MakeScopeGuard([&] { m_actionSetsForCleanup.erase(handle); });
+        m_actionSets.insert(handle);
+        rollback.Deactivate();
+        *actionSet = (XrActionSet)owner.release();
 
         TraceLoggingWrite(g_traceProvider, "xrCreateActionSet", TLXArg(*actionSet, "ActionSet"));
 
@@ -201,8 +205,6 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_HANDLE_INVALID;
         }
 
-        ActionSet* xrActionSet = (ActionSet*)actionSet;
-
         auto it = m_actions.begin();
         while (it != m_actions.end()) {
             const Action& xrAction = *(Action*)*it;
@@ -215,7 +217,8 @@ namespace virtualdesktop_openxr {
             }
         }
 
-        delete xrActionSet;
+        // Surviving action spaces still reference this set and its binding state.
+        // Retain the allocation until instance teardown, as we already do for actions.
         m_actionSets.erase(actionSet);
         m_attachedActionSets.erase(actionSet);
 

@@ -784,6 +784,7 @@ namespace virtualdesktop_openxr {
         std::shared_mutex m_actionsAndSpacesMutex;
         std::map<XrPath, std::string> m_strings; // protected by actionsAndSpacesMutex
         std::set<XrActionSet> m_actionSets;
+        std::set<XrActionSet> m_actionSetsForCleanup;
         std::set<XrActionSet> m_attachedActionSets;
         std::set<XrAction> m_actions;
         std::set<XrAction> m_actionsForCleanup;
