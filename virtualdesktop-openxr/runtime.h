@@ -311,6 +311,19 @@ namespace virtualdesktop_openxr {
       private:
         friend struct RuntimeInputRegression;
 
+        struct SettingsWatcherState {
+            wil::unique_handle event;
+            wil::unique_hkey key;
+            std::mutex mutex;
+            OpenXrRuntime* owner{nullptr};
+            bool stopped{false};
+
+            void notify(PTP_WAIT wait);
+            void detach(PTP_WAIT wait);
+            static void CALLBACK callback(PTP_CALLBACK_INSTANCE, void* context, PTP_WAIT wait, TP_WAIT_RESULT) noexcept;
+        };
+        void stopRegistryWatcher();
+
         struct Extension {
             const char* extensionName;
             uint32_t extensionVersion;
@@ -695,7 +708,7 @@ namespace virtualdesktop_openxr {
         using CheckValidPathFunction = std::function<bool(const std::string&)>;
         std::map<std::pair<std::string, std::string>, MappingFunction> m_controllerMappingTable;
         std::map<std::string, CheckValidPathFunction> m_controllerValidPathsTable;
-        wil::unique_registry_watcher m_registryWatcher;
+        wil::unique_threadpool_wait m_registryWatcher;
         bool m_loggedResolution{false};
         std::string m_applicationName;
         std::string m_exeName;
@@ -916,6 +929,7 @@ namespace virtualdesktop_openxr {
         std::unique_ptr<ITimer> m_gpuTimerApp[k_numGpuTimers];
         std::unique_ptr<ITimer> m_gpuTimerPrecomposition[k_numGpuTimers];
         uint32_t m_currentTimerIndex{0};
+        std::shared_ptr<SettingsWatcherState> m_settingsWatcherState;
     };
 
     // Singleton accessor.

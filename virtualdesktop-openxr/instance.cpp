@@ -52,6 +52,68 @@ namespace virtualdesktop_openxr {
         RuntimeVersionPatch,
         RuntimeCommitHash);
 
+    void OpenXrRuntime::SettingsWatcherState::notify(PTP_WAIT wait) {
+        std::unique_lock lock(mutex);
+        if (stopped || !owner) {
+            return;
+        }
+
+        // Register the next registry change before reading settings, then rearm the wait after the read.
+        const auto error = RegNotifyChangeKeyValue(key.get(),
+                                                   TRUE,
+                                                   REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME |
+                                                       REG_NOTIFY_THREAD_AGNOSTIC,
+                                                   event.get(),
+                                                   TRUE);
+        if (error == ERROR_SUCCESS || error == ERROR_ACCESS_DENIED || error == ERROR_KEY_DELETED) {
+            try {
+                owner->refreshSettings();
+            } catch (...) {
+                stopped = true;
+                owner = nullptr;
+                OutputDebugStringA("VDXR settings refresh failed; disabling registry notifications.\n");
+                return;
+            }
+        }
+        if (error == ERROR_SUCCESS || error == ERROR_ACCESS_DENIED) {
+            SetThreadpoolWait(wait, event.get(), nullptr);
+        } else {
+            stopped = true;
+            owner = nullptr;
+        }
+    }
+
+    void CALLBACK OpenXrRuntime::SettingsWatcherState::callback(PTP_CALLBACK_INSTANCE,
+                                                                void* context,
+                                                                PTP_WAIT wait,
+                                                                TP_WAIT_RESULT) noexcept {
+        try {
+            static_cast<SettingsWatcherState*>(context)->notify(wait);
+        } catch (...) {
+            // Exceptions must not cross the native thread-pool callback boundary.
+            OutputDebugStringA("VDXR registry callback failed; leaving its wait disarmed.\n");
+        }
+    }
+
+    void OpenXrRuntime::SettingsWatcherState::detach(PTP_WAIT wait) {
+        std::unique_lock lock(mutex);
+        stopped = true;
+        owner = nullptr;
+        if (wait) {
+            SetThreadpoolWait(wait, nullptr, nullptr);
+        }
+    }
+
+    void OpenXrRuntime::stopRegistryWatcher() {
+        if (m_settingsWatcherState) {
+            m_settingsWatcherState->detach(m_registryWatcher.get());
+        }
+        // The native wait deleter cancels pending callbacks, drains active callbacks, then closes the wait.
+        // Never drain while holding the state mutex: an active callback may be waiting for that mutex.
+        m_registryWatcher.reset();
+        m_settingsWatcherState.reset();
+    }
+
     OpenXrRuntime::OpenXrRuntime() {
         const auto runtimeVersion =
             xr::ToString(XR_MAKE_VERSION(RuntimeVersionMajor, RuntimeVersionMinor, RuntimeVersionPatch));
@@ -66,14 +128,24 @@ namespace virtualdesktop_openxr {
 
         // Watch for changes in the registry.
         try {
-            wil::unique_hkey keyToWatch;
+            auto state = std::make_shared<SettingsWatcherState>();
+            state->owner = this;
             if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                               xr::utf8_to_wide(RegPrefix).c_str(),
                               0,
                               KEY_WOW64_64KEY | KEY_READ,
-                              keyToWatch.put()) == ERROR_SUCCESS) {
-                m_registryWatcher = wil::make_registry_watcher(
-                    std::move(keyToWatch), true, [&](wil::RegistryChangeKind changeType) { refreshSettings(); });
+                              state->key.put()) == ERROR_SUCCESS) {
+                state->event.reset(CreateEventW(nullptr, FALSE, FALSE, nullptr));
+                CHECK_MSG(state->event, "Failed to create registry notification event");
+                CHECK_HRCMD(HRESULT_FROM_WIN32(RegNotifyChangeKeyValue(
+                    state->key.get(), TRUE,
+                    REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_THREAD_AGNOSTIC,
+                    state->event.get(), TRUE)));
+                wil::unique_threadpool_wait wait(
+                    CreateThreadpoolWait(&SettingsWatcherState::callback, state.get(), nullptr));
+                CHECK_MSG(wait, "Failed to create registry notification wait");
+                m_settingsWatcherState = std::move(state);
+                m_registryWatcher = std::move(wait);
             }
         } catch (std::exception&) {
             // Ignore errors that can happen with UWP applications not able to write to the registry.
@@ -82,9 +154,15 @@ namespace virtualdesktop_openxr {
         QueryPerformanceFrequency(&m_qpcFrequency);
 
         initializeExtensionsTable();
+        // Arm only after all fallible initialization: constructor failure destroys members without our destructor.
+        if (m_registryWatcher) {
+            SetThreadpoolWait(m_registryWatcher.get(), m_settingsWatcherState->event.get(), nullptr);
+        }
     }
 
     OpenXrRuntime::~OpenXrRuntime() {
+        stopRegistryWatcher();
+
         // Destroy actionset and actions (tied to the instance).
         for (auto action : m_actionsForCleanup) {
             Action* xrAction = (Action*)action;
@@ -330,6 +408,8 @@ namespace virtualdesktop_openxr {
         if (!m_instanceCreated || instance != (XrInstance)1) {
             return XR_ERROR_HANDLE_INVALID;
         }
+
+        stopRegistryWatcher();
 
         // The caller will destroy this class next, which will take care of all the cleanup.
 

@@ -44,3 +44,24 @@ The focus-loss expectation follows the normative OpenXR input specification:
 [`xrSyncActions`](https://registry.khronos.org/OpenXR/specs/1.1/html/xrspec.html#xrSyncActions)
 requires all session action states to be inactive when it returns
 `XR_SESSION_NOT_FOCUSED`.
+
+The native settings watcher has a separate CPU regression:
+
+```powershell
+.\tests\vr_input_build.cmd -TestSource vr_input_watcher_regression.cpp
+.\bin\vr-input-tests\vr_input_watcher_regression.exe
+```
+
+It signals the production notification event, pauses an actual registry read with
+Detours, and verifies owner teardown waits for the callback to finish. A callback
+delivered after detachment must leave the owner untouched. This test reads the
+existing settings key and changes no registry values. The baseline-only build flag
+uses the original WIL watcher from a captured old header/object set to demonstrate
+its two failing lifecycle checks.
+
+The same executable also injects an allocation failure immediately after the native
+wait is created. It observes the actual wait API and requires the constructor to
+throw before arming the wait, so constructor unwinding cannot free a live callback
+context. `--constructor-only` runs just that case. The historical regression was
+verified against the captured pre-deferred-arm instance object, then against a
+fresh complete runtime build.
