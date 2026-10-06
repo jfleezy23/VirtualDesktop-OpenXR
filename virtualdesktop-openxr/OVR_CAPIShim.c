@@ -394,7 +394,7 @@ static ModuleHandleType OVR_FindLibraryPath(
 
 #if defined(_WIN32)
     // On Windows, only search the developer directory and the install path
-    const FilePathCharType* directoryArray[3];
+    const FilePathCharType* directoryArray[3] = {NULL, NULL, NULL};
     directoryArray[0] = overrideLibraryPath;
     if (!overrideLibraryPath) {
         directoryArray[1] = developerDir[0] != '\0' ? developerDir : NULL; // Developer directory
