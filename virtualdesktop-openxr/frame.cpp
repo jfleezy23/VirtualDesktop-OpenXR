@@ -554,7 +554,9 @@ namespace virtualdesktop_openxr {
                     layers[layerCount++] = &layer.Header;
 
                     if (layerCount == ovrMaxLayerCount) {
-                        ErrorLog("Too many layers in this frame (%zu)\n", layersAllocator.size());
+                        if (layersAllocator.size() > ovrMaxLayerCount) {
+                            ErrorLog("Too many layers in this frame (%zu)\n", layersAllocator.size());
+                        }
                         break;
                     }
                 }

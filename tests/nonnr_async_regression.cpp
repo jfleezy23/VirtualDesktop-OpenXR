@@ -1,12 +1,18 @@
 // CPU-only regressions through the real asynchronous submission worker and session cleanup.
 // The OVRNull exports are intercepted before they can reach a driver or GPU.
 #include "pch.h"
+#include "log.h"
 #include "runtime.h"
 #include <cstdlib>
 #include <exception>
+#include <iterator>
 
 OVR_PUBLIC_FUNCTION(ovrResult)
 ovr_InitializeWithPathOverride(const ovrInitParams*, const wchar_t*);
+
+namespace virtualdesktop_openxr::log {
+    extern std::ofstream logStream;
+}
 
 namespace {
     enum class Fault { None, Wait, Begin, End, NotInitialized };
@@ -65,6 +71,57 @@ namespace {
     void checkDetour(LONG result) {
         require(result == NO_ERROR, "OVR export detour failed");
     }
+
+    class ScopedProductionLog {
+      public:
+        ScopedProductionLog() : m_previousState(virtualdesktop_openxr::log::logStream.rdstate()) {
+            auto& stream = virtualdesktop_openxr::log::logStream;
+            require(!stream.is_open(), "Layer-list fixture must not replace an already-open production log");
+            wchar_t directory[MAX_PATH]{};
+            const auto length = GetTempPathW(MAX_PATH, directory);
+            require(length && length < MAX_PATH, "Cannot locate layer-list temporary log directory");
+            wchar_t filename[MAX_PATH]{};
+            require(GetTempFileNameW(directory, L"vxl", 0, filename) != 0,
+                    "Cannot create unique layer-list temporary log");
+            m_path = filename;
+            auto rollback = MakeScopeGuard([&] {
+                if (stream.is_open())
+                    stream.close();
+                stream.clear(m_previousState);
+                std::error_code ignored;
+                std::filesystem::remove(m_path, ignored);
+            });
+            stream.clear();
+            stream.open(m_path, std::ios::out | std::ios::trunc);
+            require(stream.is_open(), "Cannot open unique layer-list production log");
+            rollback.Deactivate();
+        }
+        ~ScopedProductionLog() noexcept {
+            auto& stream = virtualdesktop_openxr::log::logStream;
+            stream.close();
+            stream.clear(m_previousState);
+            std::error_code error;
+            std::filesystem::remove(m_path, error);
+            if (error) {
+                std::cerr << "FAIL: layer-list temporary log cleanup failed\n";
+                std::_Exit(2);
+            }
+        }
+        std::string contents() {
+            auto& stream = virtualdesktop_openxr::log::logStream;
+            stream.flush();
+            require(stream.good(), "Layer-list production logger failed to write its capture");
+            std::ifstream input(m_path);
+            require(input.is_open(), "Cannot read layer-list production log capture");
+            return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+        }
+        ScopedProductionLog(const ScopedProductionLog&) = delete;
+        ScopedProductionLog& operator=(const ScopedProductionLog&) = delete;
+
+      private:
+        std::filesystem::path m_path;
+        std::ios::iostate m_previousState;
+    };
 
     ovrResult OVR_CDECL interceptedWait(ovrSession, long long frameId) {
         auto& state = *backendState;
@@ -270,6 +327,9 @@ namespace virtualdesktop_openxr {
             runtime.m_useOculusRuntime = true;
             runtime.m_useMirrorWindow = false;
             runtime.m_useAsyncSubmission = async;
+            // Declared before the worker cleanup guard: even an assertion failure joins before log teardown.
+            ScopedProductionLog logCapture;
+            log::ErrorLog("layer-list error-log capture control\n");
             OpenXrRuntime::Space space{};
             space.referenceType = XR_REFERENCE_SPACE_TYPE_VIEW;
             space.poseInSpace = xr::math::Pose::Identity();
@@ -298,6 +358,7 @@ namespace virtualdesktop_openxr {
             for (unsigned count : {0u, 1u, 4u, unsigned(ovrMaxLayerCount)}) {
                 if (async)
                     runtime.waitForAsyncSubmissionIdle();
+                log::Log("layer-list case count=%u\n", count);
                 runtime.m_frameWaited = runtime.m_frameBegun = submitted + 1;
                 runtime.m_renderTimerApp.start();
                 std::vector<XrCompositionLayerQuad> quads(count, {XR_TYPE_COMPOSITION_LAYER_QUAD});
@@ -346,7 +407,30 @@ namespace virtualdesktop_openxr {
             runtime.m_swapchains.erase(chainHandle);
             stop(runtime, state);
             cleanup.Deactivate();
+            // Read only after the worker has stopped, so no logger writer races with capture teardown/readback.
+            const auto capturedLog = logCapture.contents();
+            std::cout << "production layer-list log capture begins\n"
+                      << capturedLog << "production layer-list log capture ends\n";
+            require(capturedLog.find("layer-list error-log capture control") != std::string::npos,
+                    "Production ErrorLog capture positive control was not observed");
+            unsigned falseLimitDiagnostics = 0;
+            for (unsigned count : {0u, 1u, 4u, unsigned(ovrMaxLayerCount)}) {
+                const auto marker = "layer-list case count=" + std::to_string(count) + '\n';
+                const auto begin = capturedLog.find(marker);
+                require(begin != std::string::npos, "Accepted layer-list case was not captured by production logger");
+                const auto end = capturedLog.find("layer-list case count=", begin + marker.size());
+                const auto diagnostic = capturedLog.find("Too many layers in this frame", begin + marker.size());
+                const bool falseLimit =
+                    diagnostic != std::string::npos && (end == std::string::npos || diagnostic < end);
+                std::cout << "layer-list async=" << async << " acceptedCount=" << count
+                          << " falseLimitDiagnostic=" << falseLimit << '\n';
+                if (falseLimit) {
+                    ++falseLimitDiagnostics;
+                    std::cerr << "FAIL: valid " << count << "-layer submission emitted Too many layers\n";
+                }
+            }
             require(!failures, "submission pointer lists must use bounded stack storage");
+            require(!falseLimitDiagnostics, "Valid layer counts must not consume the production error-log budget");
             std::cout << "PASS: bounded stack layer pointers preserve dummy/order/count/limit in "
                       << (async ? "async" : "sync") << " submission\n";
         }
