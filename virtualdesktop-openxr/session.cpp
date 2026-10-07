@@ -188,8 +188,10 @@ namespace virtualdesktop_openxr {
                 m_controllerAimPose[xr::Side::Left] = m_controllerGripPose[xr::Side::Left] =
                     m_controllerPalmPose[xr::Side::Left] = m_controllerHandPose[xr::Side::Left] =
                         m_controllerAimPose[xr::Side::Right] = m_controllerGripPose[xr::Side::Right] =
-                            m_controllerPalmPose[xr::Side::Right] = m_controllerHandPose[xr::Side::Right] = Pose::Identity();
-                m_currentInteractionProfile[xr::Side::Left] = m_currentInteractionProfile[xr::Side::Right] = XR_NULL_PATH;
+                            m_controllerPalmPose[xr::Side::Right] = m_controllerHandPose[xr::Side::Right] =
+                                Pose::Identity();
+                m_currentInteractionProfile[xr::Side::Left] = m_currentInteractionProfile[xr::Side::Right] =
+                    XR_NULL_PATH;
                 rebindControllerActions(xr::Side::Left);
                 rebindControllerActions(xr::Side::Right);
                 m_attachedActionSets.clear();
@@ -616,18 +618,19 @@ namespace virtualdesktop_openxr {
             m_dlssnrSettings = settings;
         }
 
-        TraceLoggingWrite(g_traceProvider,
-                          "VDXR_Config",
-                          TLArg(m_useMirrorWindow.load(std::memory_order_relaxed), "MirrorWindow"),
-                          TLArg(m_useRunningStart.load(std::memory_order_relaxed), "UseRunningStart"),
-                          TLArg(m_useDeferredFrameWait.load(std::memory_order_relaxed), "UseDeferredFrameWait"),
-                          TLArg(m_shouldUseDepth.load(std::memory_order_relaxed), "ShouldUseDepth"),
-                          TLArg(m_syncGpuWorkInEndFrame.load(std::memory_order_relaxed), "SyncGpuWorkInEndFrame"),
-                          TLArg(m_jiggleViewRotations.load(std::memory_order_relaxed), "JiggleViewRotations"),
-                          TLArg(m_sharpenFactor.load(std::memory_order_relaxed), "SharpenFactor"),
-                          TLArg(m_overrideWorldScale.load(std::memory_order_relaxed), "OverrideWorldScale"),
-                          TLArg(m_overrideVisibilityMaskScale.load(std::memory_order_relaxed), "OverrideVisibilityMaskScale"),
-                          TLArg(m_controllerLingerTimeout.load(std::memory_order_relaxed), "ControllerLingerTimeout"));
+        TraceLoggingWrite(
+            g_traceProvider,
+            "VDXR_Config",
+            TLArg(m_useMirrorWindow.load(std::memory_order_relaxed), "MirrorWindow"),
+            TLArg(m_useRunningStart.load(std::memory_order_relaxed), "UseRunningStart"),
+            TLArg(m_useDeferredFrameWait.load(std::memory_order_relaxed), "UseDeferredFrameWait"),
+            TLArg(m_shouldUseDepth.load(std::memory_order_relaxed), "ShouldUseDepth"),
+            TLArg(m_syncGpuWorkInEndFrame.load(std::memory_order_relaxed), "SyncGpuWorkInEndFrame"),
+            TLArg(m_jiggleViewRotations.load(std::memory_order_relaxed), "JiggleViewRotations"),
+            TLArg(m_sharpenFactor.load(std::memory_order_relaxed), "SharpenFactor"),
+            TLArg(m_overrideWorldScale.load(std::memory_order_relaxed), "OverrideWorldScale"),
+            TLArg(m_overrideVisibilityMaskScale.load(std::memory_order_relaxed), "OverrideVisibilityMaskScale"),
+            TLArg(m_controllerLingerTimeout.load(std::memory_order_relaxed), "ControllerLingerTimeout"));
     }
 
 } // namespace virtualdesktop_openxr

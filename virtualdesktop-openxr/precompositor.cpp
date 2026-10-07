@@ -87,10 +87,12 @@ namespace virtualdesktop_openxr {
         Swapchain& xrSwapchain = *(Swapchain*)subImages[xr::StereoView::Left]->swapchain;
         const bool outputIsSRGB = isSRGBFormat(xrSwapchain.dxgiFormatForSubmission);
         ovrSizei resolution = ovrSizei{
-            (int)xr::math::AlignTo<4>((uint32_t)(std::max(subImages[0]->imageRect.extent.width,
-                                                       subImages[1]->imageRect.extent.width) / m_upscalingMultiplier)),
-            (int)xr::math::AlignTo<4>((uint32_t)(std::max(subImages[0]->imageRect.extent.height,
-                                                       subImages[1]->imageRect.extent.height) / m_upscalingMultiplier))};
+            (int)xr::math::AlignTo<4>(
+                (uint32_t)(std::max(subImages[0]->imageRect.extent.width, subImages[1]->imageRect.extent.width) /
+                           m_upscalingMultiplier)),
+            (int)xr::math::AlignTo<4>(
+                (uint32_t)(std::max(subImages[0]->imageRect.extent.height, subImages[1]->imageRect.extent.height) /
+                           m_upscalingMultiplier))};
         ensureSwapchainPrecompositorResources(xrSwapchain, resolution);
         if (upscaling && sharpening) {
             for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
@@ -115,8 +117,8 @@ namespace virtualdesktop_openxr {
                         desc.MipLevels = 1;
                         desc.SampleDesc.Count = 1;
                         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-                        CHECK_HRCMD(m_ovrSubmissionDevice->CreateTexture2D(
-                            &desc, nullptr, candidate.image.GetAddressOf()));
+                        CHECK_HRCMD(
+                            m_ovrSubmissionDevice->CreateTexture2D(&desc, nullptr, candidate.image.GetAddressOf()));
                         setDebugName(
                             candidate.image.Get(),
                             fmt::format("Precompositor Intermediate Texture [{}, {}]", eye, (void*)&xrSwapchain));
@@ -127,9 +129,7 @@ namespace virtualdesktop_openxr {
                         desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
                         desc.Texture2D.MipLevels = -1;
                         CHECK_HRCMD(m_ovrSubmissionDevice->CreateShaderResourceView(
-                            candidate.image.Get(),
-                            &desc,
-                            candidate.srv.GetAddressOf()));
+                            candidate.image.Get(), &desc, candidate.srv.GetAddressOf()));
                         setDebugName(candidate.srv.Get(),
                                      fmt::format("Precompositor Intermediate SRV [{}, {}]", eye, (void*)&xrSwapchain));
                     }
@@ -138,9 +138,7 @@ namespace virtualdesktop_openxr {
                         desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
                         desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
                         CHECK_HRCMD(m_ovrSubmissionDevice->CreateUnorderedAccessView(
-                            candidate.image.Get(),
-                            &desc,
-                            candidate.uav.GetAddressOf()));
+                            candidate.image.Get(), &desc, candidate.uav.GetAddressOf()));
                         setDebugName(candidate.uav.Get(),
                                      fmt::format("Precompositor Intermediate UAV [{}, {}]", eye, (void*)&xrSwapchain));
                     }
@@ -259,10 +257,9 @@ namespace virtualdesktop_openxr {
                     // If we upscaled at the previous stage, the image occupies the entire texture.
                     constants.topLeft = !upscaling ? inputRect.offset : XrOffset2Di{0, 0};
                     constants.sourceMin = constants.topLeft;
-                    constants.sourceMax = !upscaling
-                                              ? XrOffset2Di{inputRect.offset.x + inputRect.extent.width - 1,
-                                                            inputRect.offset.y + inputRect.extent.height - 1}
-                                              : XrOffset2Di{outputResolution.w - 1, outputResolution.h - 1};
+                    constants.sourceMax = !upscaling ? XrOffset2Di{inputRect.offset.x + inputRect.extent.width - 1,
+                                                                   inputRect.offset.y + inputRect.extent.height - 1}
+                                                     : XrOffset2Di{outputResolution.w - 1, outputResolution.h - 1};
                     constants.outputSize = {outputResolution.w, outputResolution.h};
                     constants.isSRGB = outputIsSRGB;
 
@@ -287,8 +284,7 @@ namespace virtualdesktop_openxr {
                     m_ovrSubmissionContext->CSSetShaderResources(
                         0, 1, xrSwapchain.intermediate[eye].srv.GetAddressOf());
                 } else {
-                    m_ovrSubmissionContext->CSSetShaderResources(
-                        0, 1, &inputSrv);
+                    m_ovrSubmissionContext->CSSetShaderResources(0, 1, &inputSrv);
                 }
 
                 const uint32_t blockWidth = 16;
@@ -320,7 +316,8 @@ namespace virtualdesktop_openxr {
         }
     }
 
-    void OpenXrRuntime::alignDepthLayer(const XrSwapchainSubImage** color, const XrSwapchainSubImage** depth,
+    void OpenXrRuntime::alignDepthLayer(const XrSwapchainSubImage** color,
+                                        const XrSwapchainSubImage** depth,
                                         ovrLayerEyeFovDepth& layer) {
         Swapchain& owner = *(Swapchain*)color[0]->swapchain;
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
@@ -334,7 +331,8 @@ namespace virtualdesktop_openxr {
             CHECK_OVRCMD(ovr_GetTextureSwapChainDesc(m_ovrSession, layer.ColorTexture[eye], &colorDesc));
             if (input.ovrDesc.Width == colorDesc.Width && input.ovrDesc.Height == colorDesc.Height &&
                 sourceRect.offset.x == destinationRect.Pos.x && sourceRect.offset.y == destinationRect.Pos.y &&
-                sourceRect.extent.width == destinationRect.Size.w && sourceRect.extent.height == destinationRect.Size.h) {
+                sourceRect.extent.width == destinationRect.Size.w &&
+                sourceRect.extent.height == destinationRect.Size.h) {
                 continue;
             }
 
@@ -396,7 +394,8 @@ namespace virtualdesktop_openxr {
                 desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
                 desc.Texture2D.MipLevels = 1;
                 CHECK_HRCMD(m_ovrSubmissionDevice->CreateShaderResourceView(
-                    source.images[source.lastCommittedIndex].Get(), &desc,
+                    source.images[source.lastCommittedIndex].Get(),
+                    &desc,
                     source.srvs[source.lastCommittedIndex].ReleaseAndGetAddressOf()));
             }
             if (m_d3d11Device == m_ovrSubmissionDevice && !m_d3d11ContextState) {
@@ -406,10 +405,13 @@ namespace virtualdesktop_openxr {
             int index = 0;
             CHECK_OVRCMD(ovr_GetTextureSwapChainCurrentIndex(m_ovrSession, output.ovrSwapchain, &index));
             CHECK_MSG(index >= 0 && (size_t)index < output.dsvs.size(), "Aligned depth swapchain is incomplete");
-            AlignDepthPSConstants constants{sourceRect.offset, sourceRect.extent,
-                {destinationRect.Pos.x, destinationRect.Pos.y}, {destinationRect.Size.w, destinationRect.Size.h}};
+            AlignDepthPSConstants constants{sourceRect.offset,
+                                            sourceRect.extent,
+                                            {destinationRect.Pos.x, destinationRect.Pos.y},
+                                            {destinationRect.Size.w, destinationRect.Size.h}};
             D3D11_MAPPED_SUBRESOURCE mapped{};
-            CHECK_HRCMD(m_ovrSubmissionContext->Map(m_alignDepthConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
+            CHECK_HRCMD(
+                m_ovrSubmissionContext->Map(m_alignDepthConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
             memcpy(mapped.pData, &constants, sizeof(constants));
             m_ovrSubmissionContext->Unmap(m_alignDepthConstants.Get(), 0);
             m_ovrSubmissionContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -420,8 +422,12 @@ namespace virtualdesktop_openxr {
             m_ovrSubmissionContext->OMSetRenderTargets(0, nullptr, output.dsvs[index].Get());
             m_ovrSubmissionContext->OMSetDepthStencilState(m_noDepthReadState.Get(), 0xff);
             m_ovrSubmissionContext->RSSetState(nullptr);
-            D3D11_VIEWPORT viewport{(float)destinationRect.Pos.x, (float)destinationRect.Pos.y,
-                (float)destinationRect.Size.w, (float)destinationRect.Size.h, 0.f, 1.f};
+            D3D11_VIEWPORT viewport{(float)destinationRect.Pos.x,
+                                    (float)destinationRect.Pos.y,
+                                    (float)destinationRect.Size.w,
+                                    (float)destinationRect.Size.h,
+                                    0.f,
+                                    1.f};
             m_ovrSubmissionContext->RSSetViewports(1, &viewport);
             m_ovrSubmissionContext->Draw(3, 0);
             m_ovrSubmissionContext->OMSetRenderTargets(0, nullptr, nullptr);
@@ -451,7 +457,8 @@ namespace virtualdesktop_openxr {
             desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
             desc.Usage = D3D11_USAGE_DYNAMIC;
             desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-            CHECK_HRCMD(m_ovrSubmissionDevice->CreateBuffer(&desc, nullptr, m_alignDepthConstants.ReleaseAndGetAddressOf()));
+            CHECK_HRCMD(
+                m_ovrSubmissionDevice->CreateBuffer(&desc, nullptr, m_alignDepthConstants.ReleaseAndGetAddressOf()));
         }
         {
             D3D11_BUFFER_DESC desc{};

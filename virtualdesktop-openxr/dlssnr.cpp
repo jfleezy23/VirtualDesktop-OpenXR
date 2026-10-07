@@ -72,11 +72,8 @@ namespace ngx {
 
     const bool forceManualLoad = false;
     wil::unique_hmodule dlssnrModule;
-    using InitExt = NVSDK_NGX_Result(NVSDK_CONV*)(unsigned long long,
-                                                const wchar_t*,
-                                                ID3D12Device*,
-                                                NVSDK_NGX_Version,
-                                                const NVSDK_NGX_Parameter*);
+    using InitExt = NVSDK_NGX_Result(NVSDK_CONV*)(
+        unsigned long long, const wchar_t*, ID3D12Device*, NVSDK_NGX_Version, const NVSDK_NGX_Parameter*);
     InitExt Init_Ext{nullptr};
     decltype(&::NVSDK_NGX_D3D12_Shutdown1) Shutdown1{nullptr};
     ComPtr<ID3D12Device> initializedDevice;
@@ -95,7 +92,8 @@ namespace ngx {
     void retainRuntimeOnCleanupFailure() noexcept {
         HMODULE runtime;
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-                               reinterpret_cast<LPCWSTR>(&retainRuntimeOnCleanupFailure), &runtime)) {
+                                reinterpret_cast<LPCWSTR>(&retainRuntimeOnCleanupFailure),
+                                &runtime)) {
             OutputDebugStringA("VDXR: could not retain runtime after NR cleanup failure\n");
         }
     }
@@ -129,8 +127,8 @@ namespace ngx {
             CHECK_MSG(VirtualProtect(patch.slot, sizeof(PVOID), PAGE_READWRITE, &protection),
                       "Cannot restore NR import protection");
             const bool restored = InterlockedCompareExchangePointer(
-                patch.slot, patch.original, reinterpret_cast<PVOID>(&nrGetModuleFileNameW)) ==
-                reinterpret_cast<PVOID>(&nrGetModuleFileNameW);
+                                      patch.slot, patch.original, reinterpret_cast<PVOID>(&nrGetModuleFileNameW)) ==
+                                  reinterpret_cast<PVOID>(&nrGetModuleFileNameW);
             // A later importer may still call our shim. Preserve its slot and retain both modules on failure.
             if (restored) {
                 moduleNameImports.pop_back();
@@ -144,20 +142,25 @@ namespace ngx {
 
     void installModuleNameImports(HMODULE module) {
         std::vector<ImportPatch> imports;
-        CHECK_MSG(DetourEnumerateImportsEx(module, &imports, nullptr,
-            [](PVOID context, DWORD, LPCSTR name, PVOID* slot) -> BOOL {
-                if (name && slot && std::string_view(name) == "GetModuleFileNameW") {
-                    static_cast<std::vector<ImportPatch>*>(context)->push_back({slot, *slot});
-                }
-                return TRUE;
-            }), "Cannot enumerate NR imports");
+        CHECK_MSG(DetourEnumerateImportsEx(module,
+                                           &imports,
+                                           nullptr,
+                                           [](PVOID context, DWORD, LPCSTR name, PVOID* slot) -> BOOL {
+                                               if (name && slot && std::string_view(name) == "GetModuleFileNameW") {
+                                                   static_cast<std::vector<ImportPatch>*>(context)->push_back(
+                                                       {slot, *slot});
+                                               }
+                                               return TRUE;
+                                           }),
+                  "Cannot enumerate NR imports");
         moduleNameImports.reserve(imports.size());
         for (const auto& patch : imports) {
             DWORD protection;
             CHECK_MSG(VirtualProtect(patch.slot, sizeof(PVOID), PAGE_READWRITE, &protection),
                       "Cannot update NR import protection");
-            const bool installed = InterlockedCompareExchangePointer(
-                patch.slot, reinterpret_cast<PVOID>(&nrGetModuleFileNameW), patch.original) == patch.original;
+            const bool installed = InterlockedCompareExchangePointer(patch.slot,
+                                                                     reinterpret_cast<PVOID>(&nrGetModuleFileNameW),
+                                                                     patch.original) == patch.original;
             if (installed) {
                 moduleNameImports.push_back(patch);
             }
@@ -172,8 +175,8 @@ namespace ngx {
         wil::unique_hmodule candidate(LoadLibraryW(path.c_str()));
         CHECK_MSG(candidate.get(), "Failed to load DLSS-NR module");
         const auto init = reinterpret_cast<InitExt>(GetProcAddress(candidate.get(), "NVSDK_NGX_D3D12_Init_Ext"));
-        const auto shutdown = reinterpret_cast<decltype(Shutdown1)>(
-            GetProcAddress(candidate.get(), "NVSDK_NGX_D3D12_Shutdown1"));
+        const auto shutdown =
+            reinterpret_cast<decltype(Shutdown1)>(GetProcAddress(candidate.get(), "NVSDK_NGX_D3D12_Shutdown1"));
         const auto create = reinterpret_cast<decltype(NVSDK_NGX_D3D12_CreateFeature)>(
             GetProcAddress(candidate.get(), "NVSDK_NGX_D3D12_CreateFeature"));
         const auto release = reinterpret_cast<decltype(NVSDK_NGX_D3D12_ReleaseFeature)>(
@@ -247,9 +250,9 @@ namespace virtualdesktop_openxr {
                                   views[1]->imageRect.offset.x + views[1]->imageRect.extent.width,
                                   views[1]->imageRect.offset.y + views[1]->imageRect.extent.height}};
 
-        const BOX outputBox[2] = {{0, 0, views[0]->imageRect.extent.width, views[0]->imageRect.extent.height},
-                                  {resolution.w, 0, resolution.w + views[1]->imageRect.extent.width,
-                                   views[1]->imageRect.extent.height}};
+        const BOX outputBox[2] = {
+            {0, 0, views[0]->imageRect.extent.width, views[0]->imageRect.extent.height},
+            {resolution.w, 0, resolution.w + views[1]->imageRect.extent.width, views[1]->imageRect.extent.height}};
 
         // Resize resources if needed.
         const auto format = ((Swapchain*)views[0]->swapchain)->ovrDesc.Format;
@@ -293,7 +296,7 @@ namespace virtualdesktop_openxr {
                 std::min(eyeResolution.w, (int)xr::math::AlignTo<4>((uint32_t)(eyeResolution.w * foveatedScale))),
                 std::min(eyeResolution.h, (int)xr::math::AlignTo<4>((uint32_t)(eyeResolution.h * foveatedScale)))};
             const ovrVector2i offset = {(eyeResolution.w - eyeFoveatedResolution.w) / 2,
-                                       (eyeResolution.h - eyeFoveatedResolution.h) / 2};
+                                        (eyeResolution.h - eyeFoveatedResolution.h) / 2};
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthInverted, nearZ > farZ);
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Enabled, true);
 
@@ -323,10 +326,10 @@ namespace virtualdesktop_openxr {
                     if (ngx::initializedDevice.Get() != m_dlssnrDevice.Get()) {
                         CHECK_MSG(ngx::Init_Ext && ngx::Shutdown1, "DLSS-NR module load did not complete");
                         CHECK_NGXCMD(ngx::Init_Ext(123456,
-                                              virtualdesktop_openxr::programData.c_str(),
-                                              m_dlssnrDevice.Get(),
-                                              NVSDK_NGX_Version_API,
-                                              nullptr));
+                                                   virtualdesktop_openxr::programData.c_str(),
+                                                   m_dlssnrDevice.Get(),
+                                                   NVSDK_NGX_Version_API,
+                                                   nullptr));
                         ngx::initializedDevice = m_dlssnrDevice;
                     }
 
@@ -401,10 +404,14 @@ namespace virtualdesktop_openxr {
                 // Map the color crop into the depth image's own coordinates, including its offset.
                 depthBox.left = rect.offset.x + (int)((int64_t)offset.x * rect.extent.width / eyeResolution.w);
                 depthBox.top = rect.offset.y + (int)((int64_t)offset.y * rect.extent.height / eyeResolution.h);
-                depthBox.right = rect.offset.x + (int)(((int64_t)(offset.x + eyeFoveatedResolution.w) *
-                                                       rect.extent.width + eyeResolution.w - 1) / eyeResolution.w);
-                depthBox.bottom = rect.offset.y + (int)(((int64_t)(offset.y + eyeFoveatedResolution.h) *
-                                                        rect.extent.height + eyeResolution.h - 1) / eyeResolution.h);
+                depthBox.right =
+                    rect.offset.x +
+                    (int)(((int64_t)(offset.x + eyeFoveatedResolution.w) * rect.extent.width + eyeResolution.w - 1) /
+                          eyeResolution.w);
+                depthBox.bottom =
+                    rect.offset.y +
+                    (int)(((int64_t)(offset.y + eyeFoveatedResolution.h) * rect.extent.height + eyeResolution.h - 1) /
+                          eyeResolution.h);
                 m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseX, depthBox.left);
                 m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseY, depthBox.top);
                 m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectWidth, depthBox.right - depthBox.left);
@@ -475,8 +482,8 @@ namespace virtualdesktop_openxr {
             }
 
             // Go!
-            CHECK_NGXCMD(m_dlssnrFeatureEvaluate[eye](
-                cmdList.Commands.Get(), m_dlssnrFeature[eye], m_ngxParameters, nullptr));
+            CHECK_NGXCMD(
+                m_dlssnrFeatureEvaluate[eye](cmdList.Commands.Get(), m_dlssnrFeature[eye], m_ngxParameters, nullptr));
         }
 
         // Serialize and commit output.
@@ -609,7 +616,8 @@ namespace virtualdesktop_openxr {
         // We'll use a fence to serialize pre-compositor output to DLSS-NR input.
         {
             wil::unique_handle fenceHandle;
-            CHECK_HRCMD(m_ovrSubmissionCompletionFence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, fenceHandle.put()));
+            CHECK_HRCMD(
+                m_ovrSubmissionCompletionFence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, fenceHandle.put()));
             CHECK_HRCMD(m_dlssnrDevice->OpenSharedHandle(fenceHandle.get(),
                                                          IID_PPV_ARGS(m_dlssnrInFence.ReleaseAndGetAddressOf())));
         }
@@ -639,10 +647,10 @@ namespace virtualdesktop_openxr {
         if (ngx::dlssnrModule) {
             CHECK_MSG(ngx::Init_Ext && ngx::Shutdown1, "DLSS-NR module load did not complete");
             CHECK_NGXCMD(ngx::Init_Ext(123456,
-                                     virtualdesktop_openxr::programData.c_str(),
-                                     m_dlssnrDevice.Get(),
-                                     NVSDK_NGX_Version_API,
-                                     nullptr));
+                                       virtualdesktop_openxr::programData.c_str(),
+                                       m_dlssnrDevice.Get(),
+                                       NVSDK_NGX_Version_API,
+                                       nullptr));
             ngx::initializedDevice = m_dlssnrDevice;
         }
     }

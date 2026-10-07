@@ -106,10 +106,10 @@ namespace virtualdesktop_openxr {
                 m_idealFrameDuration = m_predictedFrameDuration = 1.0 / hmdInfo.DisplayRefreshRate;
             }
 
-            frameState->shouldRender =
-                (!m_isHeadless && !m_sessionStopping && !m_sessionExiting && !m_sessionLossPending && m_hmdStatus.IsVisible)
-                    ? XR_TRUE
-                    : XR_FALSE;
+            frameState->shouldRender = (!m_isHeadless && !m_sessionStopping && !m_sessionExiting &&
+                                        !m_sessionLossPending && m_hmdStatus.IsVisible)
+                                           ? XR_TRUE
+                                           : XR_FALSE;
 
             m_frameTimerApp.stop();
             m_lastCpuFrameTimeUs = m_frameTimerApp.query();
@@ -574,7 +574,8 @@ namespace virtualdesktop_openxr {
 
             // Defer initialization of mirror window resources until they are first needed.
             try {
-                if (!m_isHeadless && m_useMirrorWindow.load(std::memory_order_relaxed) && !m_mirrorWindowThread.joinable()) {
+                if (!m_isHeadless && m_useMirrorWindow.load(std::memory_order_relaxed) &&
+                    !m_mirrorWindowThread.joinable()) {
                     createMirrorWindow();
                 }
                 updateMirrorWindow(m_precompositor.isProj0SRGB);
@@ -700,7 +701,8 @@ namespace virtualdesktop_openxr {
             resolveSwapchainImage(xrSwapchain,
                                   proj.views[viewIndex].subImage.imageArrayIndex,
                                   m_precompositor.resolvedSwapchainImages,
-                                  needUpscaling || needUplifting /* Skip committing if we will not use the swapchain directly */);
+                                  needUpscaling ||
+                                      needUplifting /* Skip committing if we will not use the swapchain directly */);
             layer.EyeFov.ColorTexture[viewIndex] =
                 xrSwapchain.resolvedSlices[proj.views[viewIndex].subImage.imageArrayIndex].ovrSwapchain;
 
@@ -1175,7 +1177,8 @@ namespace virtualdesktop_openxr {
                     const auto result = ovr_WaitToBeginFrame(m_ovrSession, ovrFrameId);
                     TraceLoggingWriteStop(waitToBeginFrame, "OVR_WaitToBeginFrame", TLArg((int)result, "Result"));
                     if (result == ovrError_Timeout) {
-                        ErrorLog("Timeout in async submission thread! This is normal if you have a debugger attached.\n");
+                        ErrorLog(
+                            "Timeout in async submission thread! This is normal if you have a debugger attached.\n");
                     } else if (result == ovrError_NotInitialized) {
                         ErrorLog("Not initialized in async sybmission thread! Retrying...\n");
                         std::this_thread::sleep_for(1ms);
@@ -1259,16 +1262,13 @@ namespace virtualdesktop_openxr {
         std::unique_lock lock(m_asyncSubmissionMutex);
 
         bool wokeUpEarly = false;
-        const auto ready = [&] {
-            return m_asyncSubmissionReady || m_terminateAsyncThread || m_asyncSubmissionError;
-        };
+        const auto ready = [&] { return m_asyncSubmissionReady || m_terminateAsyncThread || m_asyncSubmissionError; };
         if (doRunningStart && m_lastWaitToBeginFrameTime != std::chrono::high_resolution_clock::time_point{}) {
             constexpr double RunningStart = 0.002;
             const auto timeout =
                 m_lastWaitToBeginFrameTime + std::chrono::duration<double>(predictedFrameDuration - RunningStart);
 
-            wokeUpEarly =
-                !m_asyncSubmissionCondVar.wait_until(lock, timeout, ready);
+            wokeUpEarly = !m_asyncSubmissionCondVar.wait_until(lock, timeout, ready);
         } else {
             m_asyncSubmissionCondVar.wait(lock, ready);
         }

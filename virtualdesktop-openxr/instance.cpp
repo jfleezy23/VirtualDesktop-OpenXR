@@ -59,12 +59,12 @@ namespace virtualdesktop_openxr {
         }
 
         // Register the next registry change before reading settings, then rearm the wait after the read.
-        const auto error = RegNotifyChangeKeyValue(key.get(),
-                                                   TRUE,
-                                                   REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME |
-                                                       REG_NOTIFY_THREAD_AGNOSTIC,
-                                                   event.get(),
-                                                   TRUE);
+        const auto error =
+            RegNotifyChangeKeyValue(key.get(),
+                                    TRUE,
+                                    REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_THREAD_AGNOSTIC,
+                                    event.get(),
+                                    TRUE);
         if (error == ERROR_SUCCESS || error == ERROR_ACCESS_DENIED || error == ERROR_KEY_DELETED) {
             try {
                 owner->refreshSettings();
@@ -138,9 +138,11 @@ namespace virtualdesktop_openxr {
                 state->event.reset(CreateEventW(nullptr, FALSE, FALSE, nullptr));
                 CHECK_MSG(state->event, "Failed to create registry notification event");
                 CHECK_HRCMD(HRESULT_FROM_WIN32(RegNotifyChangeKeyValue(
-                    state->key.get(), TRUE,
+                    state->key.get(),
+                    TRUE,
                     REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_THREAD_AGNOSTIC,
-                    state->event.get(), TRUE)));
+                    state->event.get(),
+                    TRUE)));
                 wil::unique_threadpool_wait wait(
                     CreateThreadpoolWait(&SettingsWatcherState::callback, state.get(), nullptr));
                 CHECK_MSG(wait, "Failed to create registry notification wait");
@@ -419,7 +421,8 @@ namespace virtualdesktop_openxr {
             // The OpenXR loader ignores a downstream DestroyInstance error before unloading the runtime. Retain
             // unsafe NR/device state and our code so that it cannot unload under a surviving vendor worker/import.
             retainDlssnrRuntimeOnCleanupFailure();
-            ErrorLog("Instance cleanup failed; retaining the runtime until process exit. Restart the VR application.\n");
+            ErrorLog(
+                "Instance cleanup failed; retaining the runtime until process exit. Restart the VR application.\n");
             throw;
         }
 
@@ -556,13 +559,12 @@ namespace virtualdesktop_openxr {
         if (!canSendVisibilityChange) {
             m_visibilityMaskDirty.store(0, std::memory_order_release);
         }
-        auto visibilityMaskChanges = canSendVisibilityChange
-            ? m_visibilityMaskDirty.load(std::memory_order_acquire) : 0;
-        while (visibilityMaskChanges &&
-               !m_visibilityMaskDirty.compare_exchange_weak(visibilityMaskChanges,
-                                                          visibilityMaskChanges - 1,
-                                                          std::memory_order_acq_rel,
-                                                          std::memory_order_acquire)) {
+        auto visibilityMaskChanges =
+            canSendVisibilityChange ? m_visibilityMaskDirty.load(std::memory_order_acquire) : 0;
+        while (visibilityMaskChanges && !m_visibilityMaskDirty.compare_exchange_weak(visibilityMaskChanges,
+                                                                                     visibilityMaskChanges - 1,
+                                                                                     std::memory_order_acq_rel,
+                                                                                     std::memory_order_acquire)) {
         }
         if (visibilityMaskChanges) {
             XrEventDataVisibilityMaskChangedKHR* const buffer =

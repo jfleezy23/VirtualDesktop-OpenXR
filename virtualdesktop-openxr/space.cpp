@@ -424,8 +424,8 @@ namespace virtualdesktop_openxr {
                 if (std::abs(worldScale - 1.f) > FLT_EPSILON) {
                     // Patch the views with our IPD before returning to the application.
                     // Store the actual IPD as reported by the runtime so we can restore it later in xrEndFrame().
-                    m_lastSeenIpd = overrideIpd(
-                        views[xr::StereoView::Left].pose, views[xr::StereoView::Right].pose, worldScale);
+                    m_lastSeenIpd =
+                        overrideIpd(views[xr::StereoView::Left].pose, views[xr::StereoView::Right].pose, worldScale);
                 } else {
                     m_lastSeenIpd.reset();
                 }
@@ -574,9 +574,10 @@ namespace virtualdesktop_openxr {
                 DirectX::XMQuaternionConjugate(LoadXrQuaternion(baseSpaceToVirtual.orientation));
             velocity->velocityFlags = spaceToVirtualVelocity.velocityFlags & baseSpaceToVirtualVelocity.velocityFlags;
             if (velocity->velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) {
-                StoreXrVector3(&velocity->angularVelocity, DirectX::XMVector3Rotate(
-                    LoadXrVector3(spaceToVirtualVelocity.angularVelocity - baseSpaceToVirtualVelocity.angularVelocity),
-                    inverseBaseOrientation));
+                StoreXrVector3(&velocity->angularVelocity,
+                               DirectX::XMVector3Rotate(LoadXrVector3(spaceToVirtualVelocity.angularVelocity -
+                                                                      baseSpaceToVirtualVelocity.angularVelocity),
+                                                        inverseBaseOrientation));
             }
             if (velocity->velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) {
                 auto relativeLinear =
@@ -584,15 +585,17 @@ namespace virtualdesktop_openxr {
                 const auto separation = spaceToVirtual.position - baseSpaceToVirtual.position;
                 if (separation.x != 0.f || separation.y != 0.f || separation.z != 0.f) {
                     if (baseSpaceToVirtualVelocity.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) {
-                        relativeLinear = DirectX::XMVectorSubtract(relativeLinear, DirectX::XMVector3Cross(
-                            LoadXrVector3(baseSpaceToVirtualVelocity.angularVelocity), LoadXrVector3(separation)));
+                        relativeLinear = DirectX::XMVectorSubtract(
+                            relativeLinear,
+                            DirectX::XMVector3Cross(LoadXrVector3(baseSpaceToVirtualVelocity.angularVelocity),
+                                                    LoadXrVector3(separation)));
                     } else {
                         velocity->velocityFlags &= ~XR_SPACE_VELOCITY_LINEAR_VALID_BIT;
                     }
                 }
                 if (velocity->velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) {
                     StoreXrVector3(&velocity->linearVelocity,
-                                  DirectX::XMVector3Rotate(relativeLinear, inverseBaseOrientation));
+                                   DirectX::XMVector3Rotate(relativeLinear, inverseBaseOrientation));
                 }
             }
         }
@@ -753,9 +756,11 @@ namespace virtualdesktop_openxr {
             const auto offset = pose.position - velocityOrigin;
             if (offset.x != 0.f || offset.y != 0.f || offset.z != 0.f) {
                 if (velocity->velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) {
-                    StoreXrVector3(&velocity->linearVelocity, DirectX::XMVectorAdd(
-                        LoadXrVector3(velocity->linearVelocity), DirectX::XMVector3Cross(
-                            LoadXrVector3(velocity->angularVelocity), LoadXrVector3(offset))));
+                    StoreXrVector3(
+                        &velocity->linearVelocity,
+                        DirectX::XMVectorAdd(
+                            LoadXrVector3(velocity->linearVelocity),
+                            DirectX::XMVector3Cross(LoadXrVector3(velocity->angularVelocity), LoadXrVector3(offset))));
                 } else {
                     velocity->velocityFlags &= ~XR_SPACE_VELOCITY_LINEAR_VALID_BIT;
                 }

@@ -359,7 +359,8 @@ namespace {
             if (m_swapchains.count(swapchain)) {
                 Swapchain* swapchainObject = (Swapchain*)swapchain;
                 // Return the free image that CommitSwapchainImage will make current for the consumer.
-                index = swapchainObject->desc.StaticImage ? 0
+                index = swapchainObject->desc.StaticImage
+                            ? 0
                             : (swapchainObject->lastCommittedIndex + 1) % k_SwapchainLength;
             }
 

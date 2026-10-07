@@ -451,7 +451,6 @@ namespace virtualdesktop_openxr {
                                       TLArg(desc.MiscFlags, "MiscFlags"));
                 }
             }
-
         }
         xrSwapchain.appSwapchain.images = std::move(images);
     }
@@ -793,8 +792,7 @@ namespace virtualdesktop_openxr {
         }
     }
 
-    void OpenXrRuntime::ensureSwapchainPrecompositorResources(Swapchain& xrSwapchain,
-                                                              const ovrSizei& resolution) {
+    void OpenXrRuntime::ensureSwapchainPrecompositorResources(Swapchain& xrSwapchain, const ovrSizei& resolution) {
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
             ovrSizei currentResolution{};
             if (xrSwapchain.stereoProjection[eye].ovrSwapchain) {
@@ -927,12 +925,15 @@ namespace virtualdesktop_openxr {
         if (m_ovrSubmissionContext && m_ovrSubmissionCompletionFence) {
             wil::unique_handle eventHandle;
             m_submissionFenceValue++;
-            TraceLoggingWrite(
-                g_traceProvider, "FlushContext_Wait", TLArg("D3D11 Submission", "Api"), TLArg(m_submissionFenceValue, "FenceValue"));
+            TraceLoggingWrite(g_traceProvider,
+                              "FlushContext_Wait",
+                              TLArg("D3D11 Submission", "Api"),
+                              TLArg(m_submissionFenceValue, "FenceValue"));
             CHECK_HRCMD(m_ovrSubmissionContext->Signal(m_ovrSubmissionCompletionFence.Get(), m_submissionFenceValue));
             *eventHandle.put() = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
             CHECK_MSG(eventHandle.get(), "Failed to create flush event");
-            CHECK_HRCMD(m_ovrSubmissionCompletionFence->SetEventOnCompletion(m_submissionFenceValue, eventHandle.get()));
+            CHECK_HRCMD(
+                m_ovrSubmissionCompletionFence->SetEventOnCompletion(m_submissionFenceValue, eventHandle.get()));
             WaitForSingleObject(eventHandle.get(), INFINITE);
             ResetEvent(eventHandle.get());
         }

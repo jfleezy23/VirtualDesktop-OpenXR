@@ -670,7 +670,8 @@ namespace virtualdesktop_openxr {
 
         // precompositor.cpp
         void upscaler(const XrSwapchainSubImage** subImages, ovrLayerEyeFov& layer);
-        void alignDepthLayer(const XrSwapchainSubImage** color, const XrSwapchainSubImage** depth,
+        void alignDepthLayer(const XrSwapchainSubImage** color,
+                             const XrSwapchainSubImage** depth,
                              ovrLayerEyeFovDepth& layer);
         void initializePrecompositorResources();
 

@@ -16,7 +16,9 @@
 
 namespace {
     std::array<std::atomic<uint32_t>, 5> calls{}; // Init, Create, Evaluate, Release, Shutdown.
-    struct TestFeature { uint64_t marker{0x4e52544553544f4eull}; };
+    struct TestFeature {
+        uint64_t marker{0x4e52544553544f4eull};
+    };
     std::mutex stateMutex;
     std::set<TestFeature*> liveFeatures;
     ID3D12Device* initializedDevice{};
@@ -28,24 +30,29 @@ namespace {
     DWORD WINAPI foreignModuleName(HMODULE, wchar_t* out, DWORD size) {
         constexpr wchar_t name[] = L"foreign.dll";
         constexpr DWORD length = static_cast<DWORD>(std::size(name) - 1);
-        if (!size) return 0;
-        if (!out) return 0;
+        if (!size)
+            return 0;
+        if (!out)
+            return 0;
         const auto copied = length < size ? length : size - 1;
-        for (DWORD i = 0; i < copied; ++i) out[i] = name[i];
+        for (DWORD i = 0; i < copied; ++i)
+            out[i] = name[i];
         out[copied] = L'\0';
         return length < size ? length : size;
     }
 
     bool replaceModuleNameImport(PVOID expected, PVOID replacement) {
-        if (!moduleNameSlot) return false;
+        if (!moduleNameSlot)
+            return false;
         DWORD protection{};
-        if (!VirtualProtect(moduleNameSlot, sizeof(PVOID), PAGE_READWRITE, &protection)) return false;
+        if (!VirtualProtect(moduleNameSlot, sizeof(PVOID), PAGE_READWRITE, &protection))
+            return false;
         const bool replaced = InterlockedCompareExchangePointer(moduleNameSlot, replacement, expected) == expected;
         DWORD ignored{};
         const bool protectedAgain = VirtualProtect(moduleNameSlot, sizeof(PVOID), protection, &ignored) != FALSE;
         return replaced && protectedAgain;
     }
-}
+} // namespace
 #define TEST_EXPORT extern "C" __declspec(dllexport)
 TEST_EXPORT uint32_t __cdecl NR_Test_GetVariant() {
 #ifdef NR_TEST_MISSING_EVALUATE
@@ -59,11 +66,14 @@ TEST_EXPORT uint32_t __cdecl NR_Test_GetVariant() {
 #endif
 }
 TEST_EXPORT void __cdecl NR_Test_GetStats(uint32_t* out, uint32_t count) {
-    if (!out || count != calls.size()) return;
-    for (uint32_t i = 0; i < count; ++i) out[i] = calls[i].load();
+    if (!out || count != calls.size())
+        return;
+    for (uint32_t i = 0; i < count; ++i)
+        out[i] = calls[i].load();
 }
 TEST_EXPORT void __cdecl NR_Test_GetHealth(uint32_t* out, uint32_t count) {
-    if (!out || count != 4) return;
+    if (!out || count != 4)
+        return;
     std::lock_guard lock(stateMutex);
     out[0] = contractErrors.load();
     out[1] = static_cast<uint32_t>(liveFeatures.size());
@@ -76,13 +86,20 @@ TEST_EXPORT DWORD __cdecl NR_Test_GetModuleName(wchar_t* out, DWORD size) {
 TEST_EXPORT BOOL __cdecl NR_Test_InstallForeignImport() {
     HMODULE self{};
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            reinterpret_cast<LPCWSTR>(&NR_Test_GetModuleName), &self)) return FALSE;
+                            reinterpret_cast<LPCWSTR>(&NR_Test_GetModuleName),
+                            &self))
+        return FALSE;
     moduleNameSlot = nullptr;
-    if (!DetourEnumerateImportsEx(self, nullptr, nullptr,
-            [](PVOID, DWORD, LPCSTR name, PVOID* slot) -> BOOL {
-                if (name && slot && std::string_view(name) == "GetModuleFileNameW") moduleNameSlot = slot;
-                return TRUE;
-            }) || !moduleNameSlot) return FALSE;
+    if (!DetourEnumerateImportsEx(self,
+                                  nullptr,
+                                  nullptr,
+                                  [](PVOID, DWORD, LPCSTR name, PVOID* slot) -> BOOL {
+                                      if (name && slot && std::string_view(name) == "GetModuleFileNameW")
+                                          moduleNameSlot = slot;
+                                      return TRUE;
+                                  }) ||
+        !moduleNameSlot)
+        return FALSE;
     retainedShim = *moduleNameSlot;
     return replaceModuleNameImport(retainedShim, reinterpret_cast<PVOID>(&foreignModuleName));
 }
@@ -103,15 +120,23 @@ TEST_EXPORT NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_D3D12_Init_Ext(
     initializedDevice = device;
     return NVSDK_NGX_Result_Success; // Success is 0x1 in the retained NGX SDK.
 }
-TEST_EXPORT NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_D3D12_CreateFeature(
-    ID3D12GraphicsCommandList*, NVSDK_NGX_Feature, NVSDK_NGX_Parameter*, NVSDK_NGX_Handle** handle) {
+TEST_EXPORT NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_D3D12_CreateFeature(ID3D12GraphicsCommandList*,
+                                                                      NVSDK_NGX_Feature,
+                                                                      NVSDK_NGX_Parameter*,
+                                                                      NVSDK_NGX_Handle** handle) {
     ++calls[1];
-    if (!handle) return NVSDK_NGX_Result_FAIL_InvalidParameter;
+    if (!handle)
+        return NVSDK_NGX_Result_FAIL_InvalidParameter;
     auto* feature = new (std::nothrow) TestFeature;
-    if (!feature) return NVSDK_NGX_Result_FAIL_OutOfGPUMemory;
+    if (!feature)
+        return NVSDK_NGX_Result_FAIL_OutOfGPUMemory;
     {
         std::lock_guard lock(stateMutex);
-        if (!initializedDevice) { ++contractErrors; delete feature; return NVSDK_NGX_Result_FAIL_InvalidParameter; }
+        if (!initializedDevice) {
+            ++contractErrors;
+            delete feature;
+            return NVSDK_NGX_Result_FAIL_InvalidParameter;
+        }
         liveFeatures.insert(feature);
     }
     *handle = reinterpret_cast<NVSDK_NGX_Handle*>(feature);
@@ -132,9 +157,10 @@ TEST_EXPORT NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_D3D12_ReleaseFeature(NVSDK_NGX
     return NVSDK_NGX_Result_Success;
 }
 #ifndef NR_TEST_MISSING_EVALUATE
-TEST_EXPORT NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_D3D12_EvaluateFeature(
-    ID3D12GraphicsCommandList*, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter*,
-    PFN_NVSDK_NGX_ProgressCallback) {
+TEST_EXPORT NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCommandList*,
+                                                                        const NVSDK_NGX_Handle* handle,
+                                                                        const NVSDK_NGX_Parameter*,
+                                                                        PFN_NVSDK_NGX_ProgressCallback) {
     ++calls[2];
     std::lock_guard lock(stateMutex);
     auto* feature = reinterpret_cast<TestFeature*>(const_cast<NVSDK_NGX_Handle*>(handle));
@@ -153,7 +179,8 @@ TEST_EXPORT NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_D3D12_Shutdown1(ID3D12Device* 
         return NVSDK_NGX_Result_FAIL_InvalidParameter;
     }
 #ifdef NR_TEST_FAIL_SHUTDOWN_ONCE
-    if (attempt == 1) return NVSDK_NGX_Result_FAIL_PlatformError;
+    if (attempt == 1)
+        return NVSDK_NGX_Result_FAIL_PlatformError;
 #else
     (void)attempt;
 #endif

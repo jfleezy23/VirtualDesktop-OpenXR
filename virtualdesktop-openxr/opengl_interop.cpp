@@ -257,10 +257,10 @@ namespace virtualdesktop_openxr {
 
                 // Create the texture that the app will use.
                 GLuint image{};
-                const GLenum target = xrSwapchain.xrDesc.arraySize == 1
-                                          ? (xrSwapchain.xrDesc.sampleCount == 1 ? GL_TEXTURE_2D : GL_TEXTURE_2D_MULTISAMPLE)
-                                          : (xrSwapchain.xrDesc.sampleCount == 1 ? GL_TEXTURE_2D_ARRAY
-                                                                                : GL_TEXTURE_2D_MULTISAMPLE_ARRAY);
+                const GLenum target =
+                    xrSwapchain.xrDesc.arraySize == 1
+                        ? (xrSwapchain.xrDesc.sampleCount == 1 ? GL_TEXTURE_2D : GL_TEXTURE_2D_MULTISAMPLE)
+                        : (xrSwapchain.xrDesc.sampleCount == 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D_MULTISAMPLE_ARRAY);
                 m_glDispatch.glCreateTextures(target, 1, &image);
                 if (image) {
                     xrSwapchain.glImages.push_back(image);

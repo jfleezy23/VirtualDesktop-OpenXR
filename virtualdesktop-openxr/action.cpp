@@ -744,9 +744,10 @@ namespace virtualdesktop_openxr {
             if (isBound && side >= 0) {
                 if (m_isControllerActive[side]) {
                     // Per spec, the combined state is the absolute maximum of all values.
-                    const float sourceState = value.floatValue ? value.floatValue[side]
-                        : value.buttonMap ? (*value.buttonMap & value.buttonType ? 1.f : 0.f)
-                        : value.vector2fIndex == 0 ? value.vector2fValue[side].x : value.vector2fValue[side].y;
+                    const float sourceState = value.floatValue  ? value.floatValue[side]
+                                              : value.buttonMap ? (*value.buttonMap & value.buttonType ? 1.f : 0.f)
+                                              : value.vector2fIndex == 0 ? value.vector2fValue[side].x
+                                                                         : value.vector2fValue[side].y;
                     if (!combinedState || std::abs(sourceState) > std::abs(*combinedState)) {
                         combinedState = sourceState;
                     }
