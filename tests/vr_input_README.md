@@ -119,3 +119,12 @@ The visibility case calls real event polling before session creation, without th
 extension, and after actual empty CPU-only session destruction. It requires no
 invalid or unsupported visibility events, cleared pending events at destruction,
 and exactly one event per eye for an enabled live session after a quiescent change.
+
+`nonnr_resolution_regression.cpp` runs the production FSR-plus-sharpen upscaler on
+D3D11 WARP with intercepted OVR output allocation. Build with
+`vr_input_build.cmd -TestSource nonnr_resolution_regression.cpp`, then pass a mode
+and an OVRNull directory. Modes `resize` and `reuse` check changing dimensions,
+stable resource reuse and distinct-eye pixels; `texture`, `srv`, and `uav` (plus
+their `-right` variants) inject creation failures and require the prior complete
+intermediate entry to survive, followed by complete same-resolution recovery.
+These are resource correctness tests, not headset latency measurements.

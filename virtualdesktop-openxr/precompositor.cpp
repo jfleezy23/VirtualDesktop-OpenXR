@@ -103,6 +103,9 @@ namespace virtualdesktop_openxr {
                 }
                 if (!xrSwapchain.intermediate[eye].image || currentResolution.w != resolution.w ||
                     currentResolution.h != resolution.h) {
+                    // Publish the resized image and its views together. A failed view allocation must
+                    // leave the previous complete generation available and retryable on the next frame.
+                    IntermediateTexture candidate;
                     {
                         D3D11_TEXTURE2D_DESC desc{};
                         desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -113,9 +116,9 @@ namespace virtualdesktop_openxr {
                         desc.SampleDesc.Count = 1;
                         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
                         CHECK_HRCMD(m_ovrSubmissionDevice->CreateTexture2D(
-                            &desc, nullptr, xrSwapchain.intermediate[eye].image.ReleaseAndGetAddressOf()));
+                            &desc, nullptr, candidate.image.GetAddressOf()));
                         setDebugName(
-                            xrSwapchain.intermediate[eye].uav.Get(),
+                            candidate.image.Get(),
                             fmt::format("Precompositor Intermediate Texture [{}, {}]", eye, (void*)&xrSwapchain));
                     }
                     {
@@ -124,10 +127,10 @@ namespace virtualdesktop_openxr {
                         desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
                         desc.Texture2D.MipLevels = -1;
                         CHECK_HRCMD(m_ovrSubmissionDevice->CreateShaderResourceView(
-                            xrSwapchain.intermediate[eye].image.Get(),
+                            candidate.image.Get(),
                             &desc,
-                            xrSwapchain.intermediate[eye].srv.ReleaseAndGetAddressOf()));
-                        setDebugName(xrSwapchain.intermediate[eye].srv.Get(),
+                            candidate.srv.GetAddressOf()));
+                        setDebugName(candidate.srv.Get(),
                                      fmt::format("Precompositor Intermediate SRV [{}, {}]", eye, (void*)&xrSwapchain));
                     }
                     {
@@ -135,12 +138,13 @@ namespace virtualdesktop_openxr {
                         desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
                         desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
                         CHECK_HRCMD(m_ovrSubmissionDevice->CreateUnorderedAccessView(
-                            xrSwapchain.intermediate[eye].image.Get(),
+                            candidate.image.Get(),
                             &desc,
-                            xrSwapchain.intermediate[eye].uav.ReleaseAndGetAddressOf()));
-                        setDebugName(xrSwapchain.intermediate[eye].uav.Get(),
+                            candidate.uav.GetAddressOf()));
+                        setDebugName(candidate.uav.Get(),
                                      fmt::format("Precompositor Intermediate UAV [{}, {}]", eye, (void*)&xrSwapchain));
                     }
+                    xrSwapchain.intermediate[eye] = std::move(candidate);
                 }
             }
         }
