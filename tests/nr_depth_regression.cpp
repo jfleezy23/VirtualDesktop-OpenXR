@@ -314,10 +314,11 @@ int main(int argc, char** argv) {
     if (!variable)                                                                                                     \
         throw std::runtime_error("Missing " #name);
         OVR_LOAD(originalEnd, ovr_EndFrame)
-        OVR_LOAD(originalCommit, ovr_CommitTextureSwapChain) OVR_LOAD(getBuffer, ovr_GetTextureSwapChainBufferDX)
-            OVR_LOAD(getIndex, ovr_GetTextureSwapChainCurrentIndex)
+        OVR_LOAD(originalCommit, ovr_CommitTextureSwapChain)
+        OVR_LOAD(getBuffer, ovr_GetTextureSwapChainBufferDX)
+        OVR_LOAD(getIndex, ovr_GetTextureSwapChainCurrentIndex)
 #undef OVR_LOAD
-                checkHr(HRESULT_FROM_WIN32(DetourTransactionBegin()));
+        checkHr(HRESULT_FROM_WIN32(DetourTransactionBegin()));
         checkHr(HRESULT_FROM_WIN32(DetourUpdateThread(GetCurrentThread())));
         checkHr(HRESULT_FROM_WIN32(DetourAttach(reinterpret_cast<PVOID*>(&originalCommit), hookCommit)));
         checkHr(HRESULT_FROM_WIN32(DetourAttach(reinterpret_cast<PVOID*>(&originalEnd), hookEnd)));
