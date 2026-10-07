@@ -22,6 +22,8 @@
 
 #include "pch.h"
 
+#include <array>
+
 #include "log.h"
 #include "runtime.h"
 #include "utils.h"
@@ -546,12 +548,13 @@ namespace virtualdesktop_openxr {
             // Submit the layers to OVR.
             const long long ovrFrameId = m_frameBegun - 1;
             if (!m_useAsyncSubmission) {
-                std::vector<ovrLayerHeader*> layers;
+                std::array<ovrLayerHeader*, ovrMaxLayerCount> layers{};
+                unsigned int layerCount = 0;
                 for (auto& layer : layersAllocator) {
-                    layers.push_back(&layer.Header);
+                    layers[layerCount++] = &layer.Header;
 
-                    if (layers.size() == ovrMaxLayerCount) {
-                        ErrorLog("Too many layers in this frame (%u)\n", layersAllocator.size());
+                    if (layerCount == ovrMaxLayerCount) {
+                        ErrorLog("Too many layers in this frame (%zu)\n", layersAllocator.size());
                         break;
                     }
                 }
@@ -560,15 +563,14 @@ namespace virtualdesktop_openxr {
                 TraceLoggingWriteStart(endFrame,
                                        "OVR_EndFrame",
                                        TLArg(ovrFrameId, "FrameId"),
-                                       TLArg(layers.size(), "NumLayers"),
+                                       TLArg(layerCount, "NumLayers"),
                                        TLArg(m_frameTimes.size(), "Fps"),
                                        TLArg(lastPrecompositionTime, "LastPrecompositionTimeUs"));
                 ovrViewScaleDesc scaleDesc{};
                 scaleDesc.HmdToEyePose[xr::StereoView::Left] = m_cachedEyeInfo[xr::StereoView::Left].HmdToEyePose;
                 scaleDesc.HmdToEyePose[xr::StereoView::Right] = m_cachedEyeInfo[xr::StereoView::Right].HmdToEyePose;
                 scaleDesc.HmdSpaceToWorldScaleInMeters = 1.f;
-                CHECK_OVRCMD(
-                    ovr_EndFrame(m_ovrSession, ovrFrameId, &scaleDesc, layers.data(), (unsigned int)layers.size()));
+                CHECK_OVRCMD(ovr_EndFrame(m_ovrSession, ovrFrameId, &scaleDesc, layers.data(), layerCount));
                 TraceLoggingWriteStop(endFrame, "OVR_EndFrame");
             }
 
@@ -1221,11 +1223,12 @@ namespace virtualdesktop_openxr {
                 }
 
                 {
-                    std::vector<ovrLayerHeader*> layers;
+                    std::array<ovrLayerHeader*, ovrMaxLayerCount> layers{};
+                    unsigned int layerCount = 0;
                     for (auto& layer : m_layersForAsyncSubmission) {
-                        layers.push_back(&layer.Header);
+                        layers[layerCount++] = &layer.Header;
 
-                        if (layers.size() == ovrMaxLayerCount) {
+                        if (layerCount == ovrMaxLayerCount) {
                             if (m_layersForAsyncSubmission.size() > ovrMaxLayerCount) {
                                 ErrorLog("Too many layers in this frame (%zu)\n", m_layersForAsyncSubmission.size());
                             }
@@ -1235,13 +1238,12 @@ namespace virtualdesktop_openxr {
 
                     TraceLocalActivity(endFrame);
                     TraceLoggingWriteStart(
-                        endFrame, "OVR_EndFrame", TLArg(ovrFrameId, "FrameId"), TLArg(layers.size(), "NumLayers"));
+                        endFrame, "OVR_EndFrame", TLArg(ovrFrameId, "FrameId"), TLArg(layerCount, "NumLayers"));
                     ovrViewScaleDesc scaleDesc{};
                     scaleDesc.HmdToEyePose[xr::StereoView::Left] = m_cachedEyeInfo[xr::StereoView::Left].HmdToEyePose;
                     scaleDesc.HmdToEyePose[xr::StereoView::Right] = m_cachedEyeInfo[xr::StereoView::Right].HmdToEyePose;
                     scaleDesc.HmdSpaceToWorldScaleInMeters = 1.f;
-                    CHECK_OVRCMD(
-                        ovr_EndFrame(m_ovrSession, ovrFrameId, &scaleDesc, layers.data(), (unsigned int)layers.size()));
+                    CHECK_OVRCMD(ovr_EndFrame(m_ovrSession, ovrFrameId, &scaleDesc, layers.data(), layerCount));
                     TraceLoggingWriteStop(endFrame, "OVR_EndFrame");
                 }
             }

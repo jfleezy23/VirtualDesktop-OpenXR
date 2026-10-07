@@ -16,6 +16,8 @@ namespace {
         unsigned layerCount;
         std::vector<ovrLayerHeader> layers;
         float worldScale;
+        bool pointerListOnStack{};
+        std::vector<int> quadOrder;
     };
 
     struct BackendState {
@@ -51,6 +53,7 @@ namespace {
     decltype(&ovr_EndFrame) originalEnd;
     decltype(&ovr_GetSessionStatus) originalStatus;
     decltype(&ovr_GetHmdDesc) originalHmdDesc;
+    decltype(&ovr_GetTextureSwapChainCurrentIndex) originalIndex;
     decltype(&ovr_CreateTextureSwapChainDX) originalCreateChain;
     decltype(&ovr_DestroyTextureSwapChain) originalDestroyChain;
 
@@ -97,10 +100,18 @@ namespace {
         auto& state = *backendState;
         std::lock_guard lock(state.mutex);
         SubmittedFrame frame{frameId, layerCount, {}, scale ? scale->HmdSpaceToWorldScaleInMeters : 0.f};
+        ULONG_PTR stackLow = 0, stackHigh = 0;
+        GetCurrentThreadStackLimits(&stackLow, &stackHigh);
+        const auto listAddress = reinterpret_cast<ULONG_PTR>(layers);
+        frame.pointerListOnStack = listAddress >= stackLow && listAddress < stackHigh &&
+                                   layerCount * sizeof(*layers) <= stackHigh - listAddress;
         for (unsigned i = 0; i < layerCount; ++i) {
             // Copy at the backend boundary: the real worker owns the payload lifetime.
             if (layers && layers[i])
                 frame.layers.push_back(*layers[i]);
+            if (layers && layers[i] && layers[i]->Type == ovrLayerType_Quad) {
+                frame.quadOrder.push_back(reinterpret_cast<const ovrLayerQuad*>(layers[i])->Viewport.Pos.x);
+            }
         }
         state.frames.push_back(std::move(frame));
         if (state.fault == Fault::End)
@@ -119,6 +130,11 @@ namespace {
         ovrHmdDesc info{};
         info.DisplayRefreshRate = 90.f;
         return info;
+    }
+
+    ovrResult OVR_CDECL interceptedIndex(ovrSession, ovrTextureSwapChain, int* index) {
+        *index = 0;
+        return ovrSuccess;
     }
 
     ovrResult OVR_CDECL interceptedCreateChain(ovrSession,
@@ -154,12 +170,14 @@ namespace {
             originalEnd = reinterpret_cast<decltype(originalEnd)>(GetProcAddress(module, "ovr_EndFrame"));
             originalStatus = reinterpret_cast<decltype(originalStatus)>(GetProcAddress(module, "ovr_GetSessionStatus"));
             originalHmdDesc = reinterpret_cast<decltype(originalHmdDesc)>(GetProcAddress(module, "ovr_GetHmdDesc"));
+            originalIndex = reinterpret_cast<decltype(originalIndex)>(
+                GetProcAddress(module, "ovr_GetTextureSwapChainCurrentIndex"));
             originalCreateChain =
                 reinterpret_cast<decltype(originalCreateChain)>(GetProcAddress(module, "ovr_CreateTextureSwapChainDX"));
             originalDestroyChain =
                 reinterpret_cast<decltype(originalDestroyChain)>(GetProcAddress(module, "ovr_DestroyTextureSwapChain"));
             require(originalWait && originalBegin && originalEnd && originalStatus && originalHmdDesc &&
-                        originalCreateChain && originalDestroyChain,
+                        originalCreateChain && originalDestroyChain && originalIndex,
                     "OVR fixture exports missing");
             backendState = &state;
             checkDetour(DetourTransactionBegin());
@@ -169,6 +187,7 @@ namespace {
             checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalEnd), interceptedEnd));
             checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalStatus), interceptedStatus));
             checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalHmdDesc), interceptedHmdDesc));
+            checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalIndex), interceptedIndex));
             checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalCreateChain), interceptedCreateChain));
             checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalDestroyChain), interceptedDestroyChain));
             checkDetour(DetourTransactionCommit());
@@ -182,6 +201,7 @@ namespace {
                 DetourDetach(reinterpret_cast<PVOID*>(&originalEnd), interceptedEnd) != NO_ERROR ||
                 DetourDetach(reinterpret_cast<PVOID*>(&originalStatus), interceptedStatus) != NO_ERROR ||
                 DetourDetach(reinterpret_cast<PVOID*>(&originalHmdDesc), interceptedHmdDesc) != NO_ERROR ||
+                DetourDetach(reinterpret_cast<PVOID*>(&originalIndex), interceptedIndex) != NO_ERROR ||
                 DetourDetach(reinterpret_cast<PVOID*>(&originalCreateChain), interceptedCreateChain) != NO_ERROR ||
                 DetourDetach(reinterpret_cast<PVOID*>(&originalDestroyChain), interceptedDestroyChain) != NO_ERROR ||
                 DetourTransactionCommit() != NO_ERROR) {
@@ -239,6 +259,96 @@ namespace virtualdesktop_openxr {
                         frame.layers[0].Type == ovrLayerType_Disabled && frame.layers[0].Flags == 0 &&
                         frame.worldScale == 1.f,
                     "zero-layer xrEndFrame must submit exactly one disabled layer with world scale 1");
+        }
+
+        static void layerLists(const wchar_t* backendDirectory, bool async) {
+            OpenXrRuntime runtime;
+            BackendState state;
+            BackendHooks hooks(backendDirectory, state);
+            seed(runtime);
+            runtime.m_isHeadless = false;
+            runtime.m_useOculusRuntime = true;
+            runtime.m_useMirrorWindow = false;
+            runtime.m_useAsyncSubmission = async;
+            OpenXrRuntime::Space space{};
+            space.referenceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+            space.poseInSpace = xr::math::Pose::Identity();
+            const auto spaceHandle = reinterpret_cast<XrSpace>(&space);
+            runtime.m_spaces.insert(spaceHandle);
+            OpenXrRuntime::Swapchain chain{};
+            chain.xrDesc.width = chain.xrDesc.height = 64;
+            chain.xrDesc.arraySize = chain.xrDesc.faceCount = chain.xrDesc.mipCount = chain.xrDesc.sampleCount = 1;
+            chain.ovrDesc.Width = chain.ovrDesc.Height = 64;
+            chain.ovrSwapchainLength = 1;
+            chain.appSwapchain.ovrSwapchain = reinterpret_cast<ovrTextureSwapChain>(uintptr_t(0x5000));
+            chain.appSwapchain.images.resize(1); // No pixels are accessed by this clean metadata-only chain.
+            chain.lastReleasedIndex = 0;
+            const auto chainHandle = reinterpret_cast<XrSwapchain>(&chain);
+            runtime.m_swapchains.insert(chainHandle);
+            auto cleanup = MakeScopeGuard([&] {
+                runtime.m_spaces.erase(spaceHandle);
+                runtime.m_swapchains.erase(chainHandle);
+                stop(runtime, state);
+            });
+            if (async)
+                start(runtime);
+            state.release();
+            unsigned failures = 0;
+            unsigned submitted = 0;
+            for (unsigned count : {0u, 1u, 4u, unsigned(ovrMaxLayerCount)}) {
+                if (async)
+                    runtime.waitForAsyncSubmissionIdle();
+                runtime.m_frameWaited = runtime.m_frameBegun = submitted + 1;
+                runtime.m_renderTimerApp.start();
+                std::vector<XrCompositionLayerQuad> quads(count, {XR_TYPE_COMPOSITION_LAYER_QUAD});
+                std::vector<const XrCompositionLayerBaseHeader*> layers;
+                for (unsigned i = 0; i < count; ++i) {
+                    auto& quad = quads[i];
+                    quad.space = spaceHandle;
+                    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                    quad.subImage = {chainHandle, {{int(i), 0}, {1, 1}}, 0};
+                    quad.pose = xr::math::Pose::Identity();
+                    quad.size = {1.f, 1.f};
+                    layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad));
+                }
+                auto info = emptyFrame();
+                info.layerCount = count;
+                info.layers = layers.data();
+                require(runtime.xrEndFrame(reinterpret_cast<XrSession>(1), &info) == XR_SUCCESS,
+                        "layer-list frame failed");
+                ++submitted;
+                require(state.waitFor([&] { return state.frames.size() == submitted; }),
+                        "layer-list frame not submitted");
+                std::lock_guard lock(state.mutex);
+                const auto& frame = state.frames.back();
+                require(frame.id == submitted - 1 && frame.layerCount == (count ? count : 1),
+                        "layer-list changed submitted frame ID/count");
+                if (!count)
+                    verifyDisabledFrame(frame, submitted - 1);
+                else {
+                    require(frame.quadOrder.size() == count, "layer-list lost quad payloads");
+                    for (unsigned i = 0; i < count; ++i) {
+                        require(frame.quadOrder[i] == int(i) && frame.layers[i].Type == ovrLayerType_Quad,
+                                "layer-list reordered payloads");
+                    }
+                }
+                std::cout << "layer-list async=" << async << " count=" << count
+                          << " onStack=" << frame.pointerListOnStack << '\n';
+                if (!frame.pointerListOnStack)
+                    ++failures;
+            }
+            runtime.m_frameWaited = runtime.m_frameBegun = submitted + 1;
+            auto overLimit = emptyFrame();
+            overLimit.layerCount = ovrMaxLayerCount + 1; // Must reject before reading any layer pointer.
+            require(runtime.xrEndFrame(reinterpret_cast<XrSession>(1), &overLimit) == XR_ERROR_LAYER_LIMIT_EXCEEDED,
+                    "over-limit submission was accepted");
+            runtime.m_spaces.erase(spaceHandle);
+            runtime.m_swapchains.erase(chainHandle);
+            stop(runtime, state);
+            cleanup.Deactivate();
+            require(!failures, "submission pointer lists must use bounded stack storage");
+            std::cout << "PASS: bounded stack layer pointers preserve dummy/order/count/limit in "
+                      << (async ? "async" : "sync") << " submission\n";
         }
 
         static void startup(const wchar_t* backendDirectory) {
@@ -583,7 +693,9 @@ int wmain(int argc, wchar_t** argv) {
                 "OVRNull-directory");
         const std::wstring mode = argv[1];
         using virtualdesktop_openxr::RuntimeInputRegression;
-        if (mode == L"startup")
+        if (mode == L"layers-sync" || mode == L"layers-async")
+            RuntimeInputRegression::layerLists(argv[2], mode == L"layers-async");
+        else if (mode == L"startup")
             RuntimeInputRegression::startup(argv[2]);
         else if (mode == L"error-wait")
             RuntimeInputRegression::workerError(argv[2], Fault::Wait);

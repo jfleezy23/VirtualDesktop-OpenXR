@@ -34,6 +34,7 @@ namespace {
     bool failOvrLength;
     std::vector<ovrTextureSwapChain> destroyedChains;
     ovrTextureSwapChainDesc oldOvrDescription{};
+    std::map<ovrTextureSwapChain, ovrTextureSwapChainDesc> chainDescriptions;
     bool hookCleanupFailed;
     decltype(&ovr_CreateTextureSwapChainDX) originalCreate;
     decltype(&ovr_GetTextureSwapChainLength) originalLength;
@@ -52,6 +53,7 @@ namespace {
             return ovrError_InvalidParameter;
         }
         *output = token<ovrTextureSwapChain>(0x1000 + (++ovrCreateCalls) * 0x100);
+        chainDescriptions[*output] = *desc;
         return ovrSuccess;
     }
     ovrResult OVR_CDECL chainLength(ovrSession, ovrTextureSwapChain, int* output) {
@@ -82,6 +84,10 @@ namespace {
         destroyedChains.push_back(chain);
     }
     ovrResult OVR_CDECL chainDescription(ovrSession, ovrTextureSwapChain chain, ovrTextureSwapChainDesc* output) {
+        if (output && chainDescriptions.count(chain)) {
+            *output = chainDescriptions.at(chain);
+            return ovrSuccess;
+        }
         if (chain != token<ovrTextureSwapChain>(0x1000) || !output) {
             ++invalidOvrCalls;
             return ovrError_InvalidParameter;
@@ -146,6 +152,67 @@ namespace {
         }
         OvrHooks(const OvrHooks&) = delete;
         OvrHooks& operator=(const OvrHooks&) = delete;
+    };
+
+    using CreateRtv = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*,
+                                                  ID3D11Resource*,
+                                                  const D3D11_RENDER_TARGET_VIEW_DESC*,
+                                                  ID3D11RenderTargetView**);
+    CreateRtv originalRtv;
+    ID3D11Device* watchedRtvDevice;
+    unsigned rtvCalls;
+
+    HRESULT STDMETHODCALLTYPE countRtv(ID3D11Device* device,
+                                       ID3D11Resource* resource,
+                                       const D3D11_RENDER_TARGET_VIEW_DESC* desc,
+                                       ID3D11RenderTargetView** output) {
+        if (device == watchedRtvDevice)
+            ++rtvCalls;
+        return originalRtv(device, resource, desc, output);
+    }
+
+    class RtvHooks {
+      public:
+        explicit RtvHooks(ID3D11Device* device) : m_device(device) {
+            auto** table = *reinterpret_cast<void***>(device);
+            originalRtv = reinterpret_cast<CreateRtv>(table[9]); // ID3D11Device::CreateRenderTargetView.
+            LONG result = DetourTransactionBegin();
+            const bool transaction = result == NO_ERROR;
+            if (result == NO_ERROR)
+                result = DetourUpdateThread(GetCurrentThread());
+            if (result == NO_ERROR)
+                result = DetourAttach(reinterpret_cast<PVOID*>(&originalRtv), countRtv);
+            watchedRtvDevice = device;
+            rtvCalls = 0;
+            if (result == NO_ERROR)
+                result = DetourTransactionCommit();
+            else if (transaction)
+                DetourTransactionAbort();
+            if (result != NO_ERROR) {
+                watchedRtvDevice = nullptr;
+                throw std::runtime_error("RTV hook installation failed");
+            }
+        }
+        ~RtvHooks() {
+            LONG result = DetourTransactionBegin();
+            const bool transaction = result == NO_ERROR;
+            if (result == NO_ERROR)
+                result = DetourUpdateThread(GetCurrentThread());
+            if (result == NO_ERROR)
+                result = DetourDetach(reinterpret_cast<PVOID*>(&originalRtv), countRtv);
+            if (result == NO_ERROR)
+                result = DetourTransactionCommit();
+            else if (transaction)
+                DetourTransactionAbort();
+            if (result != NO_ERROR)
+                std::terminate();
+            watchedRtvDevice = nullptr;
+        }
+        RtvHooks(const RtvHooks&) = delete;
+        RtvHooks& operator=(const RtvHooks&) = delete;
+
+      private:
+        ComPtr<ID3D11Device> m_device;
     };
 
     struct VulkanSpy {
@@ -297,6 +364,64 @@ namespace {
 
 namespace virtualdesktop_openxr {
     struct RuntimeInputRegression {
+        static void unusedRtvs(const wchar_t* backendDirectory) {
+            OpenXrRuntime runtime;
+            runtime.stopRegistryWatcher();
+            initializeBackend(backendDirectory);
+            ComPtr<ID3D11Device> device;
+            ComPtr<ID3D11DeviceContext> context;
+            installD3D(runtime, device, context);
+            checkHr(runtime.m_ovrSubmissionDevice->CreateFence(
+                0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&runtime.m_ovrSubmissionCompletionFence)));
+            ovrCreateCalls = ovrDestroyCalls = invalidOvrCalls = 0;
+            chainDescriptions.clear();
+            auto desc = textureDescription(DXGI_FORMAT_B8G8R8A8_TYPELESS);
+            desc.BindFlags |= D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
+            checkHr(device->CreateTexture2D(&desc, nullptr, &ovrBuffer));
+            OpenXrRuntime::Swapchain chain{};
+            chain.ovrSwapchainLength = 1;
+            chain.dxgiFormatForSubmission = DXGI_FORMAT_B8G8R8A8_UNORM;
+            {
+                OvrHooks hooks;
+                RtvHooks rtvHooks(runtime.m_ovrSubmissionDevice.Get());
+                auto cleanup = MakeScopeGuard([&] {
+                    for (auto& eye : chain.stereoProjection) {
+                        if (eye.ovrSwapchain)
+                            ovr_DestroyTextureSwapChain(runtime.m_ovrSession, eye.ovrSwapchain);
+                        eye = {};
+                    }
+                });
+                runtime.ensureSwapchainPrecompositorResources(chain, {64, 64});
+                require(ovrCreateCalls == 2 && !invalidOvrCalls, "stereo output generation did not complete");
+                for (const auto& eye : chain.stereoProjection) {
+                    require(eye.images.size() == 1 && eye.uavs.size() == 1 && eye.uavs[0],
+                            "output generation lacks a complete UAV");
+                    const auto flags = chainDescriptions.at(eye.ovrSwapchain).BindFlags;
+                    require((flags & (ovrTextureBind_DX_RenderTarget | ovrTextureBind_DX_UnorderedAccess)) ==
+                                (ovrTextureBind_DX_RenderTarget | ovrTextureBind_DX_UnorderedAccess),
+                            "output texture bind contract changed");
+                    const float black[4]{};
+                    context->ClearUnorderedAccessViewFloat(eye.uavs[0].Get(), black);
+                }
+                const auto firstCalls = rtvCalls;
+                runtime.ensureSwapchainPrecompositorResources(chain, {64, 64});
+                require(ovrCreateCalls == 2 && rtvCalls == firstCalls, "cached output generation created views again");
+                desc.Width = desc.Height = 32;
+                checkHr(device->CreateTexture2D(&desc, nullptr, &ovrBuffer));
+                runtime.ensureSwapchainPrecompositorResources(chain, {32, 32});
+                require(ovrCreateCalls == 4 && ovrDestroyCalls == 2 && !invalidOvrCalls,
+                        "output resize did not replace both generations exactly once");
+                for (const auto& eye : chain.stereoProjection) {
+                    require(eye.uavs.size() == 1 && eye.uavs[0], "resized output generation lacks its UAV");
+                }
+                std::cout << "native unused RTV calls: initial=" << firstCalls << " total=" << rtvCalls << '\n';
+                require(!rtvCalls, "compute precompositor must not create unused render-target views");
+            }
+            ovrBuffer.Reset();
+            checkHr(device->GetDeviceRemovedReason());
+            std::cout
+                << "PASS: precompositor creation/reuse/resize preserves UAVs and bind flags without RTV creation\n";
+        }
         static void installD3D(OpenXrRuntime& runtime,
                                ComPtr<ID3D11Device>& device,
                                ComPtr<ID3D11DeviceContext>& context) {
@@ -780,8 +905,11 @@ int wmain(int argc, wchar_t** argv) {
                 "usage: nonnr_swapchain_regression alias|mip|ovr-length|ovr-create|ovr-replacement OVRNull-directory | "
                 "mutable | stencil | retry | vk-retry");
         const std::wstring mode = argv[1];
-        if (mode == L"alias" || mode == L"mip" || mode == L"ovr-length" || mode == L"ovr-create" ||
-            mode == L"ovr-replacement") {
+        if (mode == L"unused-rtvs") {
+            require(argc == 3, "RTV fixture requires the OVRNull directory");
+            virtualdesktop_openxr::RuntimeInputRegression::unusedRtvs(argv[2]);
+        } else if (mode == L"alias" || mode == L"mip" || mode == L"ovr-length" || mode == L"ovr-create" ||
+                   mode == L"ovr-replacement") {
             require(argc == 3, "Alias and mip fixtures require the OVRNull directory");
             if (mode == L"alias")
                 virtualdesktop_openxr::RuntimeInputRegression::reverseSlices(argv[2]);

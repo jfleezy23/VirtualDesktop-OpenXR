@@ -835,17 +835,6 @@ namespace virtualdesktop_openxr {
 
                 for (uint32_t i = 0; i < candidate.images.size(); i++) {
                     {
-                        D3D11_RENDER_TARGET_VIEW_DESC desc{};
-                        desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-                        desc.Format = format;
-                        ComPtr<ID3D11RenderTargetView> rtv;
-                        CHECK_HRCMD(m_ovrSubmissionDevice->CreateRenderTargetView(
-                            candidate.images[i].Get(), &desc, rtv.ReleaseAndGetAddressOf()));
-                        setDebugName(rtv.Get(),
-                                     fmt::format("Precompositor RTV [{}, {}, {}]", eye, i, (void*)&xrSwapchain));
-                        candidate.rtvs.push_back(std::move(rtv));
-                    }
-                    {
                         D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};
                         desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
                         desc.Format = getUnorderedAccessViewFormat(format);
