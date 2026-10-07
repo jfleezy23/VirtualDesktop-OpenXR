@@ -572,32 +572,43 @@ namespace virtualdesktop_openxr {
 
     // For input swapchain(s) resources.
     void OpenXrRuntime::ensureSwapchainDlssnrResources(Swapchain& xrSwapchain, uint32_t slice) {
-        if (xrSwapchain.resolvedSlices[slice].dlssnrImages.empty()) {
+        auto& resolved = xrSwapchain.resolvedSlices[slice];
+        if (resolved.dlssnrImages.empty()) {
+            std::vector<ComPtr<ID3D12Resource>> candidate;
+            candidate.reserve(resolved.images.size());
             // Query the textures for the swapchain.
-            for (int i = 0; i < xrSwapchain.resolvedSlices[slice].images.size(); i++) {
+            for (const auto& image : resolved.images) {
                 // Export to the DLSS context.
-                wil::unique_handle handle;
                 ComPtr<IDXGIResource1> dxgiResource;
-                CHECK_HRCMD(xrSwapchain.resolvedSlices[slice].images[i]->QueryInterface(
-                    IID_PPV_ARGS(dxgiResource.ReleaseAndGetAddressOf())));
+                CHECK_HRCMD(image.As(&dxgiResource));
 
                 D3D11_TEXTURE2D_DESC desc{};
-                xrSwapchain.resolvedSlices[slice].images[i]->GetDesc(&desc);
+                image->GetDesc(&desc);
 
-                wil::unique_handle ntHandle;
                 HANDLE textureHandle;
                 if (!(desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE)) {
                     CHECK_HRCMD(dxgiResource->GetSharedHandle(&textureHandle));
                 } else {
-                    CHECK_HRCMD(dxgiResource->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, ntHandle.put()));
-                    textureHandle = ntHandle.get();
+                    ComPtr<IUnknown> identity;
+                    CHECK_HRCMD(image.As(&identity));
+                    auto [entry, inserted] = xrSwapchain.dlssnrNtTextureHandles.try_emplace(identity.Get());
+                    auto& [resource, ownedHandle] = entry->second;
+                    if (inserted) {
+                        resource = std::move(identity);
+                    }
+                    // A successful NT export cannot be recreated, even when the subsequent import fails.
+                    if (!ownedHandle) {
+                        CHECK_HRCMD(dxgiResource->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, ownedHandle.put()));
+                    }
+                    textureHandle = ownedHandle.get();
                 }
                 ComPtr<ID3D12Resource> d3d12Resource;
                 CHECK_HRCMD(m_dlssnrDevice->OpenSharedHandle(textureHandle,
                                                              IID_PPV_ARGS(d3d12Resource.ReleaseAndGetAddressOf())));
 
-                xrSwapchain.resolvedSlices[slice].dlssnrImages.push_back(std::move(d3d12Resource));
+                candidate.push_back(std::move(d3d12Resource));
             }
+            resolved.dlssnrImages = std::move(candidate);
         }
     }
 

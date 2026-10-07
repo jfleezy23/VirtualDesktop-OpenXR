@@ -727,7 +727,7 @@ namespace virtualdesktop_openxr {
 
             subImages[viewIndex] = &proj.views[viewIndex].subImage;
 
-            if (m_precompositor.isFirstProjectionLayer) {
+            if (needUplifting) {
                 ensureSwapchainDlssnrResources(xrSwapchain, proj.views[viewIndex].subImage.imageArrayIndex);
             }
 
@@ -803,7 +803,7 @@ namespace virtualdesktop_openxr {
 
                         depthSubImages[viewIndex] = &depth->subImage;
 
-                        if (m_precompositor.isFirstProjectionLayer) {
+                        if (needUplifting) {
                             ensureSwapchainDlssnrResources(xrDepthSwapchain, depth->subImage.imageArrayIndex);
                         }
 

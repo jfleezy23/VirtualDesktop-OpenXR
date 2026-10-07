@@ -379,6 +379,8 @@ namespace virtualdesktop_openxr {
             std::vector<ComPtr<ID3D11Texture2D>> d3d11Images;
             // NT exports are owned by the swapchain; import APIs only borrow them.
             std::vector<wil::unique_handle> ntTextureHandles;
+            // Resolved NR inputs may differ from app images. Retain their identities and one NT export per resource.
+            std::map<IUnknown*, std::pair<ComPtr<IUnknown>, wil::unique_handle>> dlssnrNtTextureHandles;
             std::vector<ComPtr<ID3D12Resource>> d3d12Images;
             std::vector<VkDeviceMemory> vkDeviceMemory;
             std::vector<VkImage> vkImages;
