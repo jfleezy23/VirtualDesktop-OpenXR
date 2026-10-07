@@ -1,4 +1,22 @@
-# An implementation of the OpenXR 1.0 and 1.1 standard for Virtual Desktop
+# VirtualDesktop-OpenXR community fork
+
+This is [jfleezy23's community fork](https://github.com/jfleezy23/VirtualDesktop-OpenXR) of
+[Matthieu Bucchianeri's VirtualDesktop-OpenXR](https://github.com/mbucchia/VirtualDesktop-OpenXR).
+The upstream README, contributor attribution, license, and third-party notices are retained below.
+
+`stable` is the general runtime branch, beginning at the upstream `main` baseline. Independently reviewed general
+runtime fixes will be ported there with regression evidence. `experimental-nr` preserves the upstream NR development
+line and the fork's NR and general runtime fixes; use it for experimental NR work. The experimental branch's core build
+target is x64: inherited Win32 NR code references NGX functions while the retained NGX libraries are x64 only.
+`main` retains the upstream main baseline.
+
+These branch names describe development scope, not a guarantee of headset compatibility or release readiness.
+The fork makes no Khronos conformance claim or measured image-quality, streaming-latency, or performance claim.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for source checks, supported build targets, and the distinction between CPU
+regressions and local hardware tests. The separate community workflow builds core projects without installer signing
+or distributing NR vendor DLLs.
+
+# Upstream README: an implementation of the OpenXR 1.0 and 1.1 standard for Virtual Desktop
 
 This program is an implementation of the OpenXR 1.0 and 1.1 standard for Virtual Desktop on Windows. It allows you to run OpenXR applications without SteamVR.
 

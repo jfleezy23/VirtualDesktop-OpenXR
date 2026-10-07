@@ -1,0 +1,222 @@
+name: Community validation
+
+on:
+  push:
+    branches: [main, stable, experimental-nr]
+  pull_request:
+    branches: [main, stable, experimental-nr]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: community-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  source-checks:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    outputs:
+      base: ${{ steps.base.outputs.sha }}
+      platforms: ${{ steps.base.outputs.platforms }}
+      experimental: ${{ steps.base.outputs.experimental }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Resolve review baseline and supported architectures
+        id: base
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+          TARGET_BRANCH: ${{ github.base_ref || github.ref_name }}
+          NR_BASELINE: 925dc598c524cb48b37fa4b0a2bff471f75fc5c4
+        run: |
+          # NR's vendor imports and architecture limits belong to its inherited upstream baseline.
+          $hygieneRef = if ($env:TARGET_BRANCH -eq 'experimental-nr') { $env:NR_BASELINE } else { 'origin/main' }
+          $hygieneSha = git rev-parse --verify "$hygieneRef^{commit}"
+          if ($LASTEXITCODE -ne 0) { throw 'The source hygiene baseline is unavailable.' }
+          "hygiene_sha=$hygieneSha" >> $env:GITHUB_OUTPUT
+          if (!$env:BASE_REF -or $env:BASE_REF -match '^0+$') { $env:BASE_REF = $hygieneSha }
+          $sha = git rev-parse --verify "$($env:BASE_REF)^{commit}"
+          if ($LASTEXITCODE -ne 0) { throw 'The review baseline is unavailable.' }
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+          if ($env:TARGET_BRANCH -eq 'experimental-nr') {
+            'platforms=["x64"]' >> $env:GITHUB_OUTPUT
+            'experimental=true' >> $env:GITHUB_OUTPUT
+          } else {
+            'platforms=["Win32","x64"]' >> $env:GITHUB_OUTPUT
+            'experimental=false' >> $env:GITHUB_OUTPUT
+          }
+      - name: Install pinned formatter
+        run: |
+          python -m pip install clang-format==22.1.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          clang-format --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Tooling regressions and Python compilation
+        run: |
+          python -m unittest discover -s scripts/tests -p test_hygiene.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m compileall -q scripts/check-hygiene.py scripts/tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Current source hygiene
+        env:
+          REVIEW_BASE: ${{ steps.base.outputs.hygiene_sha }}
+        run: |
+          python scripts/check-hygiene.py --base $env:REVIEW_BASE
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --check $env:REVIEW_BASE
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  core-builds:
+    needs: source-checks
+    runs-on: windows-2022
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(needs.source-checks.outputs.platforms) }}
+        configuration: [Release, ReleaseBundle]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3
+        with:
+          vs-version: '[17.0,18.0)'
+          msbuild-architecture: x64
+      - name: Restore NuGet
+        run: |
+          nuget restore VirtualDesktop-OpenXR.sln -NonInteractive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build unsigned core project
+        env:
+          BUILD_CONFIGURATION: ${{ matrix.configuration }}
+          BUILD_PLATFORM: ${{ matrix.platform }}
+        run: |
+          & scripts/Build-CommunityRuntime.ps1 -Configuration $env:BUILD_CONFIGURATION -Platform $env:BUILD_PLATFORM
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: CPU regressions on fresh matching runtime objects
+        if: (needs.source-checks.outputs.experimental == 'true' || github.base_ref == 'stable' || github.ref_name == 'stable') && matrix.platform == 'x64' && matrix.configuration == 'ReleaseBundle'
+        run: |
+          $source = (Resolve-Path 'virtualdesktop-openxr').Path
+          $objects = (Resolve-Path 'bin/community/build/x64/ReleaseBundle/obj').Path
+          foreach ($fixture in @('vr_input_regression.cpp', 'vr_input_watcher_regression.cpp')) {
+            & tests/vr_input_build.cmd -SourceDirectory $source -RuntimeObjectDirectory $objects -TestSource $fixture
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          & tests/build-runtime-redirect-regression.cmd
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          function Invoke-Regression([string]$executable, [string[]]$arguments, [string]$name) {
+            $stdout = Join-Path (Get-Location) "bin/community/$name.stdout.log"
+            $stderr = Join-Path (Get-Location) "bin/community/$name.stderr.log"
+            $options = @{
+              FilePath = (Resolve-Path $executable).Path
+              PassThru = $true
+              WindowStyle = 'Hidden'
+              RedirectStandardOutput = $stdout
+              RedirectStandardError = $stderr
+            }
+            if ($arguments.Count) {
+              $options.ArgumentList = @($arguments | ForEach-Object { '"' + $_ + '"' })
+            }
+            $process = Start-Process @options
+            if (!$process.WaitForExit(60000)) {
+              $process.Kill()
+              throw "Regression timed out: $name"
+            }
+            $process.WaitForExit()
+            $text = (Get-Content -Raw $stdout) + (Get-Content -Raw $stderr)
+            Write-Output $text
+            if ($process.ExitCode -ne 0 -or $text -notmatch '(?m)^PASS:' -or $text -match '(?m)^(FAIL|ERROR):') {
+              throw "Regression failed: $name"
+            }
+          }
+          Invoke-Regression 'bin/vr-input-tests/vr_input_regression.exe' @() 'input'
+          Invoke-Regression 'bin/vr-input-tests/vr_input_watcher_regression.exe' @() 'watcher'
+          $runtime = (Resolve-Path 'bin/community/build/x64/ReleaseBundle/virtualdesktop-openxr.dll').Path
+          foreach ($mode in @('failure', 'success')) {
+            $target = (Resolve-Path "bin/tests/redirect/vdxr_redirect_$($mode)_test.dll").Path
+            Invoke-Regression 'bin/tests/redirect/runtime_redirect_regression.exe' @($runtime, $target, $mode) "redirect-$mode"
+          }
+
+  analyzer-comparison:
+    needs: source-checks
+    runs-on: windows-2022
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(needs.source-checks.outputs.platforms) }}
+        configuration: [Release, ReleaseBundle]
+    env:
+      BUILD_PLATFORM: ${{ matrix.platform }}
+      BUILD_CONFIGURATION: ${{ matrix.configuration }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: candidate
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: baseline
+          ref: ${{ needs.source-checks.outputs.base }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3
+        with:
+          vs-version: '[17.0,18.0)'
+          msbuild-architecture: x64
+      - name: Restore and analyze baseline and candidate with identical tools
+        run: |
+          foreach ($cohort in @('baseline', 'candidate')) {
+            nuget restore "$cohort/VirtualDesktop-OpenXR.sln" -NonInteractive
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & candidate/scripts/Build-CommunityRuntime.ps1 -SourceDirectory $cohort -Configuration $env:BUILD_CONFIGURATION -Platform $env:BUILD_PLATFORM -Analyze
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Reject new compiler and analyzer diagnostics
+        run: |
+          function Read-Diagnostics([string]$cohort) {
+            $root = (Resolve-Path $cohort).Path.Replace('\', '/').ToLowerInvariant()
+            $counts = @{}
+            foreach ($line in Get-Content "$cohort/bin/community/analyze/$env:BUILD_PLATFORM/$env:BUILD_CONFIGURATION/build.log") {
+              $normalized = $line.Replace('\', '/').ToLowerInvariant().Replace($root + '/', '')
+              if ($normalized -match '^(.*?)\(\d+(?:,\d+)?\)\s*:\s*warning\s+([a-z]+\d+)\s*:\s*(.*?)(?:\s+\[.*\])?$') {
+                $key = $Matches[1] + ': ' + $Matches[2] + ': ' + $Matches[3]
+              } elseif ($normalized -match '^(.*?)\s*:\s*warning\s+([a-z]+\d+)\s*:\s*(.*?)(?:\s+\[.*\])?$') {
+                $key = $Matches[1] + ': ' + $Matches[2] + ': ' + $Matches[3]
+              } elseif ($normalized -match ':\s*warning\b|\bwarning\s+[a-z]+\d+') {
+                throw "Unparsed diagnostic in $cohort`: $line"
+              } else { continue }
+              $key = $key -replace ': lines: [\d, ]+$', '' -replace '\bline (?:\x27)?\d+(?:\x27)?', 'line <location>'
+              $counts[$key] = 1 + $counts[$key]
+            }
+            return $counts
+          }
+          $baseline = Read-Diagnostics 'baseline'
+          $candidate = Read-Diagnostics 'candidate'
+          $introduced = @($candidate.Keys | Where-Object { $candidate[$_] -gt $baseline[$_] })
+          if ($introduced.Count) {
+            $introduced | Sort-Object | ForEach-Object { Write-Output "NEW DIAGNOSTIC: $_ ($($candidate[$_]) vs $($baseline[$_]))" }
+            throw 'New compiler/analyzer diagnostics require resolution.'
+          }
+          Write-Output "PASS: no new diagnostics ($($candidate.Count) candidate diagnostic identities)."
