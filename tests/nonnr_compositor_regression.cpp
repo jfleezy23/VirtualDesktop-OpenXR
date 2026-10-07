@@ -7,6 +7,53 @@ OVR_PUBLIC_FUNCTION(ovrResult)
 ovr_InitializeWithPathOverride(const ovrInitParams*, const wchar_t*);
 
 namespace {
+    std::atomic<HANDLE> observedExport{};
+    std::atomic<unsigned> exportCloseCalls{};
+    decltype(&CloseHandle) originalCloseHandle = CloseHandle;
+    BOOL WINAPI observeCloseHandle(HANDLE handle) {
+        const auto result = originalCloseHandle(handle);
+        auto expected = handle;
+        if (result && observedExport.compare_exchange_strong(expected, nullptr)) {
+            exportCloseCalls.fetch_add(1);
+        }
+        return result;
+    }
+    void require(bool condition, const char* message);
+    class HandleCloseObserver {
+      public:
+        explicit HandleCloseObserver(HANDLE handle) {
+            observedExport.store(handle);
+            exportCloseCalls.store(0);
+            transact(true);
+        }
+        ~HandleCloseObserver() noexcept {
+            try {
+                transact(false);
+                observedExport.store(nullptr);
+            } catch (...) {
+                std::terminate();
+            }
+        }
+        HandleCloseObserver(const HandleCloseObserver&) = delete;
+        HandleCloseObserver& operator=(const HandleCloseObserver&) = delete;
+
+      private:
+        static void transact(bool attach) {
+            LONG result = DetourTransactionBegin();
+            const bool active = result == NO_ERROR;
+            if (result == NO_ERROR)
+                result = DetourUpdateThread(GetCurrentThread());
+            if (result == NO_ERROR) {
+                result = attach ? DetourAttach(reinterpret_cast<PVOID*>(&originalCloseHandle), observeCloseHandle)
+                                : DetourDetach(reinterpret_cast<PVOID*>(&originalCloseHandle), observeCloseHandle);
+            }
+            if (result == NO_ERROR)
+                result = DetourTransactionCommit();
+            else if (active)
+                DetourTransactionAbort();
+            require(result == NO_ERROR, "Handle closure hook transaction failed");
+        }
+    };
     unsigned destroyCalls;
     void OVR_CDECL countDestroy(ovrSession, ovrTextureSwapChain) {
         ++destroyCalls;
@@ -137,9 +184,13 @@ namespace virtualdesktop_openxr {
             DWORD flags = 0;
             require(GetHandleInformation(first[0], &flags), "NT handle closed before imports completed");
             // Swapchain lifetime owns the handle; never manually close a borrowed import handle.
-            owner.reset();
-            require(!GetHandleInformation(first[0], &flags) && GetLastError() == ERROR_INVALID_HANDLE,
-                    "NT export outlived its swapchain owner");
+            {
+                HandleCloseObserver observer(first[0]);
+                owner.reset();
+            }
+            // A driver worker may reuse the numeric handle after closure. Observe the real close instead
+            // of treating a later GetHandleInformation on that number as an ownership check.
+            require(exportCloseCalls.load() == 1, "NT export outlived its swapchain owner");
             runtime.m_vkDevice = VK_NULL_HANDLE;
             std::cout << "PASS: repeated NT-handle export reuses its handle and closes it with its owner\n";
         }
