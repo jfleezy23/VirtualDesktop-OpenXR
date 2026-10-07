@@ -382,11 +382,12 @@ namespace virtualdesktop_openxr {
             }
         }
 
+        *pathCountOutput = trackersCount;
+
         if (pathCapacityInput && pathCapacityInput < trackersCount) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *pathCountOutput = trackersCount;
         TraceLoggingWrite(
             g_traceProvider, "xrEnumerateViveTrackerPathsHTCX", TLArg(*pathCountOutput, "PathCountOutput"));
 

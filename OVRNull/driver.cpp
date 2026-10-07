@@ -262,6 +262,9 @@ namespace {
 
             swapchain = new Swapchain;
             swapchain->desc = ovrDesc;
+            // VDXR releases image zero first. Start the dynamic producer at zero so its first
+            // resolve must commit that image instead of mistaking it for an earlier submission.
+            swapchain->lastCommittedIndex = ovrDesc.StaticImage ? 0 : (k_SwapchainLength - 1);
 
             for (size_t i = 0; i < (ovrDesc.StaticImage ? 1 : k_SwapchainLength); i++) {
                 // Create the typeless, app swapchain images.
@@ -355,9 +358,10 @@ namespace {
             std::shared_lock lock(m_swapchainMutex);
             if (m_swapchains.count(swapchain)) {
                 Swapchain* swapchainObject = (Swapchain*)swapchain;
-                index = swapchainObject->lastCommittedIndex == 0
-                            ? (!swapchainObject->desc.StaticImage ? (k_SwapchainLength - 1) : 0)
-                            : (swapchainObject->lastCommittedIndex - 1);
+                // Return the free image that CommitSwapchainImage will make current for the consumer.
+                index = swapchainObject->desc.StaticImage
+                            ? 0
+                            : (swapchainObject->lastCommittedIndex + 1) % k_SwapchainLength;
             }
 
             TraceLoggingWriteStop(local, "NullDriver_GetSwapchainImageIndex", TLArg(index, "Index"));

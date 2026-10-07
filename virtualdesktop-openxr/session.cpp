@@ -54,139 +54,146 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_SYSTEM_INVALID;
         }
 
-        CHECK_MSG(ensureOVRSession(), "Failed to re-create OVR session\n");
-
         // We only support one concurrent session.
         if (m_sessionCreated) {
             return XR_ERROR_LIMIT_REACHED;
         }
+        *session = XR_NULL_HANDLE;
 
-        // Get the graphics device and initialize the necessary resources.
-        bool hasGraphicsBindings = false;
-        const XrBaseInStructure* entry = reinterpret_cast<const XrBaseInStructure*>(createInfo->next);
-        while (entry) {
-            if (has_XR_KHR_D3D11_enable && entry->type == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR) {
-                if (!m_graphicsRequirementQueried) {
-                    return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
+        // A failed rollback must be completed before another attempt can overwrite its resources.
+        if (m_sessionResourcesRequireCleanup) {
+            cleanupSessionResources();
+        }
+        m_sessionResourcesRequireCleanup = true;
+        const auto initialize = [&]() -> XrResult {
+            CHECK_MSG(ensureOVRSession(), "Failed to re-create OVR session\n");
+
+            // Get the graphics device and initialize the necessary resources.
+            bool hasGraphicsBindings = false;
+            const XrBaseInStructure* entry = reinterpret_cast<const XrBaseInStructure*>(createInfo->next);
+            while (entry) {
+                if (has_XR_KHR_D3D11_enable && entry->type == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR) {
+                    if (!m_graphicsRequirementQueried) {
+                        return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
+                    }
+
+                    const XrGraphicsBindingD3D11KHR* d3dBindings =
+                        reinterpret_cast<const XrGraphicsBindingD3D11KHR*>(entry);
+
+                    const auto result = initializeD3D11(*d3dBindings);
+                    if (XR_FAILED(result)) {
+                        return result;
+                    }
+
+                    hasGraphicsBindings = true;
+                    break;
+                } else if (has_XR_KHR_D3D12_enable && entry->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
+                    if (!m_graphicsRequirementQueried) {
+                        return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
+                    }
+
+                    const XrGraphicsBindingD3D12KHR* d3dBindings =
+                        reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(entry);
+
+                    const auto result = initializeD3D12(*d3dBindings);
+                    if (XR_FAILED(result)) {
+                        return result;
+                    }
+
+                    hasGraphicsBindings = true;
+                    break;
+                } else if ((has_XR_KHR_vulkan_enable || has_XR_KHR_vulkan_enable2) &&
+                           entry->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR) {
+                    if (!m_graphicsRequirementQueried) {
+                        return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
+                    }
+
+                    const XrGraphicsBindingVulkanKHR* vkBindings =
+                        reinterpret_cast<const XrGraphicsBindingVulkanKHR*>(entry);
+
+                    const auto result = initializeVulkan(*vkBindings);
+                    if (XR_FAILED(result)) {
+                        return result;
+                    }
+
+                    hasGraphicsBindings = true;
+                    break;
+                } else if (has_XR_KHR_opengl_enable && entry->type == XR_TYPE_GRAPHICS_BINDING_OPENGL_WIN32_KHR) {
+                    if (!m_graphicsRequirementQueried) {
+                        return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
+                    }
+
+                    const XrGraphicsBindingOpenGLWin32KHR* glBindings =
+                        reinterpret_cast<const XrGraphicsBindingOpenGLWin32KHR*>(entry);
+
+                    const auto result = initializeOpenGL(*glBindings);
+                    if (XR_FAILED(result)) {
+                        return result;
+                    }
+
+                    hasGraphicsBindings = true;
+                    break;
                 }
 
-                const XrGraphicsBindingD3D11KHR* d3dBindings =
-                    reinterpret_cast<const XrGraphicsBindingD3D11KHR*>(entry);
-
-                const auto result = initializeD3D11(*d3dBindings);
-                if (XR_FAILED(result)) {
-                    return result;
-                }
-
-                hasGraphicsBindings = true;
-                break;
-            } else if (has_XR_KHR_D3D12_enable && entry->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
-                if (!m_graphicsRequirementQueried) {
-                    return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
-                }
-
-                const XrGraphicsBindingD3D12KHR* d3dBindings =
-                    reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(entry);
-
-                const auto result = initializeD3D12(*d3dBindings);
-                if (XR_FAILED(result)) {
-                    return result;
-                }
-
-                hasGraphicsBindings = true;
-                break;
-            } else if ((has_XR_KHR_vulkan_enable || has_XR_KHR_vulkan_enable2) &&
-                       entry->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR) {
-                if (!m_graphicsRequirementQueried) {
-                    return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
-                }
-
-                const XrGraphicsBindingVulkanKHR* vkBindings =
-                    reinterpret_cast<const XrGraphicsBindingVulkanKHR*>(entry);
-
-                const auto result = initializeVulkan(*vkBindings);
-                if (XR_FAILED(result)) {
-                    return result;
-                }
-
-                hasGraphicsBindings = true;
-                break;
-            } else if (has_XR_KHR_opengl_enable && entry->type == XR_TYPE_GRAPHICS_BINDING_OPENGL_WIN32_KHR) {
-                if (!m_graphicsRequirementQueried) {
-                    return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
-                }
-
-                const XrGraphicsBindingOpenGLWin32KHR* glBindings =
-                    reinterpret_cast<const XrGraphicsBindingOpenGLWin32KHR*>(entry);
-
-                const auto result = initializeOpenGL(*glBindings);
-                if (XR_FAILED(result)) {
-                    return result;
-                }
-
-                hasGraphicsBindings = true;
-                break;
+                entry = entry->next;
             }
 
-            entry = entry->next;
-        }
-
-        m_isHeadless = !hasGraphicsBindings;
-        if (m_isHeadless && !has_XR_MND_headless) {
-            return XR_ERROR_GRAPHICS_DEVICE_INVALID;
-        }
-
-        if (!m_isHeadless) {
-            // This should never happen if the app is properly polling xrGetSystem(). But there is still a tiny race
-            // condition window even if it does.
-            if (!ensureOVRSession()) {
-                return XR_ERROR_INITIALIZATION_FAILED;
+            m_isHeadless = !hasGraphicsBindings;
+            if (m_isHeadless && !has_XR_MND_headless) {
+                return XR_ERROR_GRAPHICS_DEVICE_INVALID;
             }
 
-            if (has_XR_MND_headless) {
-                // If we pre-emptively enabled invisible mode, re-initialize OVR for visible session.
-                enterVisibleMode();
+            if (!m_isHeadless) {
+                // This should never happen if the app is properly polling xrGetSystem(). But there is still a tiny race
+                // condition window even if it does.
+                if (!ensureOVRSession()) {
+                    return XR_ERROR_INITIALIZATION_FAILED;
+                }
+
+                if (has_XR_MND_headless) {
+                    // If we pre-emptively enabled invisible mode, re-initialize OVR for visible session.
+                    enterVisibleMode();
+                }
+
+                initializePrecompositorResources();
+            } else {
+                // We initialize a submission device since OVR needs one to create a swapchain before being able to wait
+                // frames.
+                initializeSubmissionDevice("Headless");
             }
 
-            initializePrecompositorResources();
-        } else {
-            // We initialize a submission device since OVR needs one to create a swapchain before being able to wait
-            // frames.
-            initializeSubmissionDevice("Headless");
-        }
+            // Read configuration and set up the session accordingly.
+            refreshSettings();
 
-        // Read configuration and set up the session accordingly.
-        refreshSettings();
+            // FIXME: Reset the session and frame state here.
+            m_frameWaited = m_frameBegun = m_frameCompleted = 0;
 
-        m_sessionCreated = true;
+            m_frameTimes.clear();
 
-        // FIXME: Reset the session and frame state here.
-        m_frameWaited = m_frameBegun = m_frameCompleted = 0;
+            {
+                std::unique_lock lock(m_actionsAndSpacesMutex);
+                m_isControllerActive[xr::Side::Left] = m_isControllerActive[xr::Side::Right] = false;
+                m_cachedInputState = {};
+                m_cachedControllerType[0].clear();
+                m_cachedControllerType[1].clear();
+                m_controllerAimPose[xr::Side::Left] = m_controllerGripPose[xr::Side::Left] =
+                    m_controllerPalmPose[xr::Side::Left] = m_controllerHandPose[xr::Side::Left] =
+                        m_controllerAimPose[xr::Side::Right] = m_controllerGripPose[xr::Side::Right] =
+                            m_controllerPalmPose[xr::Side::Right] = m_controllerHandPose[xr::Side::Right] =
+                                Pose::Identity();
+                m_currentInteractionProfile[xr::Side::Left] = m_currentInteractionProfile[xr::Side::Right] =
+                    XR_NULL_PATH;
+                rebindControllerActions(xr::Side::Left);
+                rebindControllerActions(xr::Side::Right);
+                m_attachedActionSets.clear();
+                m_activeActionSets.clear();
+            }
 
-        m_sessionState = XR_SESSION_STATE_IDLE;
-        updateSessionState(true);
+            m_sessionStartTime = ovr_GetTimeInSeconds();
+            m_sessionTotalFrameCount = 0;
 
-        m_frameTimes.clear();
+            m_lastControllerSeenTime[xr::Side::Left] = m_lastControllerSeenTime[xr::Side::Right] = {};
 
-        m_isControllerActive[xr::Side::Left] = m_isControllerActive[xr::Side::Right] = false;
-        m_cachedControllerType[0].clear();
-        m_cachedControllerType[1].clear();
-        m_controllerAimPose[xr::Side::Left] = m_controllerGripPose[xr::Side::Left] =
-            m_controllerPalmPose[xr::Side::Left] = m_controllerHandPose[xr::Side::Left] =
-                m_controllerAimPose[xr::Side::Right] = m_controllerGripPose[xr::Side::Right] =
-                    m_controllerPalmPose[xr::Side::Right] = m_controllerHandPose[xr::Side::Right] = Pose::Identity();
-        m_currentInteractionProfile[xr::Side::Left] = m_currentInteractionProfile[xr::Side::Right] = XR_NULL_PATH;
-        rebindControllerActions(xr::Side::Left);
-        rebindControllerActions(xr::Side::Right);
-        m_attachedActionSets.clear();
-        m_activeActionSets.clear();
-
-        m_sessionStartTime = ovr_GetTimeInSeconds();
-        m_sessionTotalFrameCount = 0;
-
-        m_lastControllerSeenTime[xr::Side::Left] = m_lastControllerSeenTime[xr::Side::Right] = {};
-
-        try {
             // Create a reference space with the origin and the HMD pose.
             m_originSpace = new Space;
             m_originSpace->referenceType = ovr_GetTrackingOriginType(m_ovrSession) == ovrTrackingOrigin_FloorLevel
@@ -196,16 +203,30 @@ namespace virtualdesktop_openxr {
             m_viewSpace = new Space;
             m_viewSpace->referenceType = XR_REFERENCE_SPACE_TYPE_VIEW;
             m_viewSpace->poseInSpace = Pose::Identity();
-        } catch (std::exception& exc) {
-            m_sessionCreated = false;
-            throw exc;
+
+            {
+                std::unique_lock frameLock(m_frameMutex);
+                m_sessionState = XR_SESSION_STATE_IDLE;
+                updateSessionState(true);
+                m_sessionCreated = true;
+                *session = (XrSession)1;
+            }
+
+            TraceLoggingWrite(g_traceProvider, "xrCreateSession", TLXArg(*session, "Session"));
+
+            return XR_SUCCESS;
+        };
+        XrResult result;
+        try {
+            result = initialize();
+        } catch (...) {
+            cleanupSessionResources();
+            throw;
         }
-
-        *session = (XrSession)1;
-
-        TraceLoggingWrite(g_traceProvider, "xrCreateSession", TLXArg(*session, "Session"));
-
-        return XR_SUCCESS;
+        if (XR_FAILED(result)) {
+            cleanupSessionResources();
+        }
+        return result;
     }
 
     // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrDestroySession
@@ -216,7 +237,13 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_HANDLE_INVALID;
         }
 
-        if (m_useAsyncSubmission && !m_needStartAsyncSubmissionThread) {
+        cleanupSessionResources();
+        return XR_SUCCESS;
+    }
+
+    // Also used after a partially initialized CreateSession, before m_sessionCreated has been published.
+    void OpenXrRuntime::cleanupSessionResources() {
+        if (m_asyncSubmissionThread.joinable()) {
             {
                 std::unique_lock lock(m_asyncSubmissionMutex);
 
@@ -285,6 +312,7 @@ namespace virtualdesktop_openxr {
         }
         if (m_headlessSwapchain) {
             ovr_DestroyTextureSwapChain(m_ovrSession, m_headlessSwapchain);
+            m_headlessSwapchain = nullptr;
         }
 
         // We do not destroy actionsets and actions, since they are tied to the instance.
@@ -296,19 +324,28 @@ namespace virtualdesktop_openxr {
         cleanupD3D12();
         cleanupD3D11();
         cleanupSubmissionDevice();
-        m_sessionState = XR_SESSION_STATE_UNKNOWN;
-        m_sessionCreated = false;
-        m_sessionBegun = false;
-        m_sessionLossPending = false;
-        m_sessionStopping = false;
-        m_sessionExiting = false;
+        {
+            std::unique_lock frameLock(m_frameMutex);
+            m_sessionState = XR_SESSION_STATE_UNKNOWN;
+            m_sessionEventQueue.clear();
+            m_currentInteractionProfileDirty = false;
+            m_shouldRecenter = 0;
+            m_recenterTime = 0;
+            m_visibilityMaskDirty.store(0, std::memory_order_release);
+            m_sessionCreated = false;
+            m_sessionBegun = false;
+            m_sessionLossPending = false;
+            m_sessionStopping = false;
+            m_sessionExiting = false;
+        }
 
         // Workaround: OVR ties the last use D3D device to the OVR session, and therefore we must teardown the previous
         // OVR session to clear that state.
-        ovr_Destroy(m_ovrSession);
-        m_ovrSession = nullptr;
-
-        return XR_SUCCESS;
+        if (m_ovrSession) {
+            ovr_Destroy(m_ovrSession);
+            m_ovrSession = nullptr;
+        }
+        m_sessionResourcesRequireCleanup = false;
     }
 
     // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrBeginSession
@@ -323,6 +360,7 @@ namespace virtualdesktop_openxr {
             TLXArg(session, "Session"),
             TLArg(xr::ToCString(beginInfo->primaryViewConfigurationType), "PrimaryViewConfigurationType"));
 
+        std::unique_lock frameLock(m_frameMutex);
         if (!m_sessionCreated || session != (XrSession)1) {
             return XR_ERROR_HANDLE_INVALID;
         }
@@ -369,6 +407,8 @@ namespace virtualdesktop_openxr {
     XrResult OpenXrRuntime::xrEndSession(XrSession session) {
         TraceLoggingWrite(g_traceProvider, "xrEndSession", TLXArg(session, "Session"));
 
+        std::unique_lock frameLock(m_frameMutex);
+
         if (!m_sessionCreated || session != (XrSession)1) {
             return XR_ERROR_HANDLE_INVALID;
         }
@@ -391,6 +431,8 @@ namespace virtualdesktop_openxr {
     XrResult OpenXrRuntime::xrRequestExitSession(XrSession session) {
         TraceLoggingWrite(g_traceProvider, "xrRequestExitSession", TLXArg(session, "Session"));
 
+        std::unique_lock frameLock(m_frameMutex);
+
         if (!m_sessionCreated || session != (XrSession)1) {
             return XR_ERROR_HANDLE_INVALID;
         }
@@ -408,11 +450,11 @@ namespace virtualdesktop_openxr {
     // Update the session state machine.
     void OpenXrRuntime::updateSessionState(bool forceSendEvent) {
         if (forceSendEvent) {
-            m_sessionEventQueue.push_back(std::make_pair(m_sessionState, ovr_GetTimeInSeconds()));
+            m_sessionEventQueue.push_back(std::make_pair(m_sessionState.load(), ovr_GetTimeInSeconds()));
         }
 
         while (true) {
-            const auto oldSessionState = m_sessionState;
+            const auto oldSessionState = m_sessionState.load();
             switch (m_sessionState) {
             case XR_SESSION_STATE_IDLE:
                 if (m_sessionExiting) {
@@ -458,7 +500,7 @@ namespace virtualdesktop_openxr {
                                   TLArg(xr::ToCString(oldSessionState), "From"),
                                   TLArg(xr::ToCString(m_sessionState), "To"));
 
-                m_sessionEventQueue.push_back(std::make_pair(m_sessionState, ovr_GetTimeInSeconds()));
+                m_sessionEventQueue.push_back(std::make_pair(m_sessionState.load(), ovr_GetTimeInSeconds()));
             } else {
                 break;
             }
@@ -469,53 +511,56 @@ namespace virtualdesktop_openxr {
 
     // Read dynamic settings from the registry.
     void OpenXrRuntime::refreshSettings() {
-        if (!m_quirkedControllerPoses || getSetting("quirk_disable_quirked_controller_poses").value_or(false)) {
-            const auto oldControllerAimOffset = m_controllerAimOffset;
-            m_controllerAimOffset = Pose::MakePose(
-                Quaternion::RotationRollPitchYaw({OVR::DegreeToRad((float)getSetting("aim_pose_rot_x").value_or(0.f)),
-                                                  OVR::DegreeToRad((float)getSetting("aim_pose_rot_y").value_or(0.f)),
-                                                  OVR::DegreeToRad((float)getSetting("aim_pose_rot_z").value_or(0.f))}),
-                XrVector3f{getSetting("aim_pose_offset_x").value_or(0.f) / 1000.f,
-                           getSetting("aim_pose_offset_y").value_or(0.f) / 1000.f,
-                           getSetting("aim_pose_offset_z").value_or(0.f) / 1000.f});
+        // Registry reads stay outside the controller lock; publish complete poses and invalidate bindings together.
+        const bool disableQuirkedControllerPoses = getSetting("quirk_disable_quirked_controller_poses").value_or(false);
+        const auto controllerAimOffset = Pose::MakePose(
+            Quaternion::RotationRollPitchYaw({OVR::DegreeToRad((float)getSetting("aim_pose_rot_x").value_or(0.f)),
+                                              OVR::DegreeToRad((float)getSetting("aim_pose_rot_y").value_or(0.f)),
+                                              OVR::DegreeToRad((float)getSetting("aim_pose_rot_z").value_or(0.f))}),
+            XrVector3f{getSetting("aim_pose_offset_x").value_or(0.f) / 1000.f,
+                       getSetting("aim_pose_offset_y").value_or(0.f) / 1000.f,
+                       getSetting("aim_pose_offset_z").value_or(0.f) / 1000.f});
+        const auto controllerGripOffset = Pose::MakePose(
+            Quaternion::RotationRollPitchYaw({OVR::DegreeToRad((float)getSetting("grip_pose_rot_x").value_or(0.f)),
+                                              OVR::DegreeToRad((float)getSetting("grip_pose_rot_y").value_or(0.f)),
+                                              OVR::DegreeToRad((float)getSetting("grip_pose_rot_z").value_or(0.f))}),
+            XrVector3f{getSetting("grip_pose_offset_x").value_or(0) / 1000.f,
+                       getSetting("grip_pose_offset_y").value_or(0) / 1000.f,
+                       getSetting("grip_pose_offset_z").value_or(0) / 1000.f});
+        const auto controllerPalmOffset = Pose::MakePose(
+            Quaternion::RotationRollPitchYaw({OVR::DegreeToRad((float)getSetting("palm_pose_rot_x").value_or(0.f)),
+                                              OVR::DegreeToRad((float)getSetting("palm_pose_rot_y").value_or(0.f)),
+                                              OVR::DegreeToRad((float)getSetting("palm_pose_rot_z").value_or(0.f))}),
+            XrVector3f{getSetting("palm_pose_offset_x").value_or(0) / 1000.f,
+                       getSetting("palm_pose_offset_y").value_or(0) / 1000.f,
+                       getSetting("palm_pose_offset_z").value_or(0) / 1000.f});
+        const auto controllerHandOffset = Pose::MakePose(
+            Quaternion::RotationRollPitchYaw({OVR::DegreeToRad((float)getSetting("hand_pose_rot_x").value_or(0.f)),
+                                              OVR::DegreeToRad((float)getSetting("hand_pose_rot_y").value_or(0.f)),
+                                              OVR::DegreeToRad((float)getSetting("hand_pose_rot_z").value_or(0.f))}),
+            XrVector3f{getSetting("hand_pose_offset_x").value_or(0) / 1000.f,
+                       getSetting("hand_pose_offset_y").value_or(0) / 1000.f,
+                       getSetting("hand_pose_offset_z").value_or(0) / 1000.f});
+        {
+            std::unique_lock lock(m_actionsAndSpacesMutex);
+            if (!m_quirkedControllerPoses || disableQuirkedControllerPoses) {
+                const auto oldControllerAimOffset = m_controllerAimOffset;
+                const auto oldControllerGripOffset = m_controllerGripOffset;
+                const auto oldControllerPalmOffset = m_controllerPalmOffset;
+                const auto oldControllerHandOffset = m_controllerHandOffset;
+                m_controllerAimOffset = controllerAimOffset;
+                m_controllerGripOffset = controllerGripOffset;
+                m_controllerPalmOffset = controllerPalmOffset;
+                m_controllerHandOffset = controllerHandOffset;
 
-            const auto oldControllerGripOffset = m_controllerGripOffset;
-            m_controllerGripOffset =
-                Pose::MakePose(Quaternion::RotationRollPitchYaw(
-                                   {OVR::DegreeToRad((float)getSetting("grip_pose_rot_x").value_or(0.f)),
-                                    OVR::DegreeToRad((float)getSetting("grip_pose_rot_y").value_or(0.f)),
-                                    OVR::DegreeToRad((float)getSetting("grip_pose_rot_z").value_or(0.f))}),
-                               XrVector3f{getSetting("grip_pose_offset_x").value_or(0) / 1000.f,
-                                          getSetting("grip_pose_offset_y").value_or(0) / 1000.f,
-                                          getSetting("grip_pose_offset_z").value_or(0) / 1000.f});
-
-            const auto oldControllerPalmOffset = m_controllerPalmOffset;
-            m_controllerPalmOffset =
-                Pose::MakePose(Quaternion::RotationRollPitchYaw(
-                                   {OVR::DegreeToRad((float)getSetting("palm_pose_rot_x").value_or(0.f)),
-                                    OVR::DegreeToRad((float)getSetting("palm_pose_rot_y").value_or(0.f)),
-                                    OVR::DegreeToRad((float)getSetting("palm_pose_rot_z").value_or(0.f))}),
-                               XrVector3f{getSetting("palm_pose_offset_x").value_or(0) / 1000.f,
-                                          getSetting("palm_pose_offset_y").value_or(0) / 1000.f,
-                                          getSetting("palm_pose_offset_z").value_or(0) / 1000.f});
-
-            const auto oldControllerHandOffset = m_controllerHandOffset;
-            m_controllerHandOffset =
-                Pose::MakePose(Quaternion::RotationRollPitchYaw(
-                                   {OVR::DegreeToRad((float)getSetting("hand_pose_rot_x").value_or(0.f)),
-                                    OVR::DegreeToRad((float)getSetting("hand_pose_rot_y").value_or(0.f)),
-                                    OVR::DegreeToRad((float)getSetting("hand_pose_rot_z").value_or(0.f))}),
-                               XrVector3f{getSetting("hand_pose_offset_x").value_or(0) / 1000.f,
-                                          getSetting("hand_pose_offset_y").value_or(0) / 1000.f,
-                                          getSetting("hand_pose_offset_z").value_or(0) / 1000.f});
-
-            // Force re-evaluating poses.
-            if (!Pose::Equals(oldControllerAimOffset, m_controllerAimOffset) ||
-                !Pose::Equals(oldControllerGripOffset, m_controllerGripOffset) ||
-                !Pose::Equals(oldControllerPalmOffset, m_controllerPalmOffset) ||
-                !Pose::Equals(oldControllerHandOffset, m_controllerHandOffset)) {
-                m_cachedControllerType[0].clear();
-                m_cachedControllerType[1].clear();
+                // Force re-evaluating poses.
+                if (!Pose::Equals(oldControllerAimOffset, m_controllerAimOffset) ||
+                    !Pose::Equals(oldControllerGripOffset, m_controllerGripOffset) ||
+                    !Pose::Equals(oldControllerPalmOffset, m_controllerPalmOffset) ||
+                    !Pose::Equals(oldControllerHandOffset, m_controllerHandOffset)) {
+                    m_cachedControllerType[0].clear();
+                    m_cachedControllerType[1].clear();
+                }
             }
         }
 
@@ -541,27 +586,29 @@ namespace virtualdesktop_openxr {
         m_overrideWorldScale = getSetting("world_scale").value_or(100) / 100.f;
 
         {
-            const auto oldVisibilityMaskScale = m_overrideVisibilityMaskScale;
-            m_overrideVisibilityMaskScale = getSetting("visibility_mask_scale").value_or(100) / 100.f;
-            if (oldVisibilityMaskScale != m_overrideVisibilityMaskScale) {
-                m_visibilityMaskDirty = xr::StereoView::Count;
+            const float visibilityMaskScale = getSetting("visibility_mask_scale").value_or(100) / 100.f;
+            const float oldVisibilityMaskScale =
+                m_overrideVisibilityMaskScale.exchange(visibilityMaskScale, std::memory_order_relaxed);
+            if (oldVisibilityMaskScale != visibilityMaskScale) {
+                m_visibilityMaskDirty.store(xr::StereoView::Count, std::memory_order_release);
             }
         }
 
         m_controllerLingerTimeout = getSetting("controller_linger_timeout").value_or(5000) * (int64_t)1'000'000;
 
-        TraceLoggingWrite(g_traceProvider,
-                          "VDXR_Config",
-                          TLArg(m_useMirrorWindow, "MirrorWindow"),
-                          TLArg(m_useRunningStart, "UseRunningStart"),
-                          TLArg(m_useDeferredFrameWait, "UseDeferredFrameWait"),
-                          TLArg(m_shouldUseDepth, "ShouldUseDepth"),
-                          TLArg(m_syncGpuWorkInEndFrame, "SyncGpuWorkInEndFrame"),
-                          TLArg(m_jiggleViewRotations, "JiggleViewRotations"),
-                          TLArg(m_sharpenFactor, "SharpenFactor"),
-                          TLArg(m_overrideWorldScale, "OverrideWorldScale"),
-                          TLArg(m_overrideVisibilityMaskScale, "OverrideVisibilityMaskScale"),
-                          TLArg(m_controllerLingerTimeout, "ControllerLingerTimeout"));
+        TraceLoggingWrite(
+            g_traceProvider,
+            "VDXR_Config",
+            TLArg(m_useMirrorWindow.load(std::memory_order_relaxed), "MirrorWindow"),
+            TLArg(m_useRunningStart.load(std::memory_order_relaxed), "UseRunningStart"),
+            TLArg(m_useDeferredFrameWait.load(std::memory_order_relaxed), "UseDeferredFrameWait"),
+            TLArg(m_shouldUseDepth.load(std::memory_order_relaxed), "ShouldUseDepth"),
+            TLArg(m_syncGpuWorkInEndFrame.load(std::memory_order_relaxed), "SyncGpuWorkInEndFrame"),
+            TLArg(m_jiggleViewRotations.load(std::memory_order_relaxed), "JiggleViewRotations"),
+            TLArg(m_sharpenFactor.load(std::memory_order_relaxed), "SharpenFactor"),
+            TLArg(m_overrideWorldScale.load(std::memory_order_relaxed), "OverrideWorldScale"),
+            TLArg(m_overrideVisibilityMaskScale.load(std::memory_order_relaxed), "OverrideVisibilityMaskScale"),
+            TLArg(m_controllerLingerTimeout.load(std::memory_order_relaxed), "ControllerLingerTimeout"));
     }
 
 } // namespace virtualdesktop_openxr

@@ -22,6 +22,9 @@
 
 #pragma once
 
+#include <array>
+#include <atomic>
+
 #include "framework/dispatch.gen.h"
 
 #include "accessibility.h"
@@ -309,6 +312,21 @@ namespace virtualdesktop_openxr {
                                                  XrViveTrackerPathsHTCX* paths) override;
 
       private:
+        friend struct RuntimeInputRegression;
+
+        struct SettingsWatcherState {
+            wil::unique_handle event;
+            wil::unique_hkey key;
+            std::mutex mutex;
+            OpenXrRuntime* owner{nullptr};
+            bool stopped{false};
+
+            void notify(PTP_WAIT wait);
+            void detach(PTP_WAIT wait);
+            static void CALLBACK callback(PTP_CALLBACK_INSTANCE, void* context, PTP_WAIT wait, TP_WAIT_RESULT) noexcept;
+        };
+        void stopRegistryWatcher();
+
         struct Extension {
             const char* extensionName;
             uint32_t extensionVersion;
@@ -351,12 +369,16 @@ namespace virtualdesktop_openxr {
             // For precompositor needs (drawing our own stereo projection).
             SwapchainSlice stereoProjection[xr::StereoView::Count];
             IntermediateTexture intermediate[xr::StereoView::Count];
+            // Different projection layers may share the same input color swapchain.
+            std::map<uint32_t, std::array<SwapchainSlice, xr::StereoView::Count>> depthProjection;
 
             // Whether a static image swapchain has been acquired at least once.
             bool frozen{false};
 
             // Resources needed for interop.
             std::vector<ComPtr<ID3D11Texture2D>> d3d11Images;
+            // NT exports are owned by the swapchain; import APIs only borrow them.
+            std::vector<wil::unique_handle> ntTextureHandles;
             std::vector<ComPtr<ID3D12Resource>> d3d12Images;
             std::vector<VkDeviceMemory> vkDeviceMemory;
             std::vector<VkImage> vkImages;
@@ -370,8 +392,10 @@ namespace virtualdesktop_openxr {
         };
 
         struct PrecompositorState {
+            float sharpenFactor{0.f};
             // State for the current frame.
             std::set<std::pair<Swapchain*, uint32_t>> resolvedSwapchainImages;
+            std::set<std::pair<Swapchain*, uint32_t>> pendingSwapchainCommits;
             XrTime displayTime{0};
             bool isProj0SRGB{false};
             bool isFirstProjectionLayer{true};
@@ -436,8 +460,8 @@ namespace virtualdesktop_openxr {
             std::set<XrPath> subactionPaths;
 
             // A copy of the input state. This is to handle when xrSyncActions() does not update all actionsets at once.
-            ovrInputState cachedInputState;
-            uint64_t generation;
+            ovrInputState cachedInputState{};
+            uint64_t generation{0};
         };
 
         struct Action {
@@ -446,16 +470,17 @@ namespace virtualdesktop_openxr {
             std::string localizedName;
 
             XrActionSet actionSet{XR_NULL_HANDLE};
-            uint64_t lastChangedGeneration[xr::Side::Count]{0, 0};
+            // The aggregate query has its own history, independent of either hand.
+            uint64_t lastChangedGeneration[xr::Side::Count + 1]{};
 
-            float lastFloatValue[xr::Side::Count]{0.f, 0.f};
-            XrTime lastFloatValueChangedTime[xr::Side::Count]{0, 0};
+            float lastFloatValue[xr::Side::Count + 1]{};
+            XrTime lastFloatValueChangedTime[xr::Side::Count + 1]{};
 
-            XrVector2f lastVector2fValue[xr::Side::Count]{{0.f, 0.f}, {0.f, 0.f}};
-            XrTime lastVector2fValueChangedTime[xr::Side::Count]{0, 0};
+            XrVector2f lastVector2fValue[xr::Side::Count + 1]{};
+            XrTime lastVector2fValueChangedTime[xr::Side::Count + 1]{};
 
-            bool lastBoolValue[xr::Side::Count]{false, false};
-            XrTime lastBoolValueChangedTime[xr::Side::Count]{0, 0};
+            bool lastBoolValue[xr::Side::Count + 1]{};
+            XrTime lastBoolValueChangedTime[xr::Side::Count + 1]{};
 
             std::set<XrPath> subactionPaths;
             std::map<std::string, ActionSource> actionSources;
@@ -575,7 +600,7 @@ namespace virtualdesktop_openxr {
                                       XrRect2Di viewport);
         void ensurePreprocessResources();
         void asyncSubmissionThread();
-        void waitForAsyncSubmissionIdle(bool doRunningStart = false);
+        void waitForAsyncSubmissionIdle(bool doRunningStart = false, double predictedFrameDuration = 0.);
 
         // d3d11_native.cpp
         XrResult initializeD3D11(const XrGraphicsBindingD3D11KHR& d3dBindings);
@@ -583,6 +608,8 @@ namespace virtualdesktop_openxr {
         void initializeSubmissionDevice(const std::string& appGraphicsApi);
         void initializeSubmissionResources();
         void cleanupSubmissionDevice();
+        void cleanupSessionResources();
+        void ensureAppSwapchainImages(Swapchain& xrSwapchain);
         std::vector<HANDLE> getSwapchainImages(Swapchain& xrSwapchain);
         XrResult getSwapchainImagesD3D11(Swapchain& xrSwapchain, XrSwapchainImageD3D11KHR* d3d11Images, uint32_t count);
         void resolveSwapchainImage(Swapchain& xrSwapchain,
@@ -590,7 +617,7 @@ namespace virtualdesktop_openxr {
                                    std::set<std::pair<Swapchain*, uint32_t>>& resolved,
                                    bool skipCommit = false);
         void ensureSwapchainSliceResources(Swapchain& xrSwapchain, uint32_t slice) const;
-        void ensureSwapchainPrecompositorResources(Swapchain& xrSwapchain, const ovrSizei& resolution) const;
+        void ensureSwapchainPrecompositorResources(Swapchain& xrSwapchain, const ovrSizei& resolution);
         void populateSwapchainSlice(const Swapchain& xrSwapchain,
                                     const ovrTextureSwapChainDesc& desc,
                                     SwapchainSlice& slice,
@@ -631,7 +658,10 @@ namespace virtualdesktop_openxr {
         void serializeOpenGLFrame();
 
         // precompositor.cpp
-        void upscaler(Swapchain** swapchains, const XrSwapchainSubImage** subImages, ovrLayerEyeFov& layer);
+        void upscaler(const XrSwapchainSubImage** subImages, ovrLayerEyeFov& layer);
+        void alignDepthLayer(const XrSwapchainSubImage** color,
+                             const XrSwapchainSubImage** depth,
+                             ovrLayerEyeFovDepth& layer);
         void initializePrecompositorResources();
 
         // visibility_mask.cpp
@@ -669,7 +699,7 @@ namespace virtualdesktop_openxr {
         using CheckValidPathFunction = std::function<bool(const std::string&)>;
         std::map<std::pair<std::string, std::string>, MappingFunction> m_controllerMappingTable;
         std::map<std::string, CheckValidPathFunction> m_controllerValidPathsTable;
-        wil::unique_registry_watcher m_registryWatcher;
+        wil::unique_threadpool_wait m_registryWatcher;
         bool m_loggedResolution{false};
         std::string m_applicationName;
         std::string m_exeName;
@@ -699,9 +729,12 @@ namespace virtualdesktop_openxr {
         ComPtr<ID3D11DeviceContext4> m_ovrSubmissionContext;
         ComPtr<ID3DDeviceContextState> m_ovrSubmissionContextState;
         ComPtr<ID3D11Fence> m_ovrSubmissionFence;
+        // Submission work has its own timeline; application signals must not satisfy these waits.
+        ComPtr<ID3D11Fence> m_ovrSubmissionCompletionFence;
+        uint64_t m_submissionFenceValue{0};
         wil::unique_handle m_eventForSubmissionFence;
         UINT m_gpuVendor{0};
-        bool m_syncGpuWorkInEndFrame{false};
+        std::atomic<bool> m_syncGpuWorkInEndFrame{false};
         ComPtr<ID3D11SamplerState> m_linearClampSampler;
         ComPtr<ID3D11SamplerState> m_pointClampSampler;
         ComPtr<ID3D11DepthStencilState> m_noDepthReadState;
@@ -712,13 +745,16 @@ namespace virtualdesktop_openxr {
         ComPtr<ID3D11Buffer> m_alphaCorrectConstants;
         ComPtr<ID3D11ComputeShader> m_sharpenShader;
         ComPtr<ID3D11ComputeShader> m_upscaleShader;
+        ComPtr<ID3D11PixelShader> m_alignDepthShader;
+        ComPtr<ID3D11Buffer> m_alignDepthConstants;
         ComPtr<ID3D11Buffer> m_upscalerConstants;
         ComPtr<IDXGISwapChain1> m_dxgiSwapchain;
         bool m_sessionCreated{false};
-        XrSessionState m_sessionState{XR_SESSION_STATE_UNKNOWN};
+        bool m_sessionResourcesRequireCleanup{false};
+        std::atomic<XrSessionState> m_sessionState{XR_SESSION_STATE_UNKNOWN};
         std::deque<std::pair<XrSessionState, double>> m_sessionEventQueue;
         ovrSessionStatus m_hmdStatus{};
-        bool m_sessionBegun{false};
+        std::atomic<bool> m_sessionBegun{false};
         bool m_sessionLossPending{false};
         bool m_sessionStopping{false};
         bool m_sessionExiting{false};
@@ -726,6 +762,7 @@ namespace virtualdesktop_openxr {
         std::shared_mutex m_actionsAndSpacesMutex;
         std::map<XrPath, std::string> m_strings; // protected by actionsAndSpacesMutex
         std::set<XrActionSet> m_actionSets;
+        std::set<XrActionSet> m_actionSetsForCleanup;
         std::set<XrActionSet> m_attachedActionSets;
         std::set<XrAction> m_actions;
         std::set<XrAction> m_actionsForCleanup;
@@ -753,25 +790,25 @@ namespace virtualdesktop_openxr {
         bool m_quirkedControllerPoses{false};
         std::string m_localizedControllerType[xr::Side::Count];
         XrPath m_currentInteractionProfile[xr::Side::Count]{XR_NULL_PATH, XR_NULL_PATH};
-        bool m_currentInteractionProfileDirty{false};
+        std::atomic<bool> m_currentInteractionProfileDirty{false};
         bool m_hasEyeTrackerBindings{false};
         bool m_hasViveTrackerBindings{false};
         Haptic m_currentVibration[xr::Side::Count];
-        bool m_shouldUseDepth{true};
-        bool m_useRunningStart{true};
-        bool m_useDeferredFrameWait{false};
-        bool m_jiggleViewRotations{false};
+        std::atomic<bool> m_shouldUseDepth{true};
+        std::atomic<bool> m_useRunningStart{true};
+        std::atomic<bool> m_useDeferredFrameWait{false};
+        std::atomic<bool> m_jiggleViewRotations{false};
         MyHandSimulation m_handSimulation[xr::Side::Count];
         PrecompositorState m_precompositor;
         uint32_t m_shouldRecenter{false};
         XrTime m_recenterTime{0};
         float m_supersamplingFactor{1.f};
         float m_upscalingMultiplier{1.f};
-        float m_sharpenFactor{0.f};
-        float m_overrideWorldScale{1.f};
-        float m_overrideVisibilityMaskScale{1.f};
-        uint32_t m_visibilityMaskDirty{0};
-        int64_t m_controllerLingerTimeout{5'000'000'000};
+        std::atomic<float> m_sharpenFactor{0.f};
+        std::atomic<float> m_overrideWorldScale{1.f};
+        std::atomic<float> m_overrideVisibilityMaskScale{1.f};
+        std::atomic<uint32_t> m_visibilityMaskDirty{0};
+        std::atomic<int64_t> m_controllerLingerTimeout{5'000'000'000};
         std::unique_ptr<AccessibilityHelper> m_accessibilityHelper;
 
         // Swapchains and other graphics stuff.
@@ -779,7 +816,7 @@ namespace virtualdesktop_openxr {
         std::set<XrSwapchain> m_swapchains;
 
         // Mirror window.
-        bool m_useMirrorWindow{false};
+        std::atomic<bool> m_useMirrorWindow{false};
         std::mutex m_mirrorWindowMutex;
         HWND m_mirrorWindowHwnd{nullptr};
         bool m_mirrorWindowReady{false};
@@ -791,7 +828,11 @@ namespace virtualdesktop_openxr {
         // Async submission thread.
         bool m_useAsyncSubmission{false};
         bool m_needStartAsyncSubmissionThread{false};
+        // Worker readiness, frame ID, error, termination and timestamp share this mutex.
         bool m_terminateAsyncThread{false};
+        bool m_asyncSubmissionReady{false};
+        long long m_asyncNextFrameId{0};
+        std::exception_ptr m_asyncSubmissionError;
         std::thread m_asyncSubmissionThread;
         std::mutex m_asyncSubmissionMutex;
         std::condition_variable m_asyncSubmissionCondVar;
@@ -850,7 +891,7 @@ namespace virtualdesktop_openxr {
         uint64_t m_frameCompleted{0};
         uint64_t m_lastCpuFrameTimeUs{0};
         uint64_t m_lastGpuFrameTimeUs{0};
-        ovrInputState m_cachedInputState;
+        ovrInputState m_cachedInputState{};
         std::set<XrActionSet> m_activeActionSets;
         uint32_t m_actionSourcePriority[(size_t)ActionSourceIndex::Count]{};
         BodyTracking::BodyStateV2 m_cachedBodyState{};
@@ -872,6 +913,7 @@ namespace virtualdesktop_openxr {
         std::unique_ptr<ITimer> m_gpuTimerApp[k_numGpuTimers];
         std::unique_ptr<ITimer> m_gpuTimerPrecomposition[k_numGpuTimers];
         uint32_t m_currentTimerIndex{0};
+        std::shared_ptr<SettingsWatcherState> m_settingsWatcherState;
     };
 
     // Singleton accessor.

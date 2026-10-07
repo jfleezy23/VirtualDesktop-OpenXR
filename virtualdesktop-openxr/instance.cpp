@@ -52,6 +52,68 @@ namespace virtualdesktop_openxr {
         RuntimeVersionPatch,
         RuntimeCommitHash);
 
+    void OpenXrRuntime::SettingsWatcherState::notify(PTP_WAIT wait) {
+        std::unique_lock lock(mutex);
+        if (stopped || !owner) {
+            return;
+        }
+
+        // Register the next registry change before reading settings, then rearm the wait after the read.
+        const auto error =
+            RegNotifyChangeKeyValue(key.get(),
+                                    TRUE,
+                                    REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_THREAD_AGNOSTIC,
+                                    event.get(),
+                                    TRUE);
+        if (error == ERROR_SUCCESS || error == ERROR_ACCESS_DENIED || error == ERROR_KEY_DELETED) {
+            try {
+                owner->refreshSettings();
+            } catch (...) {
+                stopped = true;
+                owner = nullptr;
+                OutputDebugStringA("VDXR settings refresh failed; disabling registry notifications.\n");
+                return;
+            }
+        }
+        if (error == ERROR_SUCCESS || error == ERROR_ACCESS_DENIED) {
+            SetThreadpoolWait(wait, event.get(), nullptr);
+        } else {
+            stopped = true;
+            owner = nullptr;
+        }
+    }
+
+    void CALLBACK OpenXrRuntime::SettingsWatcherState::callback(PTP_CALLBACK_INSTANCE,
+                                                                void* context,
+                                                                PTP_WAIT wait,
+                                                                TP_WAIT_RESULT) noexcept {
+        try {
+            static_cast<SettingsWatcherState*>(context)->notify(wait);
+        } catch (...) {
+            // Exceptions must not cross the native thread-pool callback boundary.
+            OutputDebugStringA("VDXR registry callback failed; leaving its wait disarmed.\n");
+        }
+    }
+
+    void OpenXrRuntime::SettingsWatcherState::detach(PTP_WAIT wait) {
+        std::unique_lock lock(mutex);
+        stopped = true;
+        owner = nullptr;
+        if (wait) {
+            SetThreadpoolWait(wait, nullptr, nullptr);
+        }
+    }
+
+    void OpenXrRuntime::stopRegistryWatcher() {
+        if (m_settingsWatcherState) {
+            m_settingsWatcherState->detach(m_registryWatcher.get());
+        }
+        // The native wait deleter cancels pending callbacks, drains active callbacks, then closes the wait.
+        // Never drain while holding the state mutex: an active callback may be waiting for that mutex.
+        m_registryWatcher.reset();
+        m_settingsWatcherState.reset();
+    }
+
     OpenXrRuntime::OpenXrRuntime() {
         const auto runtimeVersion =
             xr::ToString(XR_MAKE_VERSION(RuntimeVersionMajor, RuntimeVersionMinor, RuntimeVersionPatch));
@@ -66,14 +128,26 @@ namespace virtualdesktop_openxr {
 
         // Watch for changes in the registry.
         try {
-            wil::unique_hkey keyToWatch;
+            auto state = std::make_shared<SettingsWatcherState>();
+            state->owner = this;
             if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                               xr::utf8_to_wide(RegPrefix).c_str(),
                               0,
                               KEY_WOW64_64KEY | KEY_READ,
-                              keyToWatch.put()) == ERROR_SUCCESS) {
-                m_registryWatcher = wil::make_registry_watcher(
-                    std::move(keyToWatch), true, [&](wil::RegistryChangeKind changeType) { refreshSettings(); });
+                              state->key.put()) == ERROR_SUCCESS) {
+                state->event.reset(CreateEventW(nullptr, FALSE, FALSE, nullptr));
+                CHECK_MSG(state->event, "Failed to create registry notification event");
+                CHECK_HRCMD(HRESULT_FROM_WIN32(RegNotifyChangeKeyValue(
+                    state->key.get(),
+                    TRUE,
+                    REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_THREAD_AGNOSTIC,
+                    state->event.get(),
+                    TRUE)));
+                wil::unique_threadpool_wait wait(
+                    CreateThreadpoolWait(&SettingsWatcherState::callback, state.get(), nullptr));
+                CHECK_MSG(wait, "Failed to create registry notification wait");
+                m_settingsWatcherState = std::move(state);
+                m_registryWatcher = std::move(wait);
             }
         } catch (std::exception&) {
             // Ignore errors that can happen with UWP applications not able to write to the registry.
@@ -82,24 +156,27 @@ namespace virtualdesktop_openxr {
         QueryPerformanceFrequency(&m_qpcFrequency);
 
         initializeExtensionsTable();
+        // Arm only after all fallible initialization: constructor failure destroys members without our destructor.
+        if (m_registryWatcher) {
+            SetThreadpoolWait(m_registryWatcher.get(), m_settingsWatcherState->event.get(), nullptr);
+        }
     }
 
     OpenXrRuntime::~OpenXrRuntime() {
+        stopRegistryWatcher();
+
         // Destroy actionset and actions (tied to the instance).
         for (auto action : m_actionsForCleanup) {
             Action* xrAction = (Action*)action;
             delete xrAction;
         }
-        for (auto actionSet : m_actionSets) {
+        for (auto actionSet : m_actionSetsForCleanup) {
             ActionSet* xrActionSet = (ActionSet*)actionSet;
             delete xrActionSet;
         }
 
-        if (m_sessionCreated) {
-            // TODO: Ideally we do not invoke OpenXR public APIs to avoid confusing event tracing and possible
-            // deadlocks.
-            xrDestroySession((XrSession)1);
-        }
+        // Fallible GPU/session teardown belongs to xrDestroyInstance, before ResetInstance invokes this noexcept
+        // destructor. Cleanup failures must be reported through the public API.
 
         if (m_bodyState) {
             UnmapViewOfFile(m_bodyState);
@@ -144,11 +221,12 @@ namespace virtualdesktop_openxr {
                           TLArg(layerName, "LayerName"),
                           TLArg(propertyCapacityInput, "PropertyCapacityInput"));
 
+        *propertyCountOutput = (uint32_t)m_extensionsTable.size();
+
         if (propertyCapacityInput && propertyCapacityInput < m_extensionsTable.size()) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *propertyCountOutput = (uint32_t)m_extensionsTable.size();
         TraceLoggingWrite(g_traceProvider,
                           "xrEnumerateInstanceExtensionProperties",
                           TLArg(*propertyCountOutput, "PropertyCountOutput"));
@@ -299,6 +377,7 @@ namespace virtualdesktop_openxr {
         }
 
         if ((startsWith(m_exeName, "Contractors_") && endsWith(m_exeName, "-Win64-Shipping.exe"))) {
+            std::unique_lock lock(m_actionsAndSpacesMutex);
             m_controllerGripOffset.position.z = -0.1f;
             m_quirkedControllerPoses = true;
         }
@@ -329,7 +408,13 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_HANDLE_INVALID;
         }
 
-        // The caller will destroy this class next, which will take care of all the cleanup.
+        stopRegistryWatcher();
+        if (m_sessionCreated) {
+            CHECK_XRCMD(xrDestroySession((XrSession)1));
+        } else {
+            // A failed CreateSession may own resources before publishing the session handle.
+            cleanupSessionResources();
+        }
 
         return XR_SUCCESS;
     }
@@ -390,6 +475,15 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_HANDLE_INVALID;
         }
 
+        // Session state transitions and their queue share the frame mutex.
+        std::unique_lock frameLock(m_frameMutex);
+        if (!m_sessionCreated) {
+            m_currentInteractionProfileDirty = false;
+            m_shouldRecenter = 0;
+            m_visibilityMaskDirty = 0;
+            return XR_EVENT_UNAVAILABLE;
+        }
+
         // Generate session events.
         updateSessionState();
         if (!m_sessionEventQueue.empty()) {
@@ -411,7 +505,7 @@ namespace virtualdesktop_openxr {
             return XR_SUCCESS;
         }
 
-        if (m_currentInteractionProfileDirty) {
+        if (m_currentInteractionProfileDirty.exchange(false)) {
             XrEventDataInteractionProfileChanged* const buffer =
                 reinterpret_cast<XrEventDataInteractionProfileChanged*>(eventData);
             buffer->type = XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED;
@@ -422,8 +516,6 @@ namespace virtualdesktop_openxr {
                               "xrPollEvent",
                               TLArg("InteractionProfileChanged", "Type"),
                               TLXArg(buffer->session, "Session"));
-
-            m_currentInteractionProfileDirty = false;
 
             return XR_SUCCESS;
         }
@@ -453,7 +545,18 @@ namespace virtualdesktop_openxr {
             return XR_SUCCESS;
         }
 
-        if (m_visibilityMaskDirty) {
+        const bool canSendVisibilityChange = has_XR_KHR_visibility_mask && m_sessionCreated;
+        if (!canSendVisibilityChange) {
+            m_visibilityMaskDirty.store(0, std::memory_order_release);
+        }
+        auto visibilityMaskChanges =
+            canSendVisibilityChange ? m_visibilityMaskDirty.load(std::memory_order_acquire) : 0;
+        while (visibilityMaskChanges && !m_visibilityMaskDirty.compare_exchange_weak(visibilityMaskChanges,
+                                                                                     visibilityMaskChanges - 1,
+                                                                                     std::memory_order_acq_rel,
+                                                                                     std::memory_order_acquire)) {
+        }
+        if (visibilityMaskChanges) {
             XrEventDataVisibilityMaskChangedKHR* const buffer =
                 reinterpret_cast<XrEventDataVisibilityMaskChangedKHR*>(eventData);
             buffer->type = XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR;
@@ -461,15 +564,13 @@ namespace virtualdesktop_openxr {
             buffer->session = (XrSession)1;
             buffer->viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
             buffer->viewIndex =
-                m_visibilityMaskDirty == xr::StereoView::Count ? xr::StereoView::Left : xr::StereoView::Right;
+                visibilityMaskChanges == xr::StereoView::Count ? xr::StereoView::Left : xr::StereoView::Right;
 
             TraceLoggingWrite(g_traceProvider,
                               "VisibilityMaskChanged",
                               TLXArg(buffer->session, "Session"),
                               TLArg(xr::ToCString(buffer->viewConfigurationType), "ViewConfigurationType"),
                               TLArg(buffer->viewIndex, "ViewIndex"));
-
-            m_visibilityMaskDirty--;
 
             return XR_SUCCESS;
         }

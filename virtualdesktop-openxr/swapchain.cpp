@@ -155,11 +155,12 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_VALIDATION_FAILURE;
         }
 
+        *viewCountOutput = xr::StereoView::Count;
+
         if (viewCapacityInput && viewCapacityInput < xr::StereoView::Count) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *viewCountOutput = xr::StereoView::Count;
         TraceLoggingWrite(
             g_traceProvider, "xrEnumerateViewConfigurationViews", TLArg(*viewCountOutput, "ViewCountOutput"));
 
@@ -287,11 +288,12 @@ namespace virtualdesktop_openxr {
                                : isOpenGLSession() ? (uint32_t)glFormats.size()
                                                    : (uint32_t)d3dFormats.size();
 
+        *formatCountOutput = count;
+
         if (formatCapacityInput && formatCapacityInput < count) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *formatCountOutput = count;
         TraceLoggingWrite(
             g_traceProvider, "xrEnumerateSwapchainFormats", TLArg(*formatCountOutput, "FormatCountOutput"));
 
@@ -389,6 +391,11 @@ namespace virtualdesktop_openxr {
         }
 
         ovrTextureSwapChain ovrSwapchain{};
+        auto releaseCandidate = MakeScopeGuard([&] {
+            if (ovrSwapchain) {
+                ovr_DestroyTextureSwapChain(m_ovrSession, ovrSwapchain);
+            }
+        });
         int length = 0;
         // If and only if the swapchain images are directly usable by LibOVR, we create an OVR swapchain. Otherwise, we
         // will create images ourselves.
@@ -411,21 +418,22 @@ namespace virtualdesktop_openxr {
         }
 
         // Create the internal struct.
-        Swapchain& xrSwapchain = *new Swapchain;
+        auto candidate = std::make_unique<Swapchain>();
+        Swapchain& xrSwapchain = *candidate;
         xrSwapchain.appSwapchain.ovrSwapchain = ovrSwapchain;
         xrSwapchain.ovrSwapchainLength = length;
         xrSwapchain.ovrDesc = desc;
         xrSwapchain.xrDesc = *createInfo;
         xrSwapchain.dxgiFormatForSubmission = dxgiFormatForSubmission;
 
-        *swapchain = (XrSwapchain)&xrSwapchain;
-
         // Maintain a list of known swapchains for validation and cleanup.
         {
             std::unique_lock lock(m_swapchainsMutex);
 
-            m_swapchains.insert(*swapchain);
+            m_swapchains.insert((XrSwapchain)&xrSwapchain);
         }
+        *swapchain = (XrSwapchain)candidate.release();
+        releaseCandidate.Deactivate();
 
         TraceLoggingWrite(g_traceProvider, "xrCreateSwapchain", TLXArg(*swapchain, "Swapchain"));
 
@@ -459,8 +467,9 @@ namespace virtualdesktop_openxr {
 
         Swapchain& xrSwapchain = *(Swapchain*)swapchain;
 
-        if (!xrSwapchain.resolvedSlices.empty() && xrSwapchain.appSwapchain.ovrSwapchain &&
-            xrSwapchain.resolvedSlices[0].ovrSwapchain != xrSwapchain.appSwapchain.ovrSwapchain) {
+        if (xrSwapchain.appSwapchain.ovrSwapchain &&
+            (xrSwapchain.resolvedSlices.empty() ||
+             xrSwapchain.resolvedSlices[0].ovrSwapchain != xrSwapchain.appSwapchain.ovrSwapchain)) {
             ovr_DestroyTextureSwapChain(m_ovrSession, xrSwapchain.appSwapchain.ovrSwapchain);
         }
         while (!xrSwapchain.resolvedSlices.empty()) {
@@ -473,6 +482,15 @@ namespace virtualdesktop_openxr {
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
             if (xrSwapchain.stereoProjection[eye].ovrSwapchain) {
                 ovr_DestroyTextureSwapChain(m_ovrSession, xrSwapchain.stereoProjection[eye].ovrSwapchain);
+            }
+        }
+        for (auto& [layerIndex, slices] : xrSwapchain.depthProjection) {
+            for (auto& slice : slices) {
+                slice.dsvs.clear();
+                slice.images.clear();
+                if (slice.ovrSwapchain) {
+                    ovr_DestroyTextureSwapChain(m_ovrSession, slice.ovrSwapchain);
+                }
             }
         }
 
@@ -505,11 +523,12 @@ namespace virtualdesktop_openxr {
 
         int count = !xrSwapchain.ovrDesc.StaticImage ? xrSwapchain.ovrSwapchainLength : 1;
 
+        *imageCountOutput = count;
+
         if (imageCapacityInput && imageCapacityInput < (uint32_t)count) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *imageCountOutput = count;
         TraceLoggingWrite(g_traceProvider, "xrEnumerateSwapchainImages", TLArg(*imageCountOutput, "ImageCountOutput"));
 
         if (imageCapacityInput && images) {

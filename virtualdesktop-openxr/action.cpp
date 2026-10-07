@@ -114,11 +114,12 @@ namespace virtualdesktop_openxr {
         }
 
         const auto& str = it->second;
-        if (bufferCapacityInput && bufferCapacityInput < str.length()) {
+        *bufferCountOutput = (uint32_t)str.length() + 1;
+
+        if (bufferCapacityInput && bufferCapacityInput < *bufferCountOutput) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *bufferCountOutput = (uint32_t)str.length() + 1;
         TraceLoggingWrite(g_traceProvider, "xrPathToString", TLArg(*bufferCountOutput, "BufferCountOutput"));
 
         if (bufferCapacityInput && buffer) {
@@ -176,15 +177,19 @@ namespace virtualdesktop_openxr {
         }
 
         // Create the internal struct.
-        ActionSet& xrActionSet = *new ActionSet;
+        auto owner = std::make_unique<ActionSet>();
+        ActionSet& xrActionSet = *owner;
         xrActionSet.name = name;
         xrActionSet.localizedName = localizedName;
         xrActionSet.effectivePriority = xrActionSet.priority = createInfo->priority;
 
-        *actionSet = (XrActionSet)&xrActionSet;
-
         // Maintain a list of known actionsets for validation.
-        m_actionSets.insert(*actionSet);
+        const auto handle = (XrActionSet)&xrActionSet;
+        m_actionSetsForCleanup.insert(handle);
+        auto rollback = MakeScopeGuard([&] { m_actionSetsForCleanup.erase(handle); });
+        m_actionSets.insert(handle);
+        rollback.Deactivate();
+        *actionSet = (XrActionSet)owner.release();
 
         TraceLoggingWrite(g_traceProvider, "xrCreateActionSet", TLXArg(*actionSet, "ActionSet"));
 
@@ -201,8 +206,6 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_HANDLE_INVALID;
         }
 
-        ActionSet* xrActionSet = (ActionSet*)actionSet;
-
         auto it = m_actions.begin();
         while (it != m_actions.end()) {
             const Action& xrAction = *(Action*)*it;
@@ -215,7 +218,8 @@ namespace virtualdesktop_openxr {
             }
         }
 
-        delete xrActionSet;
+        // Surviving action spaces still reference this set and its binding state.
+        // Retain the allocation until instance teardown, as we already do for actions.
         m_actionSets.erase(actionSet);
         m_attachedActionSets.erase(actionSet);
 
@@ -598,7 +602,8 @@ namespace virtualdesktop_openxr {
 
         std::optional<bool> combinedState;
         const std::string& subActionPath = getXrPath(getInfo->subactionPath);
-        const int subActionSide = std::max(0, getActionSide(subActionPath));
+        const int subActionSide =
+            getInfo->subactionPath == XR_NULL_PATH ? xr::Side::Count : std::max(0, getActionSide(subActionPath));
         const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
         for (const auto& source : xrAction.actionSources) {
             if (!startsWith(source.first, subActionPath)) {
@@ -710,7 +715,8 @@ namespace virtualdesktop_openxr {
 
         std::optional<float> combinedState;
         const std::string& subActionPath = getXrPath(getInfo->subactionPath);
-        const int subActionSide = std::max(0, getActionSide(subActionPath));
+        const int subActionSide =
+            getInfo->subactionPath == XR_NULL_PATH ? xr::Side::Count : std::max(0, getActionSide(subActionPath));
         const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
         for (const auto& source : xrAction.actionSources) {
             if (!startsWith(source.first, subActionPath)) {
@@ -738,16 +744,12 @@ namespace virtualdesktop_openxr {
             if (isBound && side >= 0) {
                 if (m_isControllerActive[side]) {
                     // Per spec, the combined state is the absolute maximum of all values.
-                    if (value.floatValue) {
-                        combinedState = std::max(combinedState.value_or(-std::numeric_limits<float>::infinity()),
-                                                 value.floatValue[side]);
-                    } else if (value.buttonMap) {
-                        combinedState = std::max(combinedState.value_or(-std::numeric_limits<float>::infinity()),
-                                                 *value.buttonMap & value.buttonType ? 1.f : 0.f);
-                    } else if (value.vector2fValue) {
-                        combinedState = std::max(combinedState.value_or(-std::numeric_limits<float>::infinity()),
-                                                 value.vector2fIndex == 0 ? value.vector2fValue[side].x
-                                                                          : value.vector2fValue[side].y);
+                    const float sourceState = value.floatValue  ? value.floatValue[side]
+                                              : value.buttonMap ? (*value.buttonMap & value.buttonType ? 1.f : 0.f)
+                                              : value.vector2fIndex == 0 ? value.vector2fValue[side].x
+                                                                         : value.vector2fValue[side].y;
+                    if (!combinedState || std::abs(sourceState) > std::abs(*combinedState)) {
+                        combinedState = sourceState;
                     }
                 }
             }
@@ -831,7 +833,8 @@ namespace virtualdesktop_openxr {
 
         std::optional<XrVector2f> combinedState;
         const std::string& subActionPath = getXrPath(getInfo->subactionPath);
-        const int subActionSide = std::max(0, getActionSide(subActionPath));
+        const int subActionSide =
+            getInfo->subactionPath == XR_NULL_PATH ? xr::Side::Count : std::max(0, getActionSide(subActionPath));
         const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
         for (const auto& source : xrAction.actionSources) {
             if (!startsWith(source.first, subActionPath)) {
@@ -949,6 +952,7 @@ namespace virtualdesktop_openxr {
 
         const std::string& subActionPath = getXrPath(getInfo->subactionPath);
         const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
+        state->isActive = XR_FALSE;
         for (const auto& source : xrAction.actionSources) {
             if (!startsWith(source.first, subActionPath)) {
                 continue;
@@ -1028,24 +1032,26 @@ namespace virtualdesktop_openxr {
         // TODO: Try to reduce contention here.
         std::unique_lock lock(m_actionsAndSpacesMutex);
 
+        // A rejected activation request must preserve the previous successful sync.
+        for (uint32_t i = 0; i < syncInfo->countActiveActionSets; i++) {
+            const auto& activeSet = syncInfo->activeActionSets[i];
+            if (!m_attachedActionSets.count(activeSet.actionSet)) {
+                return XR_ERROR_ACTIONSET_NOT_ATTACHED;
+            }
+            if (activeSet.subactionPath != XR_NULL_PATH &&
+                !((ActionSet*)activeSet.actionSet)->subactionPaths.count(activeSet.subactionPath)) {
+                return XR_ERROR_PATH_UNSUPPORTED;
+            }
+        }
+
         m_activeActionSets.clear();
         uint32_t maxPriority = UINT32_MAX;
         uint32_t minPriority = 0;
         bool doSide[xr::Side::Count] = {false, false};
         for (uint32_t i = 0; i < syncInfo->countActiveActionSets; i++) {
-            if (!m_attachedActionSets.count(syncInfo->activeActionSets[i].actionSet)) {
-                return XR_ERROR_ACTIONSET_NOT_ATTACHED;
-            }
-
             if (syncInfo->activeActionSets[i].subactionPath == XR_NULL_PATH) {
                 doSide[xr::Side::Left] = doSide[xr::Side::Right] = true;
             } else {
-                const ActionSet& xrActionSet = *(ActionSet*)syncInfo->activeActionSets[i].actionSet;
-
-                if (!xrActionSet.subactionPaths.count(syncInfo->activeActionSets[i].subactionPath)) {
-                    return XR_ERROR_PATH_UNSUPPORTED;
-                }
-
                 const int side = getActionSide(getXrPath(syncInfo->activeActionSets[i].subactionPath));
                 if (side == xr::Side::Left || side == xr::Side::Right) {
                     doSide[side] = true;
@@ -1074,6 +1080,7 @@ namespace virtualdesktop_openxr {
         }
 
         if (m_sessionState != XR_SESSION_STATE_FOCUSED) {
+            m_activeActionSets.clear();
             return XR_SESSION_NOT_FOCUSED;
         }
 
@@ -1117,7 +1124,7 @@ namespace virtualdesktop_openxr {
             const auto controllerTypes = ovr_GetConnectedControllerTypes(m_ovrSession);
             const bool isLingering =
                 (std::chrono::high_resolution_clock::now() - m_lastControllerSeenTime[side]).count() <
-                m_controllerLingerTimeout;
+                m_controllerLingerTimeout.load(std::memory_order_relaxed);
             const bool isPhysicalControllerConnected =
                 controllerTypes & (side == 0 ? ovrControllerType_LTouch : ovrControllerType_RTouch);
             const bool isEmulatedControllerConnected =
@@ -1296,11 +1303,12 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_ACTIONSET_NOT_ATTACHED;
         }
 
+        *sourceCountOutput = (uint32_t)xrAction.actionSources.size();
+
         if (sourceCapacityInput && sourceCapacityInput < xrAction.actionSources.size()) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *sourceCountOutput = (uint32_t)xrAction.actionSources.size();
         TraceLoggingWrite(
             g_traceProvider, "xrEnumerateBoundSourcesForAction", TLArg(*sourceCountOutput, "SourceCountOutput"));
 
@@ -1417,11 +1425,12 @@ namespace virtualdesktop_openxr {
             }
         }
 
-        if (bufferCapacityInput && bufferCapacityInput < localizedName.length()) {
+        *bufferCountOutput = (uint32_t)localizedName.length() + 1;
+
+        if (bufferCapacityInput && bufferCapacityInput < *bufferCountOutput) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *bufferCountOutput = (uint32_t)localizedName.length() + 1;
         TraceLoggingWrite(
             g_traceProvider, "xrGetInputSourceLocalizedName", TLArg(*bufferCountOutput, "BufferCountOutput"));
 

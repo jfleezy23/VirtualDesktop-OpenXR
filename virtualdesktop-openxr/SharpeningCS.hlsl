@@ -26,9 +26,13 @@
 
 cbuffer config : register(b0)
 {
-    uint2 topLeft;
+    int2 topLeft;
     bool isSRGB;
     uint padding;
+    int2 sourceMin;
+    int2 sourceMax;
+    uint2 outputSize;
+    uint2 padding2;
     uint4 const0; // CAS
     uint4 const1; // CAS
 };
@@ -44,6 +48,7 @@ RWTexture2D<float4> sharpenedTexture : register(u0);
 AF3 CasLoad(ASU2 p)
 {
     p += topLeft.xy;
+    p = clamp(p, sourceMin, sourceMax);
     return sourceTexture.Load(int3(p, 0)).rgb;
 }
 
@@ -55,6 +60,10 @@ void CasInput(inout AF1 r, inout AF1 g, inout AF1 b)
 
 void CasStore(AU2 p, AF3 c)
 {
+    if (any(p >= outputSize))
+    {
+        return;
+    }
     if (isSRGB)
     {
         c = ToSRGB(c);

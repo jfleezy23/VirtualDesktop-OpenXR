@@ -65,11 +65,12 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_SYSTEM_INVALID;
         }
 
-        if (bufferCapacityInput && bufferCapacityInput < instanceExtensions.size()) {
+        *bufferCountOutput = (uint32_t)instanceExtensions.size() + 1;
+
+        if (bufferCapacityInput && bufferCapacityInput < *bufferCountOutput) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *bufferCountOutput = (uint32_t)instanceExtensions.size() + 1;
         TraceLoggingWrite(
             g_traceProvider, "xrGetVulkanInstanceExtensionsKHR", TLArg(*bufferCountOutput, "BufferCountOutput"));
 
@@ -111,11 +112,12 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_SYSTEM_INVALID;
         }
 
-        if (bufferCapacityInput && bufferCapacityInput < deviceExtensions.size()) {
+        *bufferCountOutput = (uint32_t)deviceExtensions.size() + 1;
+
+        if (bufferCapacityInput && bufferCapacityInput < *bufferCountOutput) {
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        *bufferCountOutput = (uint32_t)deviceExtensions.size() + 1;
         TraceLoggingWrite(
             g_traceProvider, "xrGetVulkanDeviceExtensionsKHR", TLArg(*bufferCountOutput, "BufferCountOutput"));
 
@@ -577,29 +579,31 @@ namespace virtualdesktop_openxr {
     }
 
     void OpenXrRuntime::cleanupVulkan() {
-        if (m_vkDispatch.vkDeviceWaitIdle) {
+        if (m_vkDevice && m_vkDispatch.vkDeviceWaitIdle) {
             m_vkDispatch.vkDeviceWaitIdle(m_vkDevice);
         }
 
         for (uint32_t i = 0; i < k_numGpuTimers; i++) {
             m_gpuTimerApp[i].reset();
         }
-        if (m_vkDispatch.vkDestroySemaphore) {
+        if (m_vkDevice && m_vkTimelineSemaphore && m_vkDispatch.vkDestroySemaphore) {
             m_vkDispatch.vkDestroySemaphore(
                 m_vkDevice, m_vkTimelineSemaphore, m_vkAllocator ? &m_vkAllocator.value() : nullptr);
             m_vkTimelineSemaphore = VK_NULL_HANDLE;
+        }
+        if (m_vkDevice && m_vkFenceForFlush && m_vkDispatch.vkDestroyFence) {
             m_vkDispatch.vkDestroyFence(
                 m_vkDevice, m_vkFenceForFlush, m_vkAllocator ? &m_vkAllocator.value() : nullptr);
             m_vkFenceForFlush = VK_NULL_HANDLE;
         }
-        if (m_vkDispatch.vkResetCommandBuffer) {
+        if (m_vkDevice && m_vkCmdBuffer && m_vkDispatch.vkResetCommandBuffer) {
             m_vkDispatch.vkResetCommandBuffer(m_vkCmdBuffer, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
         }
-        if (m_vkDispatch.vkFreeCommandBuffers) {
+        if (m_vkDevice && m_vkCmdPool && m_vkCmdBuffer && m_vkDispatch.vkFreeCommandBuffers) {
             m_vkDispatch.vkFreeCommandBuffers(m_vkDevice, m_vkCmdPool, 1, &m_vkCmdBuffer);
             m_vkCmdBuffer = VK_NULL_HANDLE;
         }
-        if (m_vkDispatch.vkDestroyCommandPool) {
+        if (m_vkDevice && m_vkCmdPool && m_vkDispatch.vkDestroyCommandPool) {
             m_vkDispatch.vkDestroyCommandPool(
                 m_vkDevice, m_vkCmdPool, m_vkAllocator ? &m_vkAllocator.value() : nullptr);
             m_vkCmdPool = VK_NULL_HANDLE;
@@ -625,7 +629,24 @@ namespace virtualdesktop_openxr {
                                                      XrSwapchainImageVulkanKHR* vkImages,
                                                      uint32_t count) {
         // Detect whether this is the first call for this swapchain.
-        const bool initialized = !xrSwapchain.appSwapchain.images.empty();
+        const bool initialized = !xrSwapchain.vkImages.empty();
+        bool imported = initialized;
+        bool recording = false;
+        auto rollback = MakeScopeGuard([&] {
+            if (!imported) {
+                if (recording) {
+                    m_vkDispatch.vkResetCommandBuffer(m_vkCmdBuffer, 0);
+                }
+                cleanupSwapchainImagesVulkan(xrSwapchain);
+            }
+        });
+        for (uint32_t i = 0; i < count; i++) {
+            if (vkImages[i].type != XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR) {
+                return XR_ERROR_VALIDATION_FAILURE;
+            }
+        }
+        xrSwapchain.vkImages.reserve(count);
+        xrSwapchain.vkDeviceMemory.reserve(count);
 
         const bool needTransition = xrSwapchain.xrDesc.usageFlags & (XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
                                                                      XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
@@ -644,6 +665,7 @@ namespace virtualdesktop_openxr {
                 VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
                 beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
                 CHECK_VKCMD(m_vkDispatch.vkBeginCommandBuffer(m_vkCmdBuffer, &beginInfo));
+                recording = true;
             }
         }
 
@@ -710,7 +732,7 @@ namespace virtualdesktop_openxr {
                         createInfo.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
                     }
                     if (xrSwapchain.xrDesc.usageFlags & XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT) {
-                        createInfo.usage |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+                        createInfo.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
                     }
                     createInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
                     CHECK_VKCMD(m_vkDispatch.vkCreateImage(
@@ -767,6 +789,10 @@ namespace virtualdesktop_openxr {
                     if (xrSwapchain.xrDesc.usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) {
                         barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
                         barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+                        if (xrSwapchain.xrDesc.format == VK_FORMAT_D24_UNORM_S8_UINT ||
+                            xrSwapchain.xrDesc.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+                            barrier.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+                        }
                     }
                     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -800,12 +826,14 @@ namespace virtualdesktop_openxr {
         if (!initialized && needTransition) {
             // Transition all images to the desired state.
             CHECK_VKCMD(m_vkDispatch.vkEndCommandBuffer(m_vkCmdBuffer));
+            recording = false;
             VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
             submitInfo.commandBufferCount = 1;
             submitInfo.pCommandBuffers = &m_vkCmdBuffer;
             CHECK_VKCMD(m_vkDispatch.vkQueueSubmit(m_vkQueue, 1, &submitInfo, VK_NULL_HANDLE));
         }
 
+        imported = true;
         return XR_SUCCESS;
     }
 

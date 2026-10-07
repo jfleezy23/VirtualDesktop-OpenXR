@@ -503,11 +503,11 @@ namespace virtualdesktop_openxr {
         std::shared_lock lock(m_bodyStateMutex);
 
         if (m_bodyState &&
-            ((side == xr::Side::Left && m_cachedBodyState.LeftHandActive) || m_cachedBodyState.RightHandActive)) {
+            (side == xr::Side::Left ? m_cachedBodyState.LeftHandActive : m_cachedBodyState.RightHandActive)) {
             const BodyTracking::FingerJointState* joints =
                 side == xr::Side::Left ? m_cachedBodyState.LeftHandJointStates : m_cachedBodyState.RightHandJointStates;
             const bool otherJointsValid =
-                side == xr::Side::Left ? m_cachedBodyState.LeftHandActive : m_cachedBodyState.RightHandActive;
+                side == xr::Side::Left ? m_cachedBodyState.RightHandActive : m_cachedBodyState.LeftHandActive;
             const BodyTracking::FingerJointState* otherJoints =
                 side == xr::Side::Left ? m_cachedBodyState.RightHandJointStates : m_cachedBodyState.LeftHandJointStates;
             const BodyTracking::HandTrackingAimState& aimState =
@@ -586,7 +586,7 @@ namespace virtualdesktop_openxr {
         std::shared_lock lock(m_bodyStateMutex);
 
         if (m_bodyState &&
-            ((side == xr::Side::Left && m_cachedBodyState.LeftHandActive) || m_cachedBodyState.RightHandActive)) {
+            (side == xr::Side::Left ? m_cachedBodyState.LeftHandActive : m_cachedBodyState.RightHandActive)) {
             const BodyTracking::HandTrackingAimState& aimState =
                 side == xr::Side::Left ? m_cachedBodyState.LeftAimState : m_cachedBodyState.RightAimState;
             const bool isAimValid = aimState.AimStatus & XR_HAND_TRACKING_AIM_VALID_BIT_FB;

@@ -76,7 +76,8 @@ namespace virtualdesktop_openxr {
         }
 
         // Ignore ridiculously big masks.
-        if (m_overrideVisibilityMaskScale > 10.f) {
+        const float visibilityMaskScale = m_overrideVisibilityMaskScale.load(std::memory_order_relaxed);
+        if (visibilityMaskScale > 10.f) {
             visibilityMask->vertexCountOutput = 0;
             visibilityMask->indexCountOutput = 0;
             return XR_SUCCESS;
@@ -110,7 +111,10 @@ namespace virtualdesktop_openxr {
                           TLArg(buffer.UsedVertexCount, "VerticesCount"),
                           TLArg(buffer.UsedIndexCount, "IndicesCount"));
 
-        if (visibilityMask->vertexCapacityInput == 0) {
+        visibilityMask->vertexCountOutput = buffer.UsedVertexCount;
+        visibilityMask->indexCountOutput = buffer.UsedIndexCount / indicesStride;
+
+        if (visibilityMask->vertexCapacityInput == 0 || visibilityMask->indexCapacityInput == 0) {
             visibilityMask->vertexCountOutput = buffer.UsedVertexCount;
             visibilityMask->indexCountOutput = buffer.UsedIndexCount / indicesStride;
         } else if (visibilityMask->vertices && visibilityMask->indices) {
@@ -134,7 +138,7 @@ namespace virtualdesktop_openxr {
                 visibilityMask->indices[i] = buffer.IndexBuffer[i * indicesStride];
             }
 
-            if (std::abs(m_overrideVisibilityMaskScale - 1.f) > FLT_EPSILON) {
+            if (std::abs(visibilityMaskScale - 1.f) > FLT_EPSILON) {
                 // Compute bounding box.
                 XrVector2f minBounds{+INFINITY, +INFINITY};
                 XrVector2f maxBounds{-INFINITY, -INFINITY};
@@ -151,8 +155,8 @@ namespace virtualdesktop_openxr {
                         std::abs(visibilityMask->vertices[i].y - minBounds.y) > FLT_EPSILON &&
                         std::abs(visibilityMask->vertices[i].x - maxBounds.x) > FLT_EPSILON &&
                         std::abs(visibilityMask->vertices[i].y - maxBounds.y) > FLT_EPSILON) {
-                        visibilityMask->vertices[i].x *= m_overrideVisibilityMaskScale;
-                        visibilityMask->vertices[i].y *= m_overrideVisibilityMaskScale;
+                        visibilityMask->vertices[i].x *= visibilityMaskScale;
+                        visibilityMask->vertices[i].y *= visibilityMaskScale;
                     }
                 }
             }

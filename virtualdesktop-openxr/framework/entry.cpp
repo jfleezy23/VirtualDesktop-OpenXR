@@ -66,8 +66,11 @@ XrResult __declspec(dllexport) XRAPI_CALL xrNegotiateLoaderRuntimeInterface(cons
         if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                (LPCWSTR)&dllHome,
                                &module)) {
-            wchar_t path[_MAX_PATH];
-            GetModuleFileNameW(module, path, sizeof(path));
+            wchar_t path[_MAX_PATH]{};
+            const DWORD length = GetModuleFileNameW(module, path, static_cast<DWORD>(std::size(path)));
+            if (!length || length >= std::size(path)) {
+                return XR_ERROR_INITIALIZATION_FAILED;
+            }
             dllHome = std::filesystem::path(path).parent_path();
         } else {
             // Falling back to loading config/writing logs to the current working directory.
@@ -114,7 +117,12 @@ XrResult __declspec(dllexport) XRAPI_CALL xrNegotiateLoaderRuntimeInterface(cons
             (pfnGetVersion = (decltype(getVersion)*)GetProcAddress(standaloneLibrary, "getVersion"))) {
             if (pfnGetVersion() >= getVersion()) {
                 Log("Redirecting to standalone runtime (%ls)\n", standaloneLibraryPath.value().c_str());
-                return pfnNegotiateLoaderRuntimeInterface(loaderInfo, runtimeRequest);
+                const auto result = pfnNegotiateLoaderRuntimeInterface(loaderInfo, runtimeRequest);
+                // Successful dispatch pointers need the module for the process lifetime; failed negotiation does not.
+                if (XR_FAILED(result)) {
+                    FreeLibrary(standaloneLibrary);
+                }
+                return result;
             } else {
                 Log("Cancelled redirection to older standalone runtime.\n");
             }

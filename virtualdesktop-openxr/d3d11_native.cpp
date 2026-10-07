@@ -145,7 +145,8 @@ namespace virtualdesktop_openxr {
         CHECK_HRCMD(m_ovrSubmissionFence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, fenceHandle.put()));
         CHECK_HRCMD(
             m_d3d11Device->OpenSharedFence(fenceHandle.get(), IID_PPV_ARGS(m_d3d11Fence.ReleaseAndGetAddressOf())));
-        *m_eventForSubmissionFence.put() = CreateEventEx(nullptr, L"Submission Fence", 0, EVENT_ALL_ACCESS);
+        *m_eventForSubmissionFence.put() = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+        CHECK_MSG(m_eventForSubmissionFence.get(), "Failed to create submission event");
 
         // Frame timers.
         for (uint32_t i = 0; i < k_numGpuTimers; i++) {
@@ -214,6 +215,9 @@ namespace virtualdesktop_openxr {
         CHECK_HRCMD(m_ovrSubmissionDevice->CreateFence(
             0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(m_ovrSubmissionFence.ReleaseAndGetAddressOf())));
         m_fenceValue = 0;
+        CHECK_HRCMD(m_ovrSubmissionDevice->CreateFence(
+            0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(m_ovrSubmissionCompletionFence.ReleaseAndGetAddressOf())));
+        m_submissionFenceValue = 0;
 
         // Create the resources for pre-processing.
         CHECK_HRCMD(m_ovrSubmissionDevice->CreateVertexShader(
@@ -316,6 +320,7 @@ namespace virtualdesktop_openxr {
 
         m_d3d11ContextState.Reset();
         m_d3d11Context.Reset();
+        m_d3d11Fence.Reset();
         m_d3d11Device.Reset();
     }
 
@@ -334,25 +339,30 @@ namespace virtualdesktop_openxr {
         m_alphaCorrectConstants.Reset();
         m_sharpenShader.Reset();
         m_upscaleShader.Reset();
+        m_alignDepthShader.Reset();
+        m_alignDepthConstants.Reset();
         m_upscalerConstants.Reset();
         m_linearClampSampler.Reset();
         m_pointClampSampler.Reset();
         m_noDepthReadState.Reset();
 
         m_ovrSubmissionFence.Reset();
+        m_ovrSubmissionCompletionFence.Reset();
+        m_submissionFenceValue = 0;
         m_ovrSubmissionContextState.Reset();
         m_ovrSubmissionContext.Reset();
         m_ovrSubmissionDevice.Reset();
         m_eventForSubmissionFence.reset();
     }
 
-    // Retrieve generic handles to the swapchain images to import into the application device.
-    std::vector<HANDLE> OpenXrRuntime::getSwapchainImages(Swapchain& xrSwapchain) {
-        // Detect whether this is the first call for this swapchain.
-        const bool initialized = !xrSwapchain.appSwapchain.images.empty();
+    // Submission can use released images before the application ever exports them.
+    void OpenXrRuntime::ensureAppSwapchainImages(Swapchain& xrSwapchain) {
+        if (!xrSwapchain.appSwapchain.images.empty()) {
+            return;
+        }
 
         D3D11_TEXTURE2D_DESC textureDesc{};
-        if (!initialized && !xrSwapchain.appSwapchain.ovrSwapchain) {
+        if (!xrSwapchain.appSwapchain.ovrSwapchain) {
             textureDesc.Format = getTypelessFormat(xrSwapchain.dxgiFormatForSubmission);
             textureDesc.Width = xrSwapchain.ovrDesc.Width;
             textureDesc.Height = xrSwapchain.ovrDesc.Height;
@@ -384,9 +394,9 @@ namespace virtualdesktop_openxr {
         }
 
         // Query the textures for the swapchain.
-        std::vector<HANDLE> handles;
+        std::vector<ComPtr<ID3D11Texture2D>> images;
         for (int i = 0; i < xrSwapchain.ovrSwapchainLength; i++) {
-            if (!initialized) {
+            {
                 ComPtr<ID3D11Texture2D> swapchainTexture;
                 if (xrSwapchain.appSwapchain.ovrSwapchain) {
                     CHECK_OVRCMD(
@@ -401,7 +411,7 @@ namespace virtualdesktop_openxr {
                 setDebugName(swapchainTexture.Get(),
                              fmt::format("OVR Swapchain Texture[{}, {}]", i, (void*)&xrSwapchain));
 
-                xrSwapchain.appSwapchain.images.push_back(swapchainTexture);
+                images.push_back(swapchainTexture);
                 if (i == 0) {
                     D3D11_TEXTURE2D_DESC desc;
                     swapchainTexture->GetDesc(&desc);
@@ -421,7 +431,18 @@ namespace virtualdesktop_openxr {
                                       TLArg(desc.MiscFlags, "MiscFlags"));
                 }
             }
+        }
+        xrSwapchain.appSwapchain.images = std::move(images);
+    }
 
+    // Retrieve generic handles to the swapchain images to import into the application device.
+    std::vector<HANDLE> OpenXrRuntime::getSwapchainImages(Swapchain& xrSwapchain) {
+        ensureAppSwapchainImages(xrSwapchain);
+        std::vector<HANDLE> handles;
+        if (requireNTHandleSharing()) {
+            xrSwapchain.ntTextureHandles.resize(xrSwapchain.ovrSwapchainLength);
+        }
+        for (int i = 0; i < xrSwapchain.ovrSwapchainLength; i++) {
             // Export the HANDLE.
             const auto texture = xrSwapchain.appSwapchain.images[i];
 
@@ -432,7 +453,11 @@ namespace virtualdesktop_openxr {
             if (!requireNTHandleSharing()) {
                 CHECK_HRCMD(dxgiResource->GetSharedHandle(&textureHandle));
             } else {
-                CHECK_HRCMD(dxgiResource->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &textureHandle));
+                auto& ownedHandle = xrSwapchain.ntTextureHandles[i];
+                if (!ownedHandle) {
+                    CHECK_HRCMD(dxgiResource->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, ownedHandle.put()));
+                }
+                textureHandle = ownedHandle.get();
             }
 
             handles.push_back(textureHandle);
@@ -446,7 +471,19 @@ namespace virtualdesktop_openxr {
                                                     XrSwapchainImageD3D11KHR* d3d11Images,
                                                     uint32_t count) {
         // Detect whether this is the first call for this swapchain.
-        const bool initialized = !xrSwapchain.appSwapchain.images.empty();
+        const bool initialized = !xrSwapchain.d3d11Images.empty();
+        bool imported = initialized;
+        auto rollback = MakeScopeGuard([&] {
+            if (!imported) {
+                xrSwapchain.d3d11Images.clear();
+            }
+        });
+        for (uint32_t i = 0; i < count; i++) {
+            if (d3d11Images[i].type != XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR) {
+                return XR_ERROR_VALIDATION_FAILURE;
+            }
+        }
+        xrSwapchain.d3d11Images.reserve(count);
         const bool skipSharing = m_ovrSubmissionDevice == m_d3d11Device;
 
         std::vector<HANDLE> textureHandles;
@@ -471,8 +508,6 @@ namespace virtualdesktop_openxr {
                     } else {
                         CHECK_HRCMD(m_d3d11Device->OpenSharedResource1(
                             textureHandles[i], IID_PPV_ARGS(d3d11Texture.ReleaseAndGetAddressOf())));
-                        // TODO: We do not CloseHandle() if an error occured.
-                        CloseHandle(textureHandles[i]);
                     }
                 } else {
                     d3d11Texture = xrSwapchain.appSwapchain.images[i];
@@ -510,6 +545,7 @@ namespace virtualdesktop_openxr {
                               TLPArg(d3d11Images[i].texture, "Texture"));
         }
 
+        imported = true;
         return XR_SUCCESS;
     }
 
@@ -518,15 +554,24 @@ namespace virtualdesktop_openxr {
                                               uint32_t slice,
                                               std::set<std::pair<Swapchain*, uint32_t>>& resolved,
                                               bool skipCommit) {
+        ensureAppSwapchainImages(xrSwapchain);
         ensureSwapchainSliceResources(xrSwapchain, slice);
 
-        // If the texture was never used or already committed, do nothing.
         const auto tuple = std::make_pair(&xrSwapchain, slice);
-        if (xrSwapchain.appSwapchain.images.empty() || resolved.count(tuple)) {
-            return;
-        }
-
         const bool needCopy = (slice > 0 || !xrSwapchain.appSwapchain.ovrSwapchain);
+        if (resolved.count(tuple)) {
+            if (skipCommit || !m_precompositor.pendingSwapchainCommits.count(tuple)) {
+                return;
+            }
+            if (needCopy) {
+                // A previous processed layer wrote this image but did not submit it.
+                // Commit that same destination without advancing and recopying it.
+                CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, xrSwapchain.resolvedSlices[slice].ovrSwapchain));
+                m_precompositor.pendingSwapchainCommits.erase(tuple);
+                return;
+            }
+            // Direct swapchains still need the existing released-index synchronization.
+        }
 
         const int lastReleasedIndex = xrSwapchain.lastReleasedIndex;
 
@@ -588,7 +633,7 @@ namespace virtualdesktop_openxr {
                     0,
                     0,
                     xrSwapchain.appSwapchain.images[lastReleasedIndex].Get(),
-                    slice,
+                    D3D11CalcSubresource(0, slice, xrSwapchain.xrDesc.mipCount),
                     nullptr);
             } else {
                 // Resolve MSAA. For depth buffers, this requires a shader.
@@ -597,7 +642,7 @@ namespace virtualdesktop_openxr {
                         xrSwapchain.resolvedSlices[slice].images[ovrDestIndex].Get(),
                         0,
                         xrSwapchain.appSwapchain.images[lastReleasedIndex].Get(),
-                        slice,
+                        D3D11CalcSubresource(0, slice, xrSwapchain.xrDesc.mipCount),
                         xrSwapchain.dxgiFormatForSubmission);
                 } else {
                     // We are about to do something destructive to the application context. Save the context. It will be
@@ -685,7 +730,7 @@ namespace virtualdesktop_openxr {
                         ID3D11SamplerState* nullSampler[] = {nullptr};
                         m_ovrSubmissionContext->PSSetSamplers(0, 1, nullSampler);
                         ID3D11ShaderResourceView* nullSRV[] = {nullptr};
-                        m_ovrSubmissionContext->PSGetShaderResources(0, 1, nullSRV);
+                        m_ovrSubmissionContext->PSSetShaderResources(0, 1, nullSRV);
                     }
                 }
             }
@@ -699,19 +744,25 @@ namespace virtualdesktop_openxr {
         }
 
         resolved.insert(tuple);
+        if (skipCommit) {
+            m_precompositor.pendingSwapchainCommits.insert(tuple);
+        } else {
+            m_precompositor.pendingSwapchainCommits.erase(tuple);
+        }
     }
 
     // Ensure necessary resources for submission: lazily create a second swapchain for this slice of the array or
     // when resolving MSAA.
     void OpenXrRuntime::ensureSwapchainSliceResources(Swapchain& xrSwapchain, uint32_t slice) const {
         if (xrSwapchain.resolvedSlices.size() <= slice) {
-            if (slice == 0 && xrSwapchain.appSwapchain.ovrSwapchain) {
-                xrSwapchain.resolvedSlices.push_back(xrSwapchain.appSwapchain);
-            } else {
-                xrSwapchain.resolvedSlices.resize(slice + 1);
-            }
+            xrSwapchain.resolvedSlices.resize(slice + 1);
         }
         if (!xrSwapchain.resolvedSlices[slice].ovrSwapchain) {
+            if (slice == 0 && xrSwapchain.appSwapchain.ovrSwapchain) {
+                SwapchainSlice candidate = xrSwapchain.appSwapchain;
+                xrSwapchain.resolvedSlices[slice] = std::move(candidate);
+                return;
+            }
             auto desc = xrSwapchain.ovrDesc;
             // Resolve multisampling.
             desc.SampleCount = 1;
@@ -721,8 +772,7 @@ namespace virtualdesktop_openxr {
         }
     }
 
-    void OpenXrRuntime::ensureSwapchainPrecompositorResources(Swapchain& xrSwapchain,
-                                                              const ovrSizei& resolution) const {
+    void OpenXrRuntime::ensureSwapchainPrecompositorResources(Swapchain& xrSwapchain, const ovrSizei& resolution) {
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
             ovrSizei currentResolution{};
             if (xrSwapchain.stereoProjection[eye].ovrSwapchain) {
@@ -735,11 +785,12 @@ namespace virtualdesktop_openxr {
 
             if (!xrSwapchain.stereoProjection[eye].ovrSwapchain || currentResolution.w != resolution.w ||
                 currentResolution.h != resolution.h) {
-                if (xrSwapchain.stereoProjection[eye].ovrSwapchain) {
-                    xrSwapchain.stereoProjection[eye].rtvs.clear();
-                    xrSwapchain.stereoProjection[eye].uavs.clear();
-                    ovr_DestroyTextureSwapChain(m_ovrSession, xrSwapchain.stereoProjection[eye].ovrSwapchain);
-                }
+                SwapchainSlice candidate;
+                auto releaseCandidate = MakeScopeGuard([&] {
+                    if (candidate.ovrSwapchain) {
+                        ovr_DestroyTextureSwapChain(m_ovrSession, candidate.ovrSwapchain);
+                    }
+                });
 
                 DXGI_FORMAT format;
                 {
@@ -750,7 +801,7 @@ namespace virtualdesktop_openxr {
                     desc.Height = resolution.h;
                     desc.MipLevels = 1;
                     desc.SampleCount = 1;
-                    if (isSRGBFormat((DXGI_FORMAT)xrSwapchain.xrDesc.format)) {
+                    if (isSRGBFormat(xrSwapchain.dxgiFormatForSubmission)) {
                         desc.Format = OVR_FORMAT_B8G8R8A8_UNORM_SRGB;
                         format = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
                     } else {
@@ -759,33 +810,29 @@ namespace virtualdesktop_openxr {
                     }
                     desc.BindFlags = ovrTextureBind_DX_RenderTarget | ovrTextureBind_DX_UnorderedAccess;
                     desc.MiscFlags = ovrTextureMisc_DX_Typeless;
-                    populateSwapchainSlice(xrSwapchain, desc, xrSwapchain.stereoProjection[eye], eye, "Precompositor");
+                    populateSwapchainSlice(xrSwapchain, desc, candidate, eye, "Precompositor");
                 }
 
-                for (uint32_t i = 0; i < xrSwapchain.stereoProjection[eye].images.size(); i++) {
-                    {
-                        D3D11_RENDER_TARGET_VIEW_DESC desc{};
-                        desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-                        desc.Format = format;
-                        ComPtr<ID3D11RenderTargetView> rtv;
-                        CHECK_HRCMD(m_ovrSubmissionDevice->CreateRenderTargetView(
-                            xrSwapchain.stereoProjection[eye].images[i].Get(), &desc, rtv.ReleaseAndGetAddressOf()));
-                        setDebugName(rtv.Get(),
-                                     fmt::format("Precompositor RTV [{}, {}, {}]", eye, i, (void*)&xrSwapchain));
-                        xrSwapchain.stereoProjection[eye].rtvs.push_back(std::move(rtv));
-                    }
+                for (uint32_t i = 0; i < candidate.images.size(); i++) {
                     {
                         D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};
                         desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
                         desc.Format = getUnorderedAccessViewFormat(format);
                         ComPtr<ID3D11UnorderedAccessView> uav;
                         CHECK_HRCMD(m_ovrSubmissionDevice->CreateUnorderedAccessView(
-                            xrSwapchain.stereoProjection[eye].images[i].Get(), &desc, uav.ReleaseAndGetAddressOf()));
+                            candidate.images[i].Get(), &desc, uav.ReleaseAndGetAddressOf()));
                         setDebugName(uav.Get(),
                                      fmt::format("Precompositor UAV [{}, {}, {}]", eye, i, (void*)&xrSwapchain));
-                        xrSwapchain.stereoProjection[eye].uavs.push_back(std::move(uav));
+                        candidate.uavs.push_back(std::move(uav));
                     }
                 }
+                if (xrSwapchain.stereoProjection[eye].ovrSwapchain) {
+                    // Retire queued reads before replacing this generation of output resources.
+                    flushSubmissionContext();
+                    ovr_DestroyTextureSwapChain(m_ovrSession, xrSwapchain.stereoProjection[eye].ovrSwapchain);
+                }
+                xrSwapchain.stereoProjection[eye] = std::move(candidate);
+                releaseCandidate.Deactivate();
             }
         }
     }
@@ -795,27 +842,35 @@ namespace virtualdesktop_openxr {
                                                SwapchainSlice& slice,
                                                uint32_t sliceIndex,
                                                const char* debugName) const {
+        SwapchainSlice candidate;
+        auto releaseCandidate = MakeScopeGuard([&] {
+            if (candidate.ovrSwapchain) {
+                ovr_DestroyTextureSwapChain(m_ovrSession, candidate.ovrSwapchain);
+            }
+        });
         CHECK_OVRCMD(
-            ovr_CreateTextureSwapChainDX(m_ovrSession, m_ovrSubmissionDevice.Get(), &desc, &slice.ovrSwapchain));
+            ovr_CreateTextureSwapChainDX(m_ovrSession, m_ovrSubmissionDevice.Get(), &desc, &candidate.ovrSwapchain));
 
         int count = -1;
-        CHECK_OVRCMD(ovr_GetTextureSwapChainLength(m_ovrSession, slice.ovrSwapchain, &count));
+        CHECK_OVRCMD(ovr_GetTextureSwapChainLength(m_ovrSession, candidate.ovrSwapchain, &count));
         if (count != xrSwapchain.ovrSwapchainLength) {
             throw std::runtime_error("Swapchain image count mismatch");
         }
 
         // Query the textures for the swapchain.
-        slice.images.clear();
+        candidate.images.reserve(count);
         for (int i = 0; i < count; i++) {
             ComPtr<ID3D11Texture2D> texture;
             CHECK_OVRCMD(ovr_GetTextureSwapChainBufferDX(
-                m_ovrSession, slice.ovrSwapchain, i, IID_PPV_ARGS(texture.ReleaseAndGetAddressOf())));
+                m_ovrSession, candidate.ovrSwapchain, i, IID_PPV_ARGS(texture.ReleaseAndGetAddressOf())));
             setDebugName(
                 texture.Get(),
                 fmt::format(std::string(debugName) + " Texture[{}, {}, {}]", sliceIndex, i, (void*)&xrSwapchain));
 
-            slice.images.push_back(std::move(texture));
+            candidate.images.push_back(std::move(texture));
         }
+        slice = std::move(candidate);
+        releaseCandidate.Deactivate();
     }
 
     // Flush any pending work in the app context.
@@ -826,7 +881,8 @@ namespace virtualdesktop_openxr {
             TraceLoggingWrite(
                 g_traceProvider, "FlushContext_Wait", TLArg("D3D11", "Api"), TLArg(m_fenceValue, "FenceValue"));
             CHECK_HRCMD(m_d3d11Context->Signal(m_d3d11Fence.Get(), m_fenceValue));
-            *eventHandle.put() = CreateEventEx(nullptr, L"Flush Fence", 0, EVENT_ALL_ACCESS);
+            *eventHandle.put() = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+            CHECK_MSG(eventHandle.get(), "Failed to create flush event");
             CHECK_HRCMD(m_d3d11Fence->SetEventOnCompletion(m_fenceValue, eventHandle.get()));
             WaitForSingleObject(eventHandle.get(), INFINITE);
             ResetEvent(eventHandle.get());
@@ -835,14 +891,18 @@ namespace virtualdesktop_openxr {
 
     // Flush any pending work in the submission context.
     void OpenXrRuntime::flushSubmissionContext() {
-        if (m_ovrSubmissionContext && m_ovrSubmissionFence) {
+        if (m_ovrSubmissionContext && m_ovrSubmissionCompletionFence) {
             wil::unique_handle eventHandle;
-            m_fenceValue++;
-            TraceLoggingWrite(
-                g_traceProvider, "FlushContext_Wait", TLArg("D3D11", "Api"), TLArg(m_fenceValue, "FenceValue"));
-            CHECK_HRCMD(m_ovrSubmissionContext->Signal(m_ovrSubmissionFence.Get(), m_fenceValue));
-            *eventHandle.put() = CreateEventEx(nullptr, L"Flush Fence", 0, EVENT_ALL_ACCESS);
-            CHECK_HRCMD(m_ovrSubmissionFence->SetEventOnCompletion(m_fenceValue, eventHandle.get()));
+            m_submissionFenceValue++;
+            TraceLoggingWrite(g_traceProvider,
+                              "FlushContext_Wait",
+                              TLArg("D3D11 Submission", "Api"),
+                              TLArg(m_submissionFenceValue, "FenceValue"));
+            CHECK_HRCMD(m_ovrSubmissionContext->Signal(m_ovrSubmissionCompletionFence.Get(), m_submissionFenceValue));
+            *eventHandle.put() = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+            CHECK_MSG(eventHandle.get(), "Failed to create flush event");
+            CHECK_HRCMD(
+                m_ovrSubmissionCompletionFence->SetEventOnCompletion(m_submissionFenceValue, eventHandle.get()));
             WaitForSingleObject(eventHandle.get(), INFINITE);
             ResetEvent(eventHandle.get());
         }
@@ -861,7 +921,7 @@ namespace virtualdesktop_openxr {
     }
 
     void OpenXrRuntime::waitOnSubmissionDevice() {
-        if (!m_syncGpuWorkInEndFrame) {
+        if (!m_syncGpuWorkInEndFrame.load(std::memory_order_relaxed)) {
             CHECK_HRCMD(m_ovrSubmissionContext->Wait(m_ovrSubmissionFence.Get(), m_fenceValue));
         } else {
             CHECK_HRCMD(m_ovrSubmissionFence->SetEventOnCompletion(m_fenceValue, m_eventForSubmissionFence.get()));

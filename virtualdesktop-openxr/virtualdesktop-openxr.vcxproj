@@ -686,6 +686,9 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
     <FxCompile Include="FullScreenQuadVS.hlsl">
       <ShaderType>Vertex</ShaderType>
     </FxCompile>
+    <FxCompile Include="AlignDepthPS.hlsl">
+      <ShaderType>Pixel</ShaderType>
+    </FxCompile>
     <FxCompile Include="ResolveMultisampledDepthPS.hlsl">
       <ShaderType>Pixel</ShaderType>
     </FxCompile>

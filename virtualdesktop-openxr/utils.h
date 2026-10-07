@@ -22,6 +22,8 @@
 
 #pragma once
 
+#include <exception>
+
 #include "pch.h"
 
 #include "BodyState.h"
@@ -345,7 +347,11 @@ namespace virtualdesktop_openxr::utils {
                 m_glDC = wglGetCurrentDC();
                 m_glRC = wglGetCurrentContext();
 
-                wglMakeCurrent(context.glDC, context.glRC);
+                if (!wglMakeCurrent(context.glDC, context.glRC)) {
+                    // A failed switch leaves this thread without a current context.
+                    wglMakeCurrent(m_glDC, m_glRC);
+                    CHECK_MSG(false, "Failed to make the runtime OpenGL context current");
+                }
 
                 if (!m_ignoreErrors) {
                     // Reset error codes.
@@ -359,10 +365,11 @@ namespace virtualdesktop_openxr::utils {
             if (m_valid) {
                 const auto error = glGetError();
 
-                wglMakeCurrent(m_glDC, m_glRC);
+                const auto restored = wglMakeCurrent(m_glDC, m_glRC);
 
-                if (!m_ignoreErrors) {
+                if (!m_ignoreErrors && std::uncaught_exceptions() == 0) {
                     CHECK_MSG(error == GL_NO_ERROR, fmt::format("OpenGL error: 0x{:x}", error));
+                    CHECK_MSG(restored, "Failed to restore the application OpenGL context");
                 }
             }
         }
@@ -509,6 +516,12 @@ namespace virtualdesktop_openxr::utils {
         switch (format) {
         case DXGI_FORMAT_D32_FLOAT:
             return DXGI_FORMAT_R32_FLOAT;
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+            return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+        case DXGI_FORMAT_D24_UNORM_S8_UINT:
+            return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        case DXGI_FORMAT_D16_UNORM:
+            return DXGI_FORMAT_R16_UNORM;
         }
 
         return format;
