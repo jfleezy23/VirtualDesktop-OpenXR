@@ -2,9 +2,9 @@ name: Community validation
 
 on:
   push:
-    branches: [main, stable, experimental-nr]
+    branches: [stable, experimental-nr]
   pull_request:
-    branches: [main, stable, experimental-nr]
+    branches: [stable, experimental-nr]
   workflow_dispatch:
 
 permissions:
@@ -39,10 +39,11 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
           TARGET_BRANCH: ${{ github.base_ref || github.ref_name }}
+          STABLE_BASELINE: 1a83fec8b5c565b14b06ffa8e1eb7e4768057573
           NR_BASELINE: 925dc598c524cb48b37fa4b0a2bff471f75fc5c4
         run: |
           # NR's vendor imports and architecture limits belong to its inherited upstream baseline.
-          $hygieneRef = if ($env:TARGET_BRANCH -eq 'experimental-nr') { $env:NR_BASELINE } else { 'origin/main' }
+          $hygieneRef = if ($env:TARGET_BRANCH -eq 'experimental-nr') { $env:NR_BASELINE } else { $env:STABLE_BASELINE }
           $hygieneSha = git rev-parse --verify "$hygieneRef^{commit}"
           if ($LASTEXITCODE -ne 0) { throw 'The source hygiene baseline is unavailable.' }
           "hygiene_sha=$hygieneSha" >> $env:GITHUB_OUTPUT

@@ -10,6 +10,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 
 
+STABLE_BASELINE = "1a83fec8b5c565b14b06ffa8e1eb7e4768057573"
 CPP_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
 ARTIFACT_SUFFIXES = {
     ".dll", ".exe", ".lib", ".pdb", ".obj", ".o", ".a", ".so", ".dylib",
@@ -159,7 +160,7 @@ def check_repository(repo, base, formatter):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
-    parser.add_argument("--base", default="main", help="Existing comparison commit/ref (default: main)")
+    parser.add_argument("--base", default=STABLE_BASELINE, help=f"Existing comparison commit/ref (default: {STABLE_BASELINE})")
     parser.add_argument("--clang-format", default="clang-format", help="clang-format 22.1.1 executable")
     args = parser.parse_args()
     try:
