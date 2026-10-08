@@ -1,14 +1,11 @@
-# jfleezy23's VDXR
+# VirtualDesktop-OpenXR
 
-I'm [jfleezy23](https://github.com/jfleezy23). This is my working fork of
-[VirtualDesktop-OpenXR](https://github.com/mbucchia/VirtualDesktop-OpenXR): the Windows OpenXR runtime that lets
-Virtual Desktop run OpenXR games without SteamVR.
+An independent development fork of [VirtualDesktop-OpenXR](https://github.com/mbucchia/VirtualDesktop-OpenXR),
+maintained by [jfleezy23](https://github.com/jfleezy23). The runtime supports OpenXR applications through
+Virtual Desktop on Windows without requiring SteamVR.
 
-I started this project to make the VR stack I use better. My priorities are smoother frame delivery, reliable session
-and graphics-setting changes, and convincing neural rendering across the whole view. Aircar helped shape those
-priorities; Robo Recall, Creed, and Pistol Whip are also games I enjoy.
-
-I keep everyday runtime work separate from NR experiments so each can be tested and reviewed on its own.
+Development focuses on runtime correctness, resource efficiency, and experimental neural rendering. General runtime
+changes and NR development are maintained on separate branches, with regression tests and independent code review.
 
 ## Two branches, two purposes
 
@@ -28,8 +25,7 @@ buffers, replaces per-frame layer-pointer heap storage with bounded stack storag
 render-target views.
 
 On the NR branch, inputs are prepared only when that frame enables NR. Imports become visible only after a complete
-generation is ready, and failed NT imports retain the owned export needed for retry. Coverage stays a user choice;
-my own target is at least 90% of the view.
+generation is ready, and failed NT imports retain the owned export needed for retry. NR coverage is configurable.
 
 These changes have local regression and build evidence. That evidence covers specific correctness and resource-creation
 behavior; it does not establish a measured headset latency, FPS, or image-quality improvement.
