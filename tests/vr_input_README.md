@@ -54,8 +54,14 @@ The native settings watcher has a separate CPU regression:
 
 It signals the production notification event, pauses an actual registry read with
 Detours, and verifies owner teardown waits for the callback to finish. A callback
-delivered after detachment must leave the owner untouched. This test reads the
-existing settings key and changes no registry values. The baseline-only build flag
+delivered after detachment must leave the owner untouched. A uniquely owned temporary
+HKCU root contains the production-relative settings key. A process-private
+`RegOverridePredefKey` mapping routes HKLM reads and notifications to that root, so
+no installed Streamer or production settings key is required. The test verifies
+the mapping with a unique probe, restores default HKLM after runtime/watchers stop,
+and checks removal of its owned root. Setup and cleanup failures fail the test;
+preexisting keys are never adopted or deleted. Production keys and values are not
+changed. The baseline-only build flag
 uses the original WIL watcher from a captured old header/object set to demonstrate
 its two failing lifecycle checks.
 

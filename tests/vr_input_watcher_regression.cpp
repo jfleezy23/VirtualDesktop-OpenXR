@@ -1,10 +1,148 @@
-// Exercise the installed production watcher callback without changing registry values.
+// Exercise the production watcher callback in a process-private registry sandbox.
 #include "pch.h"
 #include "runtime.h"
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 
 namespace {
+    class PrivateSettingsRegistry {
+      public:
+        PrivateSettingsRegistry() {
+            try {
+                GUID id{};
+                if (FAILED(CoCreateGuid(&id)))
+                    throw std::runtime_error("Could not generate private registry identity");
+                wchar_t identity[39]{};
+                if (!StringFromGUID2(id, identity, static_cast<int>(std::size(identity))))
+                    throw std::runtime_error("Could not format private registry identity");
+                m_path = std::wstring(L"Software\\VDXRWatcherRegression-") + identity;
+                m_probe = std::wstring(L"VDXRWatcherProbe-") + identity;
+                require(probeAbsent(), "Default HKLM probe must be absent");
+                DWORD disposition = 0;
+                require(RegCreateKeyExW(HKEY_CURRENT_USER,
+                                        m_path.c_str(),
+                                        0,
+                                        nullptr,
+                                        REG_OPTION_VOLATILE,
+                                        KEY_ALL_ACCESS | KEY_WOW64_64KEY,
+                                        nullptr,
+                                        &m_root,
+                                        &disposition),
+                        "Create private HKCU root");
+                m_owned = disposition == REG_CREATED_NEW_KEY;
+                if (!m_owned)
+                    throw std::runtime_error("Refusing to use a preexisting private registry root");
+                createKey(m_probe.c_str());
+                createKey(xr::utf8_to_wide(virtualdesktop_openxr::RegPrefix).c_str());
+                require(RegOverridePredefKey(HKEY_LOCAL_MACHINE, m_root), "Override process HKLM");
+                m_overridden = true;
+                HKEY probe = nullptr;
+                require(RegOpenKeyExW(HKEY_LOCAL_MACHINE, m_probe.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &probe),
+                        "Mapped HKLM probe must be present");
+                require(RegCloseKey(probe), "Close mapped HKLM probe");
+                std::cout << "PASS: process HKLM reaches its unique private registry probe\n";
+            } catch (...) {
+                cleanupOrExit();
+                throw;
+            }
+        }
+        PrivateSettingsRegistry(const PrivateSettingsRegistry&) = delete;
+        PrivateSettingsRegistry& operator=(const PrivateSettingsRegistry&) = delete;
+        ~PrivateSettingsRegistry() {
+            cleanupOrExit();
+        }
+        void finish() {
+            require(cleanup(), "Restore registry mapping and remove owned root");
+            std::cout << "PASS: default HKLM mapping restored and owned HKCU root removed\n";
+        }
+
+      private:
+        static void require(LSTATUS status, const char* operation) {
+            if (status != ERROR_SUCCESS)
+                throw std::runtime_error(std::string(operation) + " failed: " + std::to_string(status));
+        }
+        void createKey(const wchar_t* path) {
+            HKEY key = nullptr;
+            DWORD disposition = 0;
+            require(RegCreateKeyExW(m_root,
+                                    path,
+                                    0,
+                                    nullptr,
+                                    REG_OPTION_VOLATILE,
+                                    KEY_ALL_ACCESS | KEY_WOW64_64KEY,
+                                    nullptr,
+                                    &key,
+                                    &disposition),
+                    "Create private registry subkey");
+            require(RegCloseKey(key), "Close private registry subkey");
+            if (disposition != REG_CREATED_NEW_KEY)
+                throw std::runtime_error("Private registry subkey unexpectedly existed");
+        }
+        LSTATUS probeAbsent() const noexcept {
+            HKEY probe = nullptr;
+            const auto status =
+                RegOpenKeyExW(HKEY_LOCAL_MACHINE, m_probe.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &probe);
+            if (status == ERROR_FILE_NOT_FOUND)
+                return ERROR_SUCCESS;
+            if (status != ERROR_SUCCESS)
+                return status;
+            const auto closeStatus = RegCloseKey(probe);
+            return closeStatus == ERROR_SUCCESS ? ERROR_ALREADY_EXISTS : closeStatus;
+        }
+        LSTATUS cleanup() noexcept {
+            if (m_overridden) {
+                const auto status = RegOverridePredefKey(HKEY_LOCAL_MACHINE, nullptr);
+                if (status != ERROR_SUCCESS)
+                    return status;
+                m_overridden = false;
+                const auto probeStatus = probeAbsent();
+                if (probeStatus != ERROR_SUCCESS)
+                    return probeStatus;
+            }
+            if (m_root) {
+                // Only a root created by this instance may have its contents removed.
+                if (m_owned) {
+                    const auto status = RegDeleteTreeW(m_root, nullptr);
+                    if (status != ERROR_SUCCESS)
+                        return status;
+                }
+                const auto status = RegCloseKey(m_root);
+                if (status != ERROR_SUCCESS)
+                    return status;
+                m_root = nullptr;
+            }
+            if (m_owned) {
+                const auto status = RegDeleteKeyExW(HKEY_CURRENT_USER, m_path.c_str(), KEY_WOW64_64KEY, 0);
+                if (status != ERROR_SUCCESS)
+                    return status;
+                m_owned = false;
+                HKEY leftover = nullptr;
+                const auto openStatus =
+                    RegOpenKeyExW(HKEY_CURRENT_USER, m_path.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &leftover);
+                if (openStatus == ERROR_FILE_NOT_FOUND)
+                    return ERROR_SUCCESS;
+                if (openStatus != ERROR_SUCCESS)
+                    return openStatus;
+                const auto closeStatus = RegCloseKey(leftover);
+                return closeStatus == ERROR_SUCCESS ? ERROR_ALREADY_EXISTS : closeStatus;
+            }
+            return ERROR_SUCCESS;
+        }
+        void cleanupOrExit() noexcept {
+            const auto status = cleanup();
+            if (status != ERROR_SUCCESS) {
+                std::fprintf(stderr, "FAIL: private registry cleanup failed: %ld\n", status);
+                std::_Exit(2);
+            }
+        }
+        HKEY m_root = nullptr;
+        std::wstring m_path;
+        std::wstring m_probe;
+        bool m_owned = false;
+        bool m_overridden = false;
+    };
+
     std::atomic<DWORD> allocationFaultThread{0};
     std::atomic<bool> failNextAllocation{false};
     std::atomic<bool> sawAllocationFault{false};
@@ -165,11 +303,17 @@ namespace virtualdesktop_openxr {
 
 int main(int argc, char** argv) {
     try {
-        if (argc == 2 && std::string_view(argv[1]) == "--constructor-only")
-            return virtualdesktop_openxr::RuntimeInputRegression::constructorUnwind();
-        const auto lifetimeResult = virtualdesktop_openxr::RuntimeInputRegression::run();
-        const auto constructorResult = virtualdesktop_openxr::RuntimeInputRegression::constructorUnwind();
-        return lifetimeResult || constructorResult ? 1 : 0;
+        PrivateSettingsRegistry registry;
+        int result = 0;
+        if (argc == 2 && std::string_view(argv[1]) == "--constructor-only") {
+            result = virtualdesktop_openxr::RuntimeInputRegression::constructorUnwind();
+        } else {
+            const auto lifetimeResult = virtualdesktop_openxr::RuntimeInputRegression::run();
+            const auto constructorResult = virtualdesktop_openxr::RuntimeInputRegression::constructorUnwind();
+            result = lifetimeResult || constructorResult ? 1 : 0;
+        }
+        registry.finish();
+        return result;
     } catch (const std::exception& error) {
         std::cerr << "ERROR: " << error.what() << '\n';
         return 2;
