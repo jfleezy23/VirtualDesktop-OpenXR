@@ -375,9 +375,15 @@ class BuildHelperPathTests(unittest.TestCase):
         result = self.invoke_helper(self.probe, output)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         arguments = [line.removeprefix("ARGV:") for line in result.stdout.splitlines() if line.startswith("ARGV:")]
-        self.assertIn(f"/p:SolutionDir={self.source.as_posix()}/", arguments)
-        self.assertIn(f"/p:OutDir={output.as_posix()}/", arguments)
-        self.assertIn(f"/p:IntDir={(output / 'obj').as_posix()}/", arguments)
+        # .NET can expand Windows short-path aliases (e.g. the hosted runner's TEMP).
+        # Require intact native arguments for the same physical directories, not identical spellings.
+        for name, directory in (("SolutionDir", self.source), ("OutDir", output), ("IntDir", output / "obj")):
+            prefix = f"/p:{name}="
+            values = [argument[len(prefix):] for argument in arguments if argument.startswith(prefix)]
+            self.assertEqual(len(values), 1, arguments)
+            self.assertTrue(values[0].endswith("/"), values[0])
+            self.assertNotIn("\\", values[0])
+            self.assertTrue(os.path.samefile(values[0], directory), (values[0], str(directory)))
         self.assertIn("/p:PreBuildEventUseInBuild=false", arguments)
         self.assertIn("/p:PostBuildEventUseInBuild=false", arguments)
 
