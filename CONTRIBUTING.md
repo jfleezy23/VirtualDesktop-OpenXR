@@ -22,13 +22,17 @@ argument handling and a small MSBuild project in paths containing spaces.
 python -m pip install clang-format==22.1.1
 python -m unittest discover -s scripts/tests -p test_hygiene.py -v
 python -m compileall -q scripts/check-hygiene.py scripts/tests
-python scripts/check-hygiene.py --base origin/main
-git diff --check origin/main
+python scripts/check-hygiene.py
+git diff --check 1a83fec8b5c565b14b06ffa8e1eb7e4768057573
 ```
 
-Use `--base <commit-or-ref>` for the actual review baseline; the script defaults to local `main` and fails if it does not
-exist. The commands above use the stable branch baseline. For experimental NR, use the retained upstream NR baseline
-`925dc598c524cb48b37fa4b0a2bff471f75fc5c4`; its vendor imports are inherited NR content. CI uses those branch baselines
+The fork's public contribution branches are `stable` and `experimental-nr`. Source checks do not require a `main` branch.
+The CLI defaults to stable's pinned upstream commit `1a83fec8b5c565b14b06ffa8e1eb7e4768057573` and fails if that commit
+is unavailable. A full-history clone includes the baseline through stable's history; in a shallow checkout, fetch sufficient
+history before running checks (for example, `git fetch --unshallow origin`). Use `--base <commit-or-ref>` for another actual
+review baseline, including a local upstream ref if present. The commands above use stable's baseline. For experimental NR,
+use `--base 925dc598c524cb48b37fa4b0a2bff471f75fc5c4`, the retained upstream NR baseline;
+its vendor imports are inherited NR content. CI uses those branch baselines
 for source hygiene and the PR base or previous push commit for diagnostic comparisons (branch baseline for manual/new-branch runs).
 `--clang-format <executable>` selects an installed formatter. The check reads current working-tree text, normalizes
 line endings to LF, and includes untracked, unignored files. It checks all tracked paths for case collisions, added text

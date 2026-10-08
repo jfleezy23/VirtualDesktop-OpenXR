@@ -1,6 +1,9 @@
 """Exercise the hygiene CLI against real disposable Git repositories."""
 
 from pathlib import Path
+import contextlib
+import importlib.util
+import io
 import os
 import shutil
 import subprocess
@@ -8,6 +11,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "check-hygiene.py"
@@ -49,7 +53,7 @@ class HygieneTests(unittest.TestCase):
     def check(self, *args):
         result = subprocess.run(
             [sys.executable, str(SCRIPT), "--repo", str(self.repo),
-             "--clang-format", FORMATTER, *args], capture_output=True, text=True,
+             "--clang-format", FORMATTER, "--base", "main", *args], capture_output=True, text=True,
         )
         return result.returncode, result.stdout + result.stderr
 
@@ -66,8 +70,45 @@ class HygieneTests(unittest.TestCase):
     def test_invalid_base_fails_instead_of_checking_nothing(self):
         self.assert_rejects("base", "--base", "missing-ref")
 
-    def test_clean_tree_uses_main_by_default(self):
+    def test_clean_tree_with_explicit_base(self):
         self.assert_passes()
+
+    def check_default(self, baseline):
+        # Substitute only the immutable upstream commit identity with this real fixture's commit.
+        # Argument parsing, Git queries, working-tree reads, and hygiene checks execute unchanged.
+        spec = importlib.util.spec_from_file_location("hygiene_cli", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        output = io.StringIO()
+        with mock.patch.object(module, "STABLE_BASELINE", baseline, create=True), mock.patch.object(
+            sys, "argv", [str(SCRIPT), "--repo", str(self.repo), "--clang-format", FORMATTER]
+        ), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            code = module.main()
+        return code, output.getvalue()
+
+    def test_default_works_without_local_main(self):
+        self.git("branch", "-m", "main", "stable")
+        baseline = self.git("rev-parse", "stable").decode().strip()
+        code, output = self.check_default(baseline)
+        self.assertEqual(code, 0, output)
+        self.assertIn("PASS:", output)
+        self.assertIn(f"base {baseline}", output)
+
+    def test_default_without_local_main_still_checks_working_tree(self):
+        self.git("branch", "-m", "main", "stable")
+        baseline = self.git("rev-parse", "stable").decode().strip()
+        self.write("new.md", "bad trailing whitespace \n")
+        code, output = self.check_default(baseline)
+        self.assertNotEqual(code, 0, output)
+        self.assertIn("whitespace: new.md:1", output)
+        self.assertNotIn("PASS:", output)
+
+    def test_default_missing_baseline_fails_closed_without_local_main(self):
+        self.git("branch", "-m", "main", "stable")
+        code, output = self.check_default("0" * 40)
+        self.assertNotEqual(code, 0, output)
+        self.assertIn("base must resolve", output)
+        self.assertNotIn("PASS:", output)
 
     def test_untracked_text_is_checked(self):
         self.write("new.md", "bad trailing whitespace \n")
