@@ -4,6 +4,22 @@ These tests require Windows, the MSVC x64 tools, and a D3D12-capable GPU.
 
 `build-runtime-redirect-regression.cmd` builds a CPU-only actual-DLL negotiation test and isolated success/failure targets. Run `bin/tests/redirect/runtime_redirect_regression.exe <bundle-runtime.dll> bin/tests/redirect/vdxr_redirect_failure_test.dll failure`, then the same command with `vdxr_redirect_success_test.dll success`. A read-only registry detour supplies the test redirect: no registry value, VR instance, session, or graphics device is created. Failed negotiation must unload the target and preserve its error; successful negotiation must retain callable target dispatch.
 
+`build-ovr-bridge-regression.cmd` builds test-only Oculus/Revive/injector markers and a CPU-only actual-DLL instance
+fixture. Run `bin/tests/ovr-bridge/runtime_ovr_bridge_regression.exe <bundle-runtime.dll> <absolute-marker-directory> <mode>`
+in separate bounded processes for `native`, `native-own`, `bridge`, `bridge-own`, `late-bridge`, `unload-bridge`, and
+`bridge-no-plugin`. Require exit success and `PASS:`. Synthetic registry reads disable the fixture's watcher and isolate
+its settings without writes. The fixture checks injector loading, fake-event creation, application classification,
+unrelated event forwarding, 16 event-hook cycles in bridge cases, and actual runtime unload. Native cases preserve the
+existing detection behavior. Preloaded bridge cases must avoid redundant VDXR hooks and injection.
+
+The bridge hook lives in the fixture executable. `late-bridge` and `unload-bridge` change marker presence to check teardown
+ownership; they do not reproduce real late Revive hook stacking or vendor injector side effects. The supported guard
+covers a bridge loaded before VDXR. These tests do not call `xrGetSystem`, create a backend session, or establish a game
+startup fix. Never install the marker DLLs beside a game or runtime. For an additional local CPU integration check,
+an isolated fixture directory may contain the separately obtained real ReviveXR DLL and its dependencies in place of
+the bridge marker; use the three `bridge`, `bridge-own`, and `bridge-no-plugin` modes. Do not redistribute those binaries
+with this fixture.
+
 `build-module-failure-regression.cmd` also builds `runtime_path_regression.exe`. Pass an isolated copied runtime's fully qualified Windows path longer than MAX_PATH, using an extended path when needed. Actual negotiation must return initialization failure with no dispatch pointer, rather than overflowing its filename buffer. This checks safe rejection, not general long-path support.
 
 `run-fence-regression.cmd` compiles and runs the production CommandContext against two concurrent GPU queues. Each queue's Flush must wait for its own completion. The original named-event implementation returned prematurely on the first attempt; the unnamed-event implementation passes 32 attempts.
