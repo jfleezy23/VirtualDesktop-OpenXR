@@ -32,6 +32,8 @@
 #ifdef _WIN64
 namespace {
     wil::unique_handle g_fakeHmdConnectedEvent;
+    // Latch the attach decision: a bridge can load or unload before runtime teardown.
+    bool g_openEventHookRequested = false;
 } // namespace
 #endif
 
@@ -326,7 +328,9 @@ namespace virtualdesktop_openxr {
         m_isOculusXrPlugin =
             m_applicationName.find("Oculus VR Plugin") == 0 ||
             GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, "OVRPlugin.dll", &ovrPlugin);
-        if (m_isOculusXrPlugin) {
+        // ReviveXR already supplies Oculus detection and its LibOVR bridge. Adding Virtual Desktop's
+        // injector or our detection hook would stack independently managed hooks on the same APIs.
+        if (m_isOculusXrPlugin && !GetModuleHandleW(L"LibReviveXR64.dll")) {
             // For some reason, certain applications built with the Oculus plugin will attempt to initialize LibOVR.
             // However certain applications like Ghosts of Tabor are "delicate" and do no like our DLL inject, so
             // instead we perform our own (simpler) style.
@@ -847,7 +851,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         TraceLoggingRegister(virtualdesktop_openxr::log::g_traceProvider);
         virtualdesktop_openxr::utils::InitializeHighPrecisionTimer();
 #ifdef _WIN64
-        if (!noDetours) {
+        if (!noDetours && !GetModuleHandleW(L"LibReviveXR64.dll")) {
+            g_openEventHookRequested = true;
             DetourDllAttach("Kernel32", "OpenEventW", hooked_OpenEventW, original_OpenEventW);
         }
 #endif
@@ -855,9 +860,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
     case DLL_PROCESS_DETACH: {
 #ifdef _WIN64
-        const bool noDetours = startsWith(getExeName(), "RobloxPlayer");
-        if (!noDetours) {
+        if (g_openEventHookRequested) {
             DetourDllDetach("Kernel32", "OpenEventW", hooked_OpenEventW, original_OpenEventW);
+            g_openEventHookRequested = false;
         }
 #endif
         TraceLoggingUnregister(virtualdesktop_openxr::log::g_traceProvider);
