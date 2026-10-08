@@ -73,6 +73,13 @@ actual-DLL redirect negotiation regressions on both stable and experimental NR. 
 ReleaseBundle objects and matching headers. It does not upload runtime,
 test, or vendor DLLs, invoke installer signing, or select the system runtime. The upstream workflow is retained separately.
 
+The linked CPU fixtures and runtime DLL import the Vulkan loader even though these tests do not create a Vulkan session.
+Headless CI stages the x64 loader and its license from [LunarG's runtime components](https://vulkan.lunarg.com/sdk/home/),
+pinned to version 1.4.341.0 and verified by SHA256, beside the test executables under ignored `bin/` paths. This does not
+install a driver or replace a system DLL. For local CPU tests, provide an appropriate Vulkan loader too.
+The watcher fixture uses a temporary key under HKCU and a process-private registry mapping, restores that mapping, and
+removes its owned key after watcher teardown; it does not require an installed Streamer or change production settings.
+
 ## Hardware tests
 
 Follow [tests/README.md](tests/README.md) and [tests/vr_input_README.md](tests/vr_input_README.md) for each fixture's requirements.

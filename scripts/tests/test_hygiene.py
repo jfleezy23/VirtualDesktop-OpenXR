@@ -279,6 +279,147 @@ class WorkflowDiagnosticTests(unittest.TestCase):
         self.assertIn("Unparsed diagnostic", result.stderr)
         self.assertNotIn("PASS:", result.stdout)
 
+    def test_same_command_line_warning_matches_baseline(self):
+        warning = "     1>cl : command line  warning D9025: overriding '/analyze-' with '/analyze'\n"
+        result = self.compare(warning, warning)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("1 candidate diagnostic identities", result.stdout)
+
+    def test_added_command_line_warning_fails_the_gate(self):
+        result = self.compare("", "     1>cl : command line  warning D9025: overriding '/analyze-' with '/analyze'\n")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("NEW DIAGNOSTIC", result.stdout)
+        self.assertIn("d9025", result.stdout)
+
+    def test_increased_command_line_warning_occurrences_fail_the_gate(self):
+        warning = "     1>cl : command line  warning D9025: overriding '/analyze-' with '/analyze'\n"
+        result = self.compare(warning, warning * 2)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("NEW DIAGNOSTIC", result.stdout)
+        self.assertIn("(2 vs 1)", result.stdout)
+
+    def test_uncoded_command_line_warning_cannot_be_silently_dropped(self):
+        result = self.compare("", "     1>cl : command line  warning : New uncoded compiler warning.\n")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Unparsed diagnostic", result.stderr)
+        self.assertNotIn("PASS:", result.stdout)
+
+
+class WorkflowRuntimeDependencyTests(unittest.TestCase):
+    """A corrupt download must fail the actual staging payload before extraction."""
+
+    def test_bad_vulkan_archive_checksum_prevents_extraction(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            download = directory / "corrupt-download.zip"
+            download.write_bytes(b"not the pinned runtime archive")
+            workflow = SCRIPT.parents[1] / ".github/workflows/community-validation.yml"
+            lines = workflow.read_text(encoding="utf-8").splitlines(keepends=True)
+            step = next(index for index, line in enumerate(lines) if line.strip() ==
+                        "- name: Stage pinned Vulkan loader for CPU regressions")
+            start = next(index for index in range(step + 1, len(lines)) if lines[index].strip() == "run: |") + 1
+            end = next(index for index in range(start, len(lines)) if lines[index].startswith("      - "))
+            payload = directory / "stage.ps1"
+            # Replace only HTTP delivery; the real pinned digest and extraction code execute unchanged.
+            payload.write_text(
+                "$ErrorActionPreference = 'Stop'\n"
+                "function Invoke-WebRequest([string]$Uri, [string]$OutFile) {\n"
+                "  Copy-Item -LiteralPath $env:DOWNLOAD_FIXTURE -Destination $OutFile\n}\n"
+                + textwrap.dedent("".join(lines[start:end])), encoding="utf-8",
+            )
+            powershell = shutil.which("pwsh") or shutil.which("powershell")
+            self.assertIsNotNone(powershell, "PowerShell is required to exercise the Windows CI gate")
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(payload)],
+                cwd=directory, capture_output=True, text=True, timeout=15,
+                env=dict(os.environ, RUNNER_TEMP=str(directory), DOWNLOAD_FIXTURE=str(download)),
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Vulkan loader archive checksum mismatch", result.stderr)
+            self.assertFalse((directory / "bin").exists(), "No application directory may be staged before checksum validation")
+
+
+class WorkflowRegressionTests(unittest.TestCase):
+    """Run the workflow's actual function through Windows' native child boundary."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        (self.directory / "bin/community").mkdir(parents=True)
+        self.powershell = shutil.which("pwsh") or shutil.which("powershell")
+        self.assertIsNotNone(self.powershell, "PowerShell is required to exercise the Windows CI gate")
+        workflow = SCRIPT.parents[1] / ".github/workflows/community-validation.yml"
+        lines = workflow.read_text(encoding="utf-8").splitlines(keepends=True)
+        start = next(index for index, line in enumerate(lines) if line.lstrip().startswith("function Invoke-Regression("))
+        end = next(index for index in range(start + 1, len(lines)) if lines[index].lstrip().startswith("Invoke-Regression "))
+        self.payload = self.directory / "regression.ps1"
+        self.payload.write_text(
+            "$ErrorActionPreference = 'Stop'\n" + textwrap.dedent("".join(lines[start:end]))
+            # cmd.exe parses quoted switches differently from ordinary native argv.
+            # The native Python launcher forwards the real cmd child's streams and exit unchanged.
+            + "Invoke-Regression $env:REGRESSION_LAUNCHER @('-c', "
+            + '"import os, subprocess, sys; sys.exit(subprocess.call('
+            + "[os.environ['ComSpec'], '/d', '/c', os.environ['REGRESSION_COMMAND']]))\") 'controlled'\n",
+            encoding="utf-8",
+        )
+
+    def invoke(self, command):
+        return subprocess.run(
+            [self.powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(self.payload)],
+            cwd=self.directory, capture_output=True, text=True, timeout=15,
+            env=dict(os.environ, REGRESSION_COMMAND=command, REGRESSION_LAUNCHER=sys.executable),
+        )
+
+    def assert_diagnostic(self, result, code, hexadecimal, stdout_bytes=None, stderr_bytes=None):
+        self.assertIn(f"ExitCode={code} ({hexadecimal})", result.stdout)
+        for stream, expected in (("stdout", stdout_bytes), ("stderr", stderr_bytes)):
+            actual = (self.directory / f"bin/community/controlled.{stream}.log").stat().st_size
+            self.assertIn(f"{stream}Bytes={actual}", result.stdout)
+            if expected is not None:
+                self.assertEqual(actual, expected)
+
+    def test_pass_marker_and_zero_exit_succeed_with_diagnostics(self):
+        result = self.invoke("echo PASS: native control")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS: native control", result.stdout)
+        self.assert_diagnostic(result, 0, "0x00000000", stderr_bytes=0)
+
+    def test_empty_zero_exit_is_rejected_with_diagnostics(self):
+        result = self.invoke("exit /b 0")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Regression failed: controlled", result.stderr)
+        self.assert_diagnostic(result, 0, "0x00000000", 0, 0)
+
+    def test_empty_nonzero_exit_is_rejected_with_diagnostics(self):
+        result = self.invoke("exit /b 7")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Regression failed: controlled", result.stderr)
+        self.assert_diagnostic(result, 7, "0x00000007", 0, 0)
+
+    def test_empty_high_bit_exit_preserves_status_bits(self):
+        result = self.invoke("exit /b -1073741515")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Regression failed: controlled", result.stderr)
+        self.assert_diagnostic(result, -1073741515, "0xC0000135", 0, 0)
+
+    def test_pass_marker_cannot_override_nonzero_exit(self):
+        result = self.invoke("echo PASS: native control & exit /b 7")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS: native control", result.stdout)
+        self.assertIn("Regression failed: controlled", result.stderr)
+        self.assert_diagnostic(result, 7, "0x00000007", stderr_bytes=0)
+
+    def test_error_markers_cannot_override_zero_exit_and_pass(self):
+        for marker in ("FAIL", "ERROR"):
+            with self.subTest(marker=marker):
+                result = self.invoke(f"echo PASS: native control & echo {marker}: rejected 1>&2 & exit /b 0")
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Regression failed: controlled", result.stderr)
+                self.assertIn(f"{marker}: rejected", result.stdout)
+                self.assertGreater((self.directory / "bin/community/controlled.stderr.log").stat().st_size, 0)
+                self.assert_diagnostic(result, 0, "0x00000000")
+
 
 class BuildHelperPathTests(unittest.TestCase):
     """Exercise PowerShell 5.1's real native argument boundary and MSBuild."""

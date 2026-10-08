@@ -111,6 +111,40 @@ jobs:
         run: |
           & scripts/Build-CommunityRuntime.ps1 -Configuration $env:BUILD_CONFIGURATION -Platform $env:BUILD_PLATFORM
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stage pinned Vulkan loader for CPU regressions
+        if: (needs.source-checks.outputs.experimental == 'true' || github.base_ref == 'stable' || github.ref_name == 'stable') && matrix.platform == 'x64' && matrix.configuration == 'ReleaseBundle'
+        run: |
+          $systemLoader = Join-Path $env:SystemRoot 'System32/vulkan-1.dll'
+          Write-Output "System32 Vulkan loader present before staging: $(Test-Path -LiteralPath $systemLoader)"
+          $zipPath = Join-Path $env:RUNNER_TEMP 'VulkanRT-X64-1.4.341.0-Components.zip'
+          Invoke-WebRequest -Uri 'https://sdk.lunarg.com/sdk/download/1.4.341.0/windows/VulkanRT-X64-1.4.341.0-Components.zip' -OutFile $zipPath
+          $expectedHash = '20571dcc8292b80a47d68bbbfa4094d87044041f50f4e2e1f326a01e3732b226'
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash -ne $expectedHash) {
+            throw 'Vulkan loader archive checksum mismatch.'
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
+          try {
+            $entries = @{
+              'vulkan-1.dll' = $archive.GetEntry('VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll')
+              'VulkanRT-License.txt' = $archive.GetEntry('VulkanRT-X64-1.4.341.0-Components/VulkanRT-License.txt')
+            }
+            if (@($entries.Values | Where-Object { $null -eq $_ }).Count) {
+              throw 'The pinned Vulkan archive is missing required entries.'
+            }
+            foreach ($relative in @('bin/vr-input-tests', 'bin/tests/redirect')) {
+              $destination = Join-Path (Get-Location) $relative
+              New-Item -ItemType Directory -Force -Path $destination | Out-Null
+              foreach ($name in $entries.Keys) {
+                [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[$name], (Join-Path $destination $name), $true)
+              }
+              $loader = Get-Item -LiteralPath (Join-Path $destination 'vulkan-1.dll')
+              $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $loader.FullName).Hash
+              Write-Output "Staged $relative/vulkan-1.dll: version=$($loader.VersionInfo.FileVersion); SHA256=$hash"
+            }
+          } finally {
+            $archive.Dispose()
+          }
       - name: CPU regressions on fresh matching runtime objects
         if: (needs.source-checks.outputs.experimental == 'true' || github.base_ref == 'stable' || github.ref_name == 'stable') && matrix.platform == 'x64' && matrix.configuration == 'ReleaseBundle'
         run: |
@@ -141,6 +175,9 @@ jobs:
               throw "Regression timed out: $name"
             }
             $process.WaitForExit()
+            $exitCode = $process.ExitCode
+            $exitBits = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$exitCode), 0)
+            Write-Output ("Regression {0}: ExitCode={1} (0x{2:X8}); stdoutBytes={3}; stderrBytes={4}" -f $name, $exitCode, $exitBits, (Get-Item $stdout).Length, (Get-Item $stderr).Length)
             $text = (Get-Content -Raw $stdout) + (Get-Content -Raw $stderr)
             Write-Output $text
             if ($process.ExitCode -ne 0 -or $text -notmatch '(?m)^PASS:' -or $text -match '(?m)^(FAIL|ERROR):') {
@@ -203,9 +240,9 @@ jobs:
               $normalized = $line.Replace('\', '/').ToLowerInvariant().Replace($root + '/', '')
               if ($normalized -match '^(.*?)\(\d+(?:,\d+)?\)\s*:\s*warning\s+([a-z]+\d+)\s*:\s*(.*?)(?:\s+\[.*\])?$') {
                 $key = $Matches[1] + ': ' + $Matches[2] + ': ' + $Matches[3]
-              } elseif ($normalized -match '^(.*?)\s*:\s*warning\s+([a-z]+\d+)\s*:\s*(.*?)(?:\s+\[.*\])?$') {
+              } elseif ($normalized -match '^(.*?)\s*:\s*(?:command line\s+)?warning\s+([a-z]+\d+)\s*:\s*(.*?)(?:\s+\[.*\])?$') {
                 $key = $Matches[1] + ': ' + $Matches[2] + ': ' + $Matches[3]
-              } elseif ($normalized -match ':\s*warning\b|\bwarning\s+[a-z]+\d+') {
+              } elseif ($normalized -match ':\s*(?:command line\s+)?warning\b|\bwarning\s+[a-z]+\d+') {
                 throw "Unparsed diagnostic in $cohort`: $line"
               } else { continue }
               $key = $key -replace ': lines: [\d, ]+$', '' -replace '\bline (?:\x27)?\d+(?:\x27)?', 'line <location>'
