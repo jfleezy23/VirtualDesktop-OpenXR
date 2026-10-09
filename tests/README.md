@@ -75,3 +75,19 @@ headset or exercise NR; a failed drain does not imply that gameplay can resume a
 
 See [khronos_README.md](khronos_README.md) for official stereo, pacing, swapchain and input contract checks. Keep native
 headset evidence separate from private-backend GPU tests and auto-skipped visual prompts.
+
+## Allocation and GPU timer checks
+
+`nonnr_input_regression` adds `sync-allocations`, `sync-benchmark`, and `sync-many-benchmark`, each taking an explicit
+OVRNull directory. The allocation test intercepts the calling thread's real heap allocations, checks a positive control,
+and exercises warmed duplicate/wildcard/scope changes and long nonhand path boundaries. Its allocation bound applies to
+this fixed provider/profile fixture; tracing, controller rebinding, and backend work can still allocate. Benchmark modes
+print CPU distributions and allocation counts without imposing a machine-dependent speed threshold. The many-set fixture
+checks 32 unique sets with duplicate requests to expose the retained vectors' linear lookup tradeoff.
+
+Build `nonnr_gpu_timer_regression.cpp` against the same fresh runtime object cohort. `contract` uses a real WARP device and
+intercepts GetData to check all three DONOTFLUSH flags, unavailable/error/disjoint handling and reset/non-reset behavior;
+it runs in CPU CI. `native` uses a hardware device and a three-slot timer ring with rendered GPU work, reporting available
+samples and query cost. Its per-frame submission flush occurs after recording work, independently of timer reads.
+`benchmark` retains the native measurements while permitting old flags for baseline comparison. Enforce a child-process
+timeout on all modes. Native sample progress is not proof of Virtual Desktop scheduling or headset latency improvement.
