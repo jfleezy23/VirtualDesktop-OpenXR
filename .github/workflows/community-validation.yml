@@ -190,9 +190,11 @@ jobs:
             Invoke-Regression 'bin/vr-input-tests/nonnr_input_regression.exe' @($mode) "nonnr-input-$mode"
           }
           $runtime = (Resolve-Path 'bin/community/build/x64/ReleaseBundle/virtualdesktop-openxr.dll').Path
+          Invoke-Regression 'bin/tests/redirect/runtime_negotiation_regression.exe' @($runtime) 'negotiation'
           foreach ($mode in @('failure', 'success')) {
             $target = (Resolve-Path "bin/tests/redirect/vdxr_redirect_$($mode)_test.dll").Path
             Invoke-Regression 'bin/tests/redirect/runtime_redirect_regression.exe' @($runtime, $target, $mode) "redirect-$mode"
+            Invoke-Regression 'bin/tests/redirect/runtime_redirect_regression.exe' @($runtime, $target, $mode, 'wide') "redirect-$mode-wide"
           }
 
   analyzer-comparison:

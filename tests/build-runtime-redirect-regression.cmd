@@ -10,4 +10,6 @@ if errorlevel 1 exit /b %errorlevel%
 cl.exe /nologo /std:c++17 /EHsc /W4 /LD /DREDIRECT_TEST_SUCCESS /I"external\OpenXR-SDK\include" tests\runtime_redirect_test_module.cpp /Fe:bin\tests\redirect\vdxr_redirect_success_test.dll /Fo:bin\tests\redirect\success.obj /link /IMPLIB:bin\tests\redirect\success.lib
 if errorlevel 1 exit /b %errorlevel%
 cl.exe /nologo /std:c++17 /EHsc /W4 /I"external\OpenXR-SDK\include" /I"packages\Detours.4.0.1\lib\native\include" tests\runtime_redirect_regression.cpp /Fe:bin\tests\redirect\runtime_redirect_regression.exe /Fo:bin\tests\redirect\runtime_redirect_regression.obj /link advapi32.lib "packages\Detours.4.0.1\lib\native\libs\x64\detours.lib"
+if errorlevel 1 exit /b %errorlevel%
+cl.exe /nologo /std:c++17 /EHsc /W4 /I"external\OpenXR-SDK\include" /I"packages\Detours.4.0.1\lib\native\include" tests\runtime_negotiation_regression.cpp /Fe:bin\tests\redirect\runtime_negotiation_regression.exe /Fo:bin\tests\redirect\runtime_negotiation_regression.obj /link advapi32.lib "packages\Detours.4.0.1\lib\native\libs\x64\detours.lib"
 exit /b %errorlevel%
