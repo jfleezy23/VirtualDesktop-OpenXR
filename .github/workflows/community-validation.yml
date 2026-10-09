@@ -150,7 +150,7 @@ jobs:
         run: |
           $source = (Resolve-Path 'virtualdesktop-openxr').Path
           $objects = (Resolve-Path 'bin/community/build/x64/ReleaseBundle/obj').Path
-          foreach ($fixture in @('vr_input_regression.cpp', 'vr_input_watcher_regression.cpp')) {
+          foreach ($fixture in @('vr_input_regression.cpp', 'vr_input_watcher_regression.cpp', 'nonnr_input_regression.cpp')) {
             & tests/vr_input_build.cmd -SourceDirectory $source -RuntimeObjectDirectory $objects -TestSource $fixture
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
@@ -186,6 +186,9 @@ jobs:
           }
           Invoke-Regression 'bin/vr-input-tests/vr_input_regression.exe' @() 'input'
           Invoke-Regression 'bin/vr-input-tests/vr_input_watcher_regression.exe' @() 'watcher'
+          foreach ($mode in @('cpu', 'query-cache', 'action-pose', 'sync-set-paths')) {
+            Invoke-Regression 'bin/vr-input-tests/nonnr_input_regression.exe' @($mode) "nonnr-input-$mode"
+          }
           $runtime = (Resolve-Path 'bin/community/build/x64/ReleaseBundle/virtualdesktop-openxr.dll').Path
           foreach ($mode in @('failure', 'success')) {
             $target = (Resolve-Path "bin/tests/redirect/vdxr_redirect_$($mode)_test.dll").Path

@@ -495,7 +495,9 @@ namespace virtualdesktop_openxr {
             for (const auto& entry : m_actions) {
                 const Action& xrAction = *(Action*)entry;
 
-                xrActionSet.subactionPaths.insert(xrAction.subactionPaths.begin(), xrAction.subactionPaths.end());
+                if (xrAction.actionSet == attachInfo->actionSets[i]) {
+                    xrActionSet.subactionPaths.insert(xrAction.subactionPaths.begin(), xrAction.subactionPaths.end());
+                }
             }
         }
 
@@ -555,6 +557,24 @@ namespace virtualdesktop_openxr {
         return XR_SUCCESS;
     }
 
+    bool OpenXrRuntime::isActionSourceActive(const ActionSet& actionSet, const std::string& fullPath) const {
+        if (actionSet.activeSubactionPaths.count(XR_NULL_PATH)) {
+            return true;
+        }
+        for (const auto path : actionSet.activeSubactionPaths) {
+            if (startsWith(fullPath, getXrPath(path) + "/")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    size_t OpenXrRuntime::getActionSourcePriorityIndex(const std::string& fullPath,
+                                                       ActionSourceIndex sourceIndex) const {
+        const int side = getActionSide(fullPath);
+        return (side >= 0 ? side : xr::Side::Count) * (size_t)ActionSourceIndex::Count + (size_t)sourceIndex;
+    }
+
     // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrGetActionStateBoolean
     XrResult OpenXrRuntime::xrGetActionStateBoolean(XrSession session,
                                                     const XrActionStateGetInfo* getInfo,
@@ -606,7 +626,7 @@ namespace virtualdesktop_openxr {
             getInfo->subactionPath == XR_NULL_PATH ? xr::Side::Count : std::max(0, getActionSide(subActionPath));
         const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
         for (const auto& source : xrAction.actionSources) {
-            if (!startsWith(source.first, subActionPath)) {
+            if (!startsWith(source.first, subActionPath) || !isActionSourceActive(xrActionSet, source.first)) {
                 continue;
             }
 
@@ -614,13 +634,15 @@ namespace virtualdesktop_openxr {
             const auto& value = source.second;
             const bool isHighestPriority =
                 value.sourceIndex == ActionSourceIndex::Invalid ||
-                m_actionSourcePriority[(size_t)value.sourceIndex] == xrActionSet.effectivePriority;
+                m_actionSourcePriority[getActionSourcePriorityIndex(fullPath, value.sourceIndex)] ==
+                    xrActionSet.effectivePriority;
             const bool isBound =
                 isActionSetActive && isHighestPriority && (value.buttonMap != nullptr || value.floatValue != nullptr);
             TraceLoggingWrite(g_traceProvider,
                               "xrGetActionStateBoolean",
                               TLArg(fullPath.c_str(), "ActionSourcePath"),
-                              TLArg(m_actionSourcePriority[(size_t)value.sourceIndex], "ActionSourcePriority"),
+                              TLArg(m_actionSourcePriority[getActionSourcePriorityIndex(fullPath, value.sourceIndex)],
+                                    "ActionSourcePriority"),
                               TLArg(xrActionSet.effectivePriority, "ActionSetPriority"),
                               TLArg(isBound, "Bound"));
 
@@ -719,7 +741,7 @@ namespace virtualdesktop_openxr {
             getInfo->subactionPath == XR_NULL_PATH ? xr::Side::Count : std::max(0, getActionSide(subActionPath));
         const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
         for (const auto& source : xrAction.actionSources) {
-            if (!startsWith(source.first, subActionPath)) {
+            if (!startsWith(source.first, subActionPath) || !isActionSourceActive(xrActionSet, source.first)) {
                 continue;
             }
 
@@ -727,7 +749,8 @@ namespace virtualdesktop_openxr {
             const auto& value = source.second;
             const bool isHighestPriority =
                 value.sourceIndex == ActionSourceIndex::Invalid ||
-                m_actionSourcePriority[(size_t)value.sourceIndex] == xrActionSet.effectivePriority;
+                m_actionSourcePriority[getActionSourcePriorityIndex(fullPath, value.sourceIndex)] ==
+                    xrActionSet.effectivePriority;
             const bool isBound =
                 isActionSetActive && isHighestPriority &&
                 (value.floatValue != nullptr || (value.vector2fValue != nullptr && value.vector2fIndex >= 0) ||
@@ -735,7 +758,8 @@ namespace virtualdesktop_openxr {
             TraceLoggingWrite(g_traceProvider,
                               "xrGetActionStateFloat",
                               TLArg(fullPath.c_str(), "ActionSourcePath"),
-                              TLArg(m_actionSourcePriority[(size_t)value.sourceIndex], "ActionSourcePriority"),
+                              TLArg(m_actionSourcePriority[getActionSourcePriorityIndex(fullPath, value.sourceIndex)],
+                                    "ActionSourcePriority"),
                               TLArg(xrActionSet.effectivePriority, "ActionSetPriority"),
                               TLArg(isBound, "Bound"));
 
@@ -837,7 +861,7 @@ namespace virtualdesktop_openxr {
             getInfo->subactionPath == XR_NULL_PATH ? xr::Side::Count : std::max(0, getActionSide(subActionPath));
         const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
         for (const auto& source : xrAction.actionSources) {
-            if (!startsWith(source.first, subActionPath)) {
+            if (!startsWith(source.first, subActionPath) || !isActionSourceActive(xrActionSet, source.first)) {
                 continue;
             }
 
@@ -845,12 +869,14 @@ namespace virtualdesktop_openxr {
             const auto& value = source.second;
             const bool isHighestPriority =
                 value.sourceIndex == ActionSourceIndex::Invalid ||
-                m_actionSourcePriority[(size_t)value.sourceIndex] == xrActionSet.effectivePriority;
+                m_actionSourcePriority[getActionSourcePriorityIndex(fullPath, value.sourceIndex)] ==
+                    xrActionSet.effectivePriority;
             const bool isBound = isActionSetActive && isHighestPriority && value.vector2fValue != nullptr;
             TraceLoggingWrite(g_traceProvider,
                               "xrGetActionStateVector2f",
                               TLArg(fullPath.c_str(), "ActionSourcePath"),
-                              TLArg(m_actionSourcePriority[(size_t)value.sourceIndex], "ActionSourcePriority"),
+                              TLArg(m_actionSourcePriority[getActionSourcePriorityIndex(fullPath, value.sourceIndex)],
+                                    "ActionSourcePriority"),
                               TLArg(xrActionSet.effectivePriority, "ActionSetPriority"),
                               TLArg(isBound, "Bound"));
 
@@ -954,7 +980,7 @@ namespace virtualdesktop_openxr {
         const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
         state->isActive = XR_FALSE;
         for (const auto& source : xrAction.actionSources) {
-            if (!startsWith(source.first, subActionPath)) {
+            if (!startsWith(source.first, subActionPath) || !isActionSourceActive(xrActionSet, source.first)) {
                 continue;
             }
 
@@ -962,14 +988,20 @@ namespace virtualdesktop_openxr {
             const auto& value = source.second;
             const bool isHighestPriority =
                 value.sourceIndex == ActionSourceIndex::Invalid ||
-                m_actionSourcePriority[(size_t)value.sourceIndex] == xrActionSet.effectivePriority;
+                m_actionSourcePriority[getActionSourcePriorityIndex(fullPath, value.sourceIndex)] ==
+                    xrActionSet.effectivePriority;
             const bool isBound = isActionSetActive && isHighestPriority;
             TraceLoggingWrite(g_traceProvider,
                               "xrGetActionStatePose",
                               TLArg(fullPath.c_str(), "ActionSourcePath"),
-                              TLArg(m_actionSourcePriority[(size_t)value.sourceIndex], "ActionSourcePriority"),
+                              TLArg(m_actionSourcePriority[getActionSourcePriorityIndex(fullPath, value.sourceIndex)],
+                                    "ActionSourcePriority"),
                               TLArg(xrActionSet.effectivePriority, "ActionSetPriority"),
                               TLArg(isBound, "Bound"));
+
+            if (!isBound) {
+                continue;
+            }
 
             // We only support hands paths and eye tracker, not gamepad etc.
             if (!isActionEyeTracker(fullPath)) {
@@ -1032,19 +1064,30 @@ namespace virtualdesktop_openxr {
         // TODO: Try to reduce contention here.
         std::unique_lock lock(m_actionsAndSpacesMutex);
 
-        // A rejected activation request must preserve the previous successful sync.
+        // Stage complete per-set scopes before publishing a successful activation request.
+        std::set<XrActionSet> activeActionSets;
+        std::map<XrActionSet, std::set<XrPath>> activeSubactionPaths;
         for (uint32_t i = 0; i < syncInfo->countActiveActionSets; i++) {
             const auto& activeSet = syncInfo->activeActionSets[i];
             if (!m_attachedActionSets.count(activeSet.actionSet)) {
                 return XR_ERROR_ACTIONSET_NOT_ATTACHED;
             }
-            if (activeSet.subactionPath != XR_NULL_PATH &&
-                !((ActionSet*)activeSet.actionSet)->subactionPaths.count(activeSet.subactionPath)) {
-                return XR_ERROR_PATH_UNSUPPORTED;
+            if (activeSet.subactionPath != XR_NULL_PATH) {
+                if (m_strings.find(activeSet.subactionPath) == m_strings.cend()) {
+                    return XR_ERROR_PATH_INVALID;
+                }
+                if (!((ActionSet*)activeSet.actionSet)->subactionPaths.count(activeSet.subactionPath)) {
+                    return XR_ERROR_PATH_UNSUPPORTED;
+                }
             }
+            activeActionSets.insert(activeSet.actionSet);
+            activeSubactionPaths[activeSet.actionSet].insert(activeSet.subactionPath);
         }
 
-        m_activeActionSets.clear();
+        m_activeActionSets.swap(activeActionSets);
+        for (auto& scope : activeSubactionPaths) {
+            ((ActionSet*)scope.first)->activeSubactionPaths.swap(scope.second);
+        }
         uint32_t maxPriority = UINT32_MAX;
         uint32_t minPriority = 0;
         bool doSide[xr::Side::Count] = {false, false};
@@ -1082,35 +1125,6 @@ namespace virtualdesktop_openxr {
         if (m_sessionState != XR_SESSION_STATE_FOCUSED) {
             m_activeActionSets.clear();
             return XR_SESSION_NOT_FOCUSED;
-        }
-
-        for (size_t i = 0; i < (size_t)ActionSourceIndex::Count; i++) {
-            m_actionSourcePriority[i] = 0;
-        }
-
-        // Determine highest actionset priority for each action's bound source.
-        if (syncInfo->countActiveActionSets) {
-            if (minPriority != maxPriority) {
-                for (auto it = m_actions.begin(); it != m_actions.end(); it++) {
-                    const Action& xrAction = *(Action*)*it;
-
-                    for (const auto& source : xrAction.actionSources) {
-                        const auto sourceIndex = source.second.sourceIndex;
-                        if (sourceIndex != ActionSourceIndex::Invalid) {
-                            if (m_activeActionSets.count(xrAction.actionSet)) {
-                                const ActionSet& xrActionSet = *(ActionSet*)xrAction.actionSet;
-
-                                m_actionSourcePriority[(size_t)sourceIndex] = std::max(
-                                    m_actionSourcePriority[(size_t)sourceIndex], xrActionSet.effectivePriority);
-                            }
-                        }
-                    }
-                }
-            } else {
-                for (size_t i = 0; i < std::size(m_actionSourcePriority); i++) {
-                    m_actionSourcePriority[i] = minPriority;
-                }
-            }
         }
 
         // Latch the state of all inputs, and we will let the further calls to xrGetActionState*() do the triage.
@@ -1233,9 +1247,40 @@ namespace virtualdesktop_openxr {
             }
         }
 
+        for (size_t i = 0; i < std::size(m_actionSourcePriority); i++) {
+            m_actionSourcePriority[i] = 0;
+        }
+
+        // Determine highest actionset priority for each action's bound source.
+        if (syncInfo->countActiveActionSets) {
+            if (minPriority != maxPriority) {
+                for (auto it = m_actions.begin(); it != m_actions.end(); it++) {
+                    const Action& xrAction = *(Action*)*it;
+
+                    for (const auto& source : xrAction.actionSources) {
+                        const auto sourceIndex = source.second.sourceIndex;
+                        if (sourceIndex != ActionSourceIndex::Invalid) {
+                            if (m_activeActionSets.count(xrAction.actionSet) &&
+                                isActionSourceActive(*(ActionSet*)xrAction.actionSet, source.first)) {
+                                const ActionSet& xrActionSet = *(ActionSet*)xrAction.actionSet;
+
+                                const auto priorityIndex = getActionSourcePriorityIndex(source.first, sourceIndex);
+                                m_actionSourcePriority[priorityIndex] =
+                                    std::max(m_actionSourcePriority[priorityIndex], xrActionSet.effectivePriority);
+                            }
+                        }
+                    }
+                }
+            } else {
+                for (size_t i = 0; i < std::size(m_actionSourcePriority); i++) {
+                    m_actionSourcePriority[i] = minPriority;
+                }
+            }
+        }
+
         // Propagate the input state to the entire action state.
-        for (uint32_t i = 0; i < syncInfo->countActiveActionSets; i++) {
-            ActionSet& xrActionSet = *(ActionSet*)syncInfo->activeActionSets[i].actionSet;
+        for (const auto actionSet : m_activeActionSets) {
+            ActionSet& xrActionSet = *(ActionSet*)actionSet;
 
             xrActionSet.cachedInputState = m_cachedInputState;
             xrActionSet.generation++;

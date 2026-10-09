@@ -738,6 +738,10 @@ namespace virtualdesktop_openxr {
                  {{sets[1], XR_NULL_PATH}, {sets[0], right}},
                  2,
                  XR_ERROR_PATH_UNSUPPORTED},
+                {"late unknown numeric subaction path",
+                 {{sets[1], XR_NULL_PATH}, {sets[0], XrPath(0xdeadbeef)}},
+                 2,
+                 XR_ERROR_PATH_INVALID},
             };
             for (const auto& item : cases) {
                 runtime.m_activeActionSets.clear();
@@ -793,6 +797,226 @@ namespace virtualdesktop_openxr {
             expect(result == XR_SUCCESS && runtime.m_activeActionSets.empty() && inputStateCalls == 1,
                    "successful zero-active-set sync still clears activation and samples input");
             require(runtime.xrDestroySession(session()) == XR_SUCCESS, "Sync validation fixture cleanup failed");
+        }
+
+        static void syncScopes(const wchar_t* backendDirectory) {
+            for (const auto type : {XR_ACTION_TYPE_BOOLEAN_INPUT,
+                                    XR_ACTION_TYPE_FLOAT_INPUT,
+                                    XR_ACTION_TYPE_VECTOR2F_INPUT,
+                                    XR_ACTION_TYPE_POSE_INPUT}) {
+                OpenXrRuntime runtime;
+                seed(runtime);
+                PoseProvider poses(backendDirectory);
+                InputProvider inputs;
+                runtime.m_sessionState = XR_SESSION_STATE_FOCUSED;
+                runtime.m_cachedControllerType[0] = runtime.m_cachedControllerType[1] = "touch_controller";
+                runtime.m_controllerGripPose[0] = runtime.m_controllerGripPose[1] = xr::math::Pose::Identity();
+                const auto left = path(runtime, "/user/hand/left");
+                const auto right = path(runtime, "/user/hand/right");
+                const XrActionSet sets[] = {createSet(runtime, "high"), createSet(runtime, "low")};
+                XrAction actions[2]{};
+                for (unsigned i = 0; i < 2; ++i) {
+                    actions[i] = createAction(runtime, sets[i], type, left, right);
+                    auto& set = *reinterpret_cast<OpenXrRuntime::ActionSet*>(sets[i]);
+                    set.priority = set.effectivePriority = i == 0 ? 7 : 3;
+                    auto& action = *reinterpret_cast<OpenXrRuntime::Action*>(actions[i]);
+                    for (int side = 0; side < 2; ++side) {
+                        OpenXrRuntime::ActionSource source{};
+                        const auto prefix = side == 0 ? "/user/hand/left" : "/user/hand/right";
+                        if (type == XR_ACTION_TYPE_POSE_INPUT) {
+                            source.realPath = std::string(prefix) + "/input/grip/pose";
+                            source.sourceIndex = OpenXrRuntime::ActionSourceIndex::Grip;
+                        } else if (type == XR_ACTION_TYPE_VECTOR2F_INPUT) {
+                            source.realPath = std::string(prefix) + "/input/thumbstick";
+                            source.vector2fValue = set.cachedInputState.Thumbstick;
+                            source.sourceIndex = OpenXrRuntime::ActionSourceIndex::ThumbstickXY;
+                        } else {
+                            source.realPath = std::string(prefix) + "/input/trigger/value";
+                            source.floatValue = set.cachedInputState.IndexTrigger;
+                            source.sourceIndex = OpenXrRuntime::ActionSourceIndex::Trigger;
+                        }
+                        action.actionSources[source.realPath] = source;
+                    }
+                }
+                XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+                attach.countActionSets = 2;
+                attach.actionSets = sets;
+                require(runtime.xrAttachSessionActionSets(session(), &attach) == XR_SUCCESS, "Scope attach failed");
+                const auto sync = [&](std::initializer_list<XrActiveActionSet> active) {
+                    XrActionsSyncInfo info{XR_TYPE_ACTIONS_SYNC_INFO};
+                    info.countActiveActionSets = static_cast<uint32_t>(active.size());
+                    info.activeActionSets = active.begin();
+                    require(runtime.xrSyncActions(session(), &info) == XR_SUCCESS, "Scope sync failed");
+                    for (const auto handle : sets) {
+                        auto& set = *reinterpret_cast<OpenXrRuntime::ActionSet*>(handle);
+                        set.cachedInputState.IndexTrigger[0] = 0.8f;
+                        set.cachedInputState.IndexTrigger[1] = type == XR_ACTION_TYPE_BOOLEAN_INPUT ? 0.2f : 0.9f;
+                        set.cachedInputState.Thumbstick[0] = {0.6f, 0.7f};
+                        set.cachedInputState.Thumbstick[1] = {0.8f, 0.9f};
+                    }
+                };
+                const auto check = [&](unsigned setIndex,
+                                       XrPath subpath,
+                                       bool active,
+                                       const char* label,
+                                       XrPath aggregateValuePath = XR_NULL_PATH) {
+                    XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
+                    info.action = actions[setIndex];
+                    info.subactionPath = subpath;
+                    const auto valuePath = subpath == XR_NULL_PATH ? aggregateValuePath : subpath;
+                    bool correct = false;
+                    if (type == XR_ACTION_TYPE_BOOLEAN_INPUT) {
+                        XrActionStateBoolean state{XR_TYPE_ACTION_STATE_BOOLEAN};
+                        state.currentState = state.changedSinceLastSync = state.isActive = XR_TRUE;
+                        state.lastChangeTime = 99;
+                        correct =
+                            runtime.xrGetActionStateBoolean(session(), &info, &state) == XR_SUCCESS &&
+                            !!state.isActive == active &&
+                            (!active || valuePath == XR_NULL_PATH || !!state.currentState == (valuePath == left)) &&
+                            (active || (!state.currentState && !state.changedSinceLastSync && !state.lastChangeTime));
+                    } else if (type == XR_ACTION_TYPE_FLOAT_INPUT) {
+                        XrActionStateFloat state{XR_TYPE_ACTION_STATE_FLOAT};
+                        state.currentState = 1.f;
+                        state.changedSinceLastSync = state.isActive = XR_TRUE;
+                        state.lastChangeTime = 99;
+                        correct =
+                            runtime.xrGetActionStateFloat(session(), &info, &state) == XR_SUCCESS &&
+                            !!state.isActive == active &&
+                            (!active || valuePath == XR_NULL_PATH ||
+                             state.currentState == (valuePath == left ? 0.8f : 0.9f)) &&
+                            (active || (!state.currentState && !state.changedSinceLastSync && !state.lastChangeTime));
+                    } else if (type == XR_ACTION_TYPE_VECTOR2F_INPUT) {
+                        XrActionStateVector2f state{XR_TYPE_ACTION_STATE_VECTOR2F};
+                        state.currentState = {1.f, 1.f};
+                        state.changedSinceLastSync = state.isActive = XR_TRUE;
+                        state.lastChangeTime = 99;
+                        correct = runtime.xrGetActionStateVector2f(session(), &info, &state) == XR_SUCCESS &&
+                                  !!state.isActive == active &&
+                                  (!active || valuePath == XR_NULL_PATH ||
+                                   (state.currentState.x == (valuePath == left ? 0.6f : 0.8f) &&
+                                    state.currentState.y == (valuePath == left ? 0.7f : 0.9f))) &&
+                                  (active || (!state.currentState.x && !state.currentState.y &&
+                                              !state.changedSinceLastSync && !state.lastChangeTime));
+                    } else {
+                        XrActionStatePose state{XR_TYPE_ACTION_STATE_POSE};
+                        state.isActive = XR_TRUE;
+                        correct = runtime.xrGetActionStatePose(session(), &info, &state) == XR_SUCCESS &&
+                                  !!state.isActive == active;
+                    }
+                    expect(correct, label);
+                };
+                sync({{sets[0], XR_NULL_PATH}});
+                check(0, left, true, "wildcard enables left");
+                check(0, right, true, "wildcard enables right");
+                sync({{sets[0], left}});
+                check(0, left, true, "left-only keeps left active");
+                check(0, right, false, "left-only clears right state");
+                check(0, XR_NULL_PATH, true, "left-only aggregate uses only left values", left);
+                if (type == XR_ACTION_TYPE_POSE_INPUT) {
+                    XrActionSpaceCreateInfo actionInfo{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+                    actionInfo.action = actions[0];
+                    actionInfo.subactionPath = right;
+                    actionInfo.poseInActionSpace.orientation.w = 1.f;
+                    XrSpace space{};
+                    require(runtime.xrCreateActionSpace(session(), &actionInfo, &space) == XR_SUCCESS,
+                            "Scope action space failed");
+                    XrReferenceSpaceCreateInfo reference{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+                    reference.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+                    reference.poseInReferenceSpace.orientation.w = 1.f;
+                    XrSpace base{};
+                    require(runtime.xrCreateReferenceSpace(session(), &reference, &base) == XR_SUCCESS,
+                            "Scope reference space failed");
+                    XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
+                    XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+                    location.next = &velocity;
+                    expect(runtime.xrLocateSpace(space, base, 1000000000, &location) == XR_SUCCESS &&
+                               !location.locationFlags && !velocity.velocityFlags,
+                           "excluded right action space has no valid pose or velocity");
+                    sync({{sets[0], right}});
+                    expect(runtime.xrLocateSpace(space, base, 1000000000, &location) == XR_SUCCESS &&
+                               (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT),
+                           "reactivated right action space restores valid pose");
+                    require(runtime.xrDestroySpace(space) == XR_SUCCESS && runtime.xrDestroySpace(base) == XR_SUCCESS,
+                            "Scope space cleanup failed");
+                }
+                sync({{sets[0], right}});
+                check(0, left, false, "right-only clears left state");
+                check(0, right, true, "right-only keeps right active");
+                check(0, XR_NULL_PATH, true, "right-only aggregate skips excluded left binding", right);
+                const auto generation = reinterpret_cast<OpenXrRuntime::ActionSet*>(sets[0])->generation;
+                sync({{sets[0], left}, {sets[0], right}});
+                check(0, left, true, "explicit entries union left activation");
+                check(0, right, true, "explicit entries union right activation");
+                expect(reinterpret_cast<OpenXrRuntime::ActionSet*>(sets[0])->generation == generation + 1,
+                       "duplicate set entries advance generation once per sync");
+                sync({{sets[0], XR_NULL_PATH}, {sets[0], left}});
+                check(0, right, true, "wildcard dominates repeated left entry");
+                sync({{sets[0], left}, {sets[1], XR_NULL_PATH}});
+                check(0, left, true, "high-priority left remains active");
+                check(1, left, false, "high-priority left suppresses low-priority left");
+                check(1, right, true, "high-priority left does not suppress low-priority right");
+                check(1, XR_NULL_PATH, true, "low-priority aggregate skips suppressed left binding", right);
+                sync({{sets[0], left}});
+                const auto previousGeneration = reinterpret_cast<OpenXrRuntime::ActionSet*>(sets[0])->generation;
+                inputStateCalls = 0;
+                const XrActiveActionSet invalid[] = {{sets[0], right}, {sets[1], XrPath(0xdeadbeef)}};
+                XrActionsSyncInfo failed{XR_TYPE_ACTIONS_SYNC_INFO};
+                failed.countActiveActionSets = 2;
+                failed.activeActionSets = invalid;
+                expect(runtime.xrSyncActions(session(), &failed) == XR_ERROR_PATH_INVALID && !inputStateCalls &&
+                           reinterpret_cast<OpenXrRuntime::ActionSet*>(sets[0])->generation == previousGeneration,
+                       "late invalid sync preserves generation without backend sampling");
+                check(0, left, true, "failed sync preserves previous left scope");
+                check(0, right, false, "failed sync does not publish early right scope");
+                sync({});
+                check(0, XR_NULL_PATH, false, "zero active sets clears aggregate state");
+                check(1, right, false, "zero active sets clears right state");
+                if (type == XR_ACTION_TYPE_FLOAT_INPUT) {
+                    runtime.initializeRemappingTables();
+                    for (const auto action : actions)
+                        reinterpret_cast<OpenXrRuntime::Action*>(action)->actionSources.clear();
+                    runtime.m_cachedControllerType[0].clear();
+                    runtime.m_cachedControllerType[1].clear();
+                    const XrActionSuggestedBinding bindings[] = {
+                        {actions[0], path(runtime, "/user/hand/left/input/trigger/value")},
+                        {actions[0], path(runtime, "/user/hand/right/input/trigger/value")},
+                        {actions[1], path(runtime, "/user/hand/left/input/trigger/value")},
+                        {actions[1], path(runtime, "/user/hand/right/input/trigger/value")},
+                    };
+                    // Supply the equivalent accepted pre-attach suggestions so the actual rebinder runs on sync.
+                    runtime.m_suggestedBindings["/interaction_profiles/oculus/touch_controller"] =
+                        std::vector<XrActionSuggestedBinding>(std::begin(bindings), std::end(bindings));
+                    sync({{sets[0], XR_NULL_PATH}, {sets[1], XR_NULL_PATH}});
+                    check(0, left, true, "first rebind computes high-priority left from new sources");
+                    check(0, right, true, "first rebind computes high-priority right from new sources");
+                    check(1, left, false, "first rebind suppresses lower-priority duplicate source");
+                }
+                require(runtime.xrDestroySession(session()) == XR_SUCCESS, "Scope cleanup failed");
+            }
+        }
+
+        static void syncSetPaths() {
+            OpenXrRuntime runtime;
+            seed(runtime);
+            const auto left = path(runtime, "/user/hand/left");
+            const auto right = path(runtime, "/user/hand/right");
+            const XrActionSet sets[] = {
+                createSet(runtime, "left_set"), createSet(runtime, "right_set"), createSet(runtime, "empty_set")};
+            createAction(runtime, sets[0], XR_ACTION_TYPE_FLOAT_INPUT, left);
+            createAction(runtime, sets[1], XR_ACTION_TYPE_FLOAT_INPUT, right);
+            XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+            attach.countActionSets = 3;
+            attach.actionSets = sets;
+            require(runtime.xrAttachSessionActionSets(session(), &attach) == XR_SUCCESS, "Per-set path attach failed");
+            for (const auto handle : {sets[0], sets[2]}) {
+                const XrActiveActionSet active{handle, right};
+                XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
+                sync.countActiveActionSets = 1;
+                sync.activeActionSets = &active;
+                expect(runtime.xrSyncActions(session(), &sync) == XR_ERROR_PATH_UNSUPPORTED,
+                       "set cannot inherit a declared path from another set");
+            }
+            require(runtime.xrDestroySession(session()) == XR_SUCCESS, "Per-set path cleanup failed");
         }
 
         static void pinchVelocity(const wchar_t* backendDirectory) {
@@ -1186,7 +1410,12 @@ namespace virtualdesktop_openxr {
                 events(false);
             else if (mode == L"poll-lock")
                 pollLock();
-            else if (mode == L"sync-validation" || mode == L"pinch-velocity") {
+            else if (mode == L"sync-set-paths")
+                syncSetPaths();
+            else if (mode == L"sync-scopes") {
+                require(argc == 3, "sync-scopes requires the explicit OVRNull directory");
+                syncScopes(argv[2]);
+            } else if (mode == L"sync-validation" || mode == L"pinch-velocity") {
                 require(argc == 3, "sync-validation and pinch-velocity require the explicit OVRNull directory");
                 if (mode == L"sync-validation")
                     syncValidation(argv[2]);
