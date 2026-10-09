@@ -848,6 +848,8 @@ namespace virtualdesktop_openxr {
         std::thread m_asyncSubmissionThread;
         std::mutex m_asyncSubmissionMutex;
         std::condition_variable m_asyncSubmissionCondVar;
+        // Producer scratch is protected by the frame lock; publication swaps ownership with the worker.
+        std::vector<ovrLayer_Union> m_layersForFrame;
         std::vector<ovrLayer_Union> m_layersForAsyncSubmission;
         std::chrono::high_resolution_clock::time_point m_lastWaitToBeginFrameTime{};
 
