@@ -74,7 +74,7 @@ namespace virtualdesktop_openxr {
                 runtime.m_actions.insert(reinterpret_cast<XrAction>(&action));
             }
             // A was active at the previous sync; the next sync selects B after focus is lost.
-            runtime.m_activeActionSets.insert(reinterpret_cast<XrActionSet>(&sets[0]));
+            runtime.m_activeActionSets.push_back(reinterpret_cast<XrActionSet>(&sets[0]));
             const XrActiveActionSet active{reinterpret_cast<XrActionSet>(&sets[1]), XR_NULL_PATH};
             XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
             sync.countActiveActionSets = 1;
@@ -133,7 +133,7 @@ namespace virtualdesktop_openxr {
             set.priority = set.effectivePriority = 0;
             const auto setHandle = reinterpret_cast<XrActionSet>(&set);
             runtime.m_attachedActionSets.insert(setHandle);
-            runtime.m_activeActionSets.insert(setHandle);
+            runtime.m_activeActionSets.push_back(setHandle);
             OpenXrRuntime::Action action{};
             action.type = XR_ACTION_TYPE_POSE_INPUT;
             action.actionSet = setHandle;

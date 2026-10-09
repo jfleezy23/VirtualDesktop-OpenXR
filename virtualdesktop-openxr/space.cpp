@@ -677,7 +677,9 @@ namespace virtualdesktop_openxr {
             const ActionSet& xrActionSet = *(ActionSet*)xrAction.actionSet;
 
             const std::string& subActionPath = getXrPath(xrSpace.subActionPath);
-            const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
+            const bool isActionSetActive =
+                (std::find(m_activeActionSets.begin(), m_activeActionSets.end(), xrAction.actionSet) !=
+                 m_activeActionSets.end());
             for (const auto& source : xrAction.actionSources) {
                 if (!startsWith(source.first, subActionPath) || !isActionSourceActive(xrActionSet, source.first)) {
                     continue;
