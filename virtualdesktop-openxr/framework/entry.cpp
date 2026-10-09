@@ -139,9 +139,8 @@ XrResult __declspec(dllexport) XRAPI_CALL xrNegotiateLoaderRuntimeInterface(cons
         runtimeRequest->structType != XR_LOADER_INTERFACE_STRUCT_RUNTIME_REQUEST ||
         runtimeRequest->structVersion != XR_RUNTIME_INFO_STRUCT_VERSION ||
         runtimeRequest->structSize != sizeof(XrNegotiateRuntimeRequest) ||
-        loaderInfo->minInterfaceVersion > XR_CURRENT_LOADER_API_LAYER_VERSION ||
-        loaderInfo->maxInterfaceVersion < XR_CURRENT_LOADER_API_LAYER_VERSION ||
-        loaderInfo->maxInterfaceVersion > XR_CURRENT_LOADER_API_LAYER_VERSION ||
+        loaderInfo->minInterfaceVersion > XR_CURRENT_LOADER_RUNTIME_VERSION ||
+        loaderInfo->maxInterfaceVersion < XR_CURRENT_LOADER_RUNTIME_VERSION ||
         loaderInfo->maxApiVersion < XR_CURRENT_API_VERSION || loaderInfo->minApiVersion > XR_CURRENT_API_VERSION) {
         Log("xrNegotiateLoaderRuntimeInterface validation failed\n");
         return XR_ERROR_INITIALIZATION_FAILED;
@@ -149,7 +148,7 @@ XrResult __declspec(dllexport) XRAPI_CALL xrNegotiateLoaderRuntimeInterface(cons
 
     // This is it! Tell the loader to use our API implementation.
     runtimeRequest->getInstanceProcAddr = xrGetInstanceProcAddr;
-    runtimeRequest->runtimeInterfaceVersion = XR_CURRENT_LOADER_API_LAYER_VERSION;
+    runtimeRequest->runtimeInterfaceVersion = XR_CURRENT_LOADER_RUNTIME_VERSION;
     runtimeRequest->runtimeApiVersion = XR_CURRENT_API_VERSION;
 
     TraceLoggingWriteStop(local, "xrNegotiateLoaderRuntimeInterface");

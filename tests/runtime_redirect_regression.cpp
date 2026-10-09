@@ -50,8 +50,10 @@ int wmain(int argc, wchar_t** argv) {
     HMODULE runtime{};
     bool attached = false;
     try {
-        if (argc != 4)
-            throw std::runtime_error("Usage: <actual-runtime.dll> <test-target.dll> failure|success");
+        if (argc != 4 && argc != 5)
+            throw std::runtime_error("Usage: <actual-runtime.dll> <test-target.dll> failure|success [wide]");
+        if (argc == 5 && std::wstring(argv[4]) != L"wide")
+            throw std::runtime_error("Unknown interface range option");
         const bool success = std::wstring(argv[3]) == L"success";
         if (!success && std::wstring(argv[3]) != L"failure")
             throw std::runtime_error("Unknown mode");
@@ -71,7 +73,7 @@ int wmain(int argc, wchar_t** argv) {
                                      XR_LOADER_INFO_STRUCT_VERSION,
                                      sizeof(XrNegotiateLoaderInfo),
                                      1,
-                                     1,
+                                     argc == 5 ? 2u : 1u,
                                      XR_MAKE_VERSION(1, 0, 0),
                                      XR_CURRENT_API_VERSION};
         XrNegotiateRuntimeRequest request{XR_LOADER_INTERFACE_STRUCT_RUNTIME_REQUEST,
@@ -88,6 +90,10 @@ int wmain(int argc, wchar_t** argv) {
         if (success) {
             if (result != XR_SUCCESS || !mapped || !request.getInstanceProcAddr)
                 throw std::runtime_error("Successful redirect must retain valid mapped dispatch code");
+            if (request.runtimeInterfaceVersion < loader.minInterfaceVersion ||
+                request.runtimeInterfaceVersion > loader.maxInterfaceVersion ||
+                request.runtimeApiVersion < loader.minApiVersion || request.runtimeApiVersion > loader.maxApiVersion)
+                throw std::runtime_error("Redirect returned incompatible negotiated versions");
             PFN_xrVoidFunction function{};
             if (request.getInstanceProcAddr(XR_NULL_HANDLE, "testUnimplementedFunction", &function) !=
                 XR_ERROR_FUNCTION_UNSUPPORTED)
