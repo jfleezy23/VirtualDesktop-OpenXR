@@ -679,7 +679,7 @@ namespace virtualdesktop_openxr {
             const std::string& subActionPath = getXrPath(xrSpace.subActionPath);
             const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
             for (const auto& source : xrAction.actionSources) {
-                if (!startsWith(source.first, subActionPath)) {
+                if (!startsWith(source.first, subActionPath) || !isActionSourceActive(xrActionSet, source.first)) {
                     continue;
                 }
 
@@ -687,14 +687,17 @@ namespace virtualdesktop_openxr {
                 const auto& value = source.second;
                 const bool isHighestPriority =
                     value.sourceIndex == ActionSourceIndex::Invalid ||
-                    m_actionSourcePriority[(size_t)value.sourceIndex] == xrActionSet.effectivePriority;
+                    m_actionSourcePriority[getActionSourcePriorityIndex(fullPath, value.sourceIndex)] ==
+                        xrActionSet.effectivePriority;
                 const bool isBound = isActionSetActive && isHighestPriority;
-                TraceLoggingWrite(g_traceProvider,
-                                  "xrLocateSpace",
-                                  TLArg(fullPath.c_str(), "ActionSourcePath"),
-                                  TLArg(m_actionSourcePriority[(size_t)value.sourceIndex], "ActionSourcePriority"),
-                                  TLArg(xrActionSet.effectivePriority, "ActionSetPriority"),
-                                  TLArg(isBound, "Bound"));
+                TraceLoggingWrite(
+                    g_traceProvider,
+                    "xrLocateSpace",
+                    TLArg(fullPath.c_str(), "ActionSourcePath"),
+                    TLArg(m_actionSourcePriority[getActionSourcePriorityIndex(fullPath, value.sourceIndex)],
+                          "ActionSourcePriority"),
+                    TLArg(xrActionSet.effectivePriority, "ActionSetPriority"),
+                    TLArg(isBound, "Bound"));
 
                 if (isBound) {
                     const bool isEyeTracker = isActionEyeTracker(fullPath);

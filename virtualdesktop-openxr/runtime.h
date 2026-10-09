@@ -471,6 +471,8 @@ namespace virtualdesktop_openxr {
             uint32_t effectivePriority;
 
             std::set<XrPath> subactionPaths;
+            // Only consulted while this set is active. Null means all declared subaction paths.
+            std::set<XrPath> activeSubactionPaths{XR_NULL_PATH};
 
             // A copy of the input state. This is to handle when xrSyncActions() does not update all actionsets at once.
             ovrInputState cachedInputState{};
@@ -553,6 +555,8 @@ namespace virtualdesktop_openxr {
         std::string getXrPath(XrPath path) const;
         XrPath stringToPath(const std::string& path, bool validate = false);
         int getActionSide(const std::string& fullPath, bool allowExtraPaths = false) const;
+        bool isActionSourceActive(const ActionSet& actionSet, const std::string& fullPath) const;
+        size_t getActionSourcePriorityIndex(const std::string& fullPath, ActionSourceIndex sourceIndex) const;
         bool isActionEyeTracker(const std::string& fullPath) const;
 
         // mappings.cpp
@@ -919,7 +923,7 @@ namespace virtualdesktop_openxr {
         uint64_t m_lastGpuFrameTimeUs{0};
         ovrInputState m_cachedInputState{};
         std::set<XrActionSet> m_activeActionSets;
-        uint32_t m_actionSourcePriority[(size_t)ActionSourceIndex::Count]{};
+        uint32_t m_actionSourcePriority[(xr::Side::Count + 1) * (size_t)ActionSourceIndex::Count]{};
         BodyTracking::BodyStateV2 m_cachedBodyState{};
         XrTime m_lastPredictedDisplayTime{0};
         XrTime m_lastRequestedViewDisplayTime{0};
