@@ -333,9 +333,17 @@ namespace virtualdesktop_openxr {
         };
 
         struct SwapchainSlice {
+            struct AlphaCorrection {
+                XrRect2Di viewport;
+                bool clearAlpha;
+                bool premultiplyAlpha;
+            };
             ovrTextureSwapChain ovrSwapchain{nullptr};
             std::vector<ComPtr<ID3D11Texture2D>> images;
             int lastCommittedIndex{-1};
+            // Copied pixels are corrected once per region, until the next raw copy/resolve.
+            bool hasCopyForPreprocessing{false};
+            std::vector<AlphaCorrection> alphaCorrections;
 
             // Resources for copy/resolve/pre-processing.
             std::vector<ComPtr<ID3D11ShaderResourceView>> srvs;

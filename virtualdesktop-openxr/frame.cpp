@@ -1031,7 +1031,8 @@ namespace virtualdesktop_openxr {
                                                  uint32_t slice,
                                                  XrCompositionLayerFlags compositionFlags,
                                                  XrRect2Di viewport) {
-        if (!xrSwapchain.dirty) {
+        const bool copiedImage = xrSwapchain.resolvedSlices[slice].hasCopyForPreprocessing;
+        if (!copiedImage && !xrSwapchain.dirty) {
             return;
         }
 
@@ -1064,11 +1065,60 @@ namespace virtualdesktop_openxr {
                                                                m_d3d11ContextState.ReleaseAndGetAddressOf());
             }
 
+            auto& corrections = xrSwapchain.resolvedSlices[slice].alphaCorrections;
+            // Emit the four nonoverlapping pieces outside an intersecting rectangle.
+            const auto subtractRectangle = [](XrRect2Di region, XrRect2Di removed, auto&& remaining) {
+                const int64_t left = std::max<int64_t>(region.offset.x, removed.offset.x);
+                const int64_t top = std::max<int64_t>(region.offset.y, removed.offset.y);
+                const int64_t right = std::min<int64_t>(int64_t(region.offset.x) + region.extent.width,
+                                                        int64_t(removed.offset.x) + removed.extent.width);
+                const int64_t bottom = std::min<int64_t>(int64_t(region.offset.y) + region.extent.height,
+                                                         int64_t(removed.offset.y) + removed.extent.height);
+                if (left >= right || top >= bottom) {
+                    return false;
+                }
+                const auto emit = [&](int64_t x, int64_t y, int64_t width, int64_t height) {
+                    if (width > 0 && height > 0) {
+                        remaining(XrRect2Di{{int32_t(x), int32_t(y)}, {int32_t(width), int32_t(height)}});
+                    }
+                };
+                emit(region.offset.x, region.offset.y, region.extent.width, top - region.offset.y);
+                emit(region.offset.x,
+                     bottom,
+                     region.extent.width,
+                     int64_t(region.offset.y) + region.extent.height - bottom);
+                emit(region.offset.x, top, left - region.offset.x, bottom - top);
+                emit(right, top, int64_t(region.offset.x) + region.extent.width - right, bottom - top);
+                return true;
+            };
+            if (copiedImage) {
+                // Different transforms invalidate only pixels they change. Preserve coverage elsewhere.
+                const size_t previousCount = corrections.size();
+                size_t retainedCount = 0;
+                for (size_t i = 0; i < previousCount; ++i) {
+                    const auto previous = corrections[i];
+                    const bool different =
+                        previous.clearAlpha != needClearAlpha || previous.premultiplyAlpha != needPremultiplyAlpha;
+                    if (different && subtractRectangle(previous.viewport, viewport, [&](XrRect2Di remaining) {
+                            corrections.push_back({remaining, previous.clearAlpha, previous.premultiplyAlpha});
+                        })) {
+                        continue;
+                    }
+                    corrections[retainedCount++] = previous;
+                }
+                const size_t totalCount = corrections.size();
+                for (size_t i = previousCount; i < totalCount; ++i) {
+                    corrections[retainedCount++] = corrections[i];
+                }
+                corrections.resize(retainedCount);
+                // Reserve before dispatch so publishing the completed region cannot allocate.
+                corrections.reserve(corrections.size() + 1);
+            }
             m_ovrSubmissionContext->CSSetShader(m_alphaCorrectShader.Get(), nullptr, 0);
-            {
+            auto correctRegion = [&](XrRect2Di region) {
                 AlphaBlendingCSConstants constants{};
-                constants.offset = viewport.offset;
-                constants.dimension = viewport.extent;
+                constants.offset = region.offset;
+                constants.dimension = region.extent;
                 constants.ignoreAlpha = needClearAlpha;
                 constants.isPremultipliedAlpha = !needPremultiplyAlpha;
                 constants.isSRGB = isSRGBFormat(xrSwapchain.dxgiFormatForSubmission);
@@ -1079,7 +1129,8 @@ namespace virtualdesktop_openxr {
                 memcpy(mappedResources.pData, &constants, sizeof(constants));
                 m_ovrSubmissionContext->Unmap(m_alphaCorrectConstants.Get(), 0);
                 m_ovrSubmissionContext->CSSetConstantBuffers(0, 1, m_alphaCorrectConstants.GetAddressOf());
-            }
+                m_ovrSubmissionContext->Dispatch((region.extent.width + 31) / 32, (region.extent.height + 31) / 32, 1);
+            };
 
             if ((int)xrSwapchain.resolvedSlices[slice].uavs.size() <= ovrDestIndex) {
                 xrSwapchain.resolvedSlices[slice].uavs.resize(ovrDestIndex + 1);
@@ -1098,7 +1149,33 @@ namespace virtualdesktop_openxr {
             m_ovrSubmissionContext->CSSetUnorderedAccessViews(
                 0, 1, xrSwapchain.resolvedSlices[slice].uavs[ovrDestIndex].GetAddressOf(), nullptr);
 
-            m_ovrSubmissionContext->Dispatch((viewport.extent.width + 31) / 32, (viewport.extent.height + 31) / 32, 1);
+            if (!copiedImage) {
+                correctRegion(viewport);
+            } else {
+                // Different eyes/layers may use disjoint or overlapping rectangles of one copied image.
+                // Subtract equivalent corrections before dispatching; alpha multiplication is not idempotent.
+                bool corrected = false;
+                auto correctUncovered = [&](auto&& self, XrRect2Di region, size_t next) -> void {
+                    for (; next < corrections.size(); ++next) {
+                        const auto& previous = corrections[next];
+                        if (previous.clearAlpha != needClearAlpha ||
+                            previous.premultiplyAlpha != needPremultiplyAlpha) {
+                            continue;
+                        }
+                        if (subtractRectangle(region, previous.viewport, [&](XrRect2Di remaining) {
+                                self(self, remaining, next + 1);
+                            })) {
+                            return;
+                        }
+                    }
+                    correctRegion(region);
+                    corrected = true;
+                };
+                correctUncovered(correctUncovered, viewport, 0);
+                if (corrected) {
+                    corrections.push_back({viewport, needClearAlpha, needPremultiplyAlpha});
+                }
+            }
 
             // Unbind all resources to avoid D3D validation errors.
             {

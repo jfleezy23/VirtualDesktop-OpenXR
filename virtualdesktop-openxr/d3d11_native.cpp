@@ -613,6 +613,8 @@ namespace virtualdesktop_openxr {
         }
 
         if (needCopy) {
+            xrSwapchain.resolvedSlices[slice].hasCopyForPreprocessing = true;
+            xrSwapchain.resolvedSlices[slice].alphaCorrections.clear();
             const bool isDepthBuffer =
                 (xrSwapchain.xrDesc.usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
             TraceLoggingWrite(g_traceProvider,
