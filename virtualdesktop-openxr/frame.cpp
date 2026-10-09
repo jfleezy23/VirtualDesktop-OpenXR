@@ -452,7 +452,8 @@ namespace virtualdesktop_openxr {
             }
 
             // Construct the list of layers.
-            std::vector<ovrLayer_Union> layersAllocator;
+            auto& layersAllocator = m_layersForFrame;
+            layersAllocator.clear();
             layersAllocator.reserve(frameEndInfo->layerCount + 1);
             for (uint32_t i = 0; i < frameEndInfo->layerCount; i++) {
                 if (!frameEndInfo->layers[i]) {
@@ -602,7 +603,7 @@ namespace virtualdesktop_openxr {
                                   TLArg(lastPrecompositionTime, "LastPrecompositionTimeUs"));
 
                 std::unique_lock lock(m_asyncSubmissionMutex);
-                m_layersForAsyncSubmission = layersAllocator;
+                m_layersForAsyncSubmission.swap(layersAllocator);
                 m_asyncNextFrameId = m_frameBegun;
                 m_asyncSubmissionReady = false;
 

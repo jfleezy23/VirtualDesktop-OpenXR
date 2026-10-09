@@ -30,6 +30,9 @@ namespace {
         std::mutex mutex;
         std::condition_variable changed;
         bool releaseWait{false};
+        bool gateEnd{false};
+        bool releaseEnd{false};
+        unsigned enteredEnd{0};
         unsigned waitCalls{0};
         unsigned beginCalls{0};
         unsigned faultCalls{0};
@@ -49,11 +52,25 @@ namespace {
         void release() {
             std::lock_guard lock(mutex);
             releaseWait = true;
+            releaseEnd = true;
             changed.notify_all();
         }
     };
 
     BackendState* backendState;
+    std::atomic<DWORD> allocationThread{};
+    std::atomic<size_t> payloadBytes{};
+    std::atomic<unsigned> payloadAllocations{};
+    using HeapAllocate = void*(NTAPI*)(HANDLE, ULONG, SIZE_T);
+    HeapAllocate originalHeapAllocate{};
+    void* NTAPI observeAllocation(HANDLE heap, ULONG flags, SIZE_T size) {
+        const auto bytes = payloadBytes.load(std::memory_order_relaxed);
+        if (bytes && GetCurrentThreadId() == allocationThread.load(std::memory_order_relaxed) && size >= bytes &&
+            size <= bytes + 64) {
+            payloadAllocations.fetch_add(1, std::memory_order_relaxed);
+        }
+        return originalHeapAllocate(heap, flags, size);
+    }
     decltype(&ovr_WaitToBeginFrame) originalWait;
     decltype(&ovr_BeginFrame) originalBegin;
     decltype(&ovr_EndFrame) originalEnd;
@@ -71,6 +88,40 @@ namespace {
     void checkDetour(LONG result) {
         require(result == NO_ERROR, "OVR export detour failed");
     }
+
+    class PayloadAllocationObserver {
+      public:
+        PayloadAllocationObserver() {
+            originalHeapAllocate =
+                reinterpret_cast<HeapAllocate>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlAllocateHeap"));
+            require(originalHeapAllocate != nullptr, "Heap observer export missing");
+            checkDetour(DetourTransactionBegin());
+            checkDetour(DetourUpdateThread(GetCurrentThread()));
+            checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalHeapAllocate), observeAllocation));
+            checkDetour(DetourTransactionCommit());
+            allocationThread.store(GetCurrentThreadId());
+            begin(752);
+            auto control = HeapAlloc(GetProcessHeap(), 0, 752);
+            end();
+            require(control && payloadAllocations.load() == 1, "Payload allocation observer positive control failed");
+            HeapFree(GetProcessHeap(), 0, control);
+        }
+        ~PayloadAllocationObserver() {
+            end();
+            if (DetourTransactionBegin() != NO_ERROR || DetourUpdateThread(GetCurrentThread()) != NO_ERROR ||
+                DetourDetach(reinterpret_cast<PVOID*>(&originalHeapAllocate), observeAllocation) != NO_ERROR ||
+                DetourTransactionCommit() != NO_ERROR) {
+                std::_Exit(2);
+            }
+        }
+        void begin(size_t bytes) {
+            payloadAllocations.store(0);
+            payloadBytes.store(bytes);
+        }
+        void end() {
+            payloadBytes.store(0);
+        }
+    };
 
     class ScopedProductionLog {
       public:
@@ -155,7 +206,13 @@ namespace {
                                        const ovrLayerHeader* const* layers,
                                        unsigned layerCount) {
         auto& state = *backendState;
-        std::lock_guard lock(state.mutex);
+        std::unique_lock lock(state.mutex);
+        ++state.enteredEnd;
+        // Synchronous measurements end at the runtime/backend boundary, excluding this spy's allocations.
+        if (GetCurrentThreadId() == allocationThread.load(std::memory_order_relaxed))
+            payloadBytes.store(0, std::memory_order_relaxed);
+        state.changed.notify_all();
+        state.changed.wait(lock, [&] { return !state.gateEnd || state.releaseEnd; });
         SubmittedFrame frame{frameId, layerCount, {}, scale ? scale->HmdSpaceToWorldScaleInMeters : 0.f};
         ULONG_PTR stackLow = 0, stackHigh = 0;
         GetCurrentThreadStackLimits(&stackLow, &stackHigh);
@@ -318,7 +375,7 @@ namespace virtualdesktop_openxr {
                     "zero-layer xrEndFrame must submit exactly one disabled layer with world scale 1");
         }
 
-        static void layerLists(const wchar_t* backendDirectory, bool async) {
+        static void layerLists(const wchar_t* backendDirectory, bool async, bool storage = false) {
             OpenXrRuntime runtime;
             BackendState state;
             BackendHooks hooks(backendDirectory, state);
@@ -329,6 +386,9 @@ namespace virtualdesktop_openxr {
             runtime.m_useAsyncSubmission = async;
             // Declared before the worker cleanup guard: even an assertion failure joins before log teardown.
             ScopedProductionLog logCapture;
+            std::unique_ptr<PayloadAllocationObserver> allocationObserver;
+            if (storage)
+                allocationObserver = std::make_unique<PayloadAllocationObserver>();
             log::ErrorLog("layer-list error-log capture control\n");
             OpenXrRuntime::Space space{};
             space.referenceType = XR_REFERENCE_SPACE_TYPE_VIEW;
@@ -355,7 +415,10 @@ namespace virtualdesktop_openxr {
             state.release();
             unsigned failures = 0;
             unsigned submitted = 0;
-            for (unsigned count : {0u, 1u, 4u, unsigned(ovrMaxLayerCount)}) {
+            const std::vector<unsigned> counts = storage
+                                                     ? std::vector<unsigned>{16, 16, 16, 16, 0, 1, 4, 16, 1, 0, 16, 4}
+                                                     : std::vector<unsigned>{0, 1, 4, unsigned(ovrMaxLayerCount)};
+            for (unsigned count : counts) {
                 if (async)
                     runtime.waitForAsyncSubmissionIdle();
                 log::Log("layer-list case count=%u\n", count);
@@ -375,8 +438,17 @@ namespace virtualdesktop_openxr {
                 auto info = emptyFrame();
                 info.layerCount = count;
                 info.layers = layers.data();
+                if (storage && submitted >= 3)
+                    allocationObserver->begin((count + 1) * sizeof(ovrLayer_Union));
                 require(runtime.xrEndFrame(reinterpret_cast<XrSession>(1), &info) == XR_SUCCESS,
                         "layer-list frame failed");
+                if (storage && submitted >= 3) {
+                    allocationObserver->end();
+                    const auto observed = payloadAllocations.load();
+                    std::cout << "storage async=" << async << " count=" << count << " payloadAllocations=" << observed
+                              << '\n';
+                    require(observed == 0, "Warmed frame-layer storage still allocates");
+                }
                 ++submitted;
                 require(state.waitFor([&] { return state.frames.size() == submitted; }),
                         "layer-list frame not submitted");
@@ -397,6 +469,30 @@ namespace virtualdesktop_openxr {
                           << " onStack=" << frame.pointerListOnStack << '\n';
                 if (!frame.pointerListOnStack)
                     ++failures;
+            }
+            runtime.m_frameWaited = runtime.m_frameBegun = submitted + 1;
+            if (storage) {
+                XrCompositionLayerQuad validQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+                validQuad.space = spaceHandle;
+                validQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                validQuad.subImage = {chainHandle, {{0, 0}, {1, 1}}, 0};
+                validQuad.pose = xr::math::Pose::Identity();
+                validQuad.size = {1.f, 1.f};
+                const XrCompositionLayerBaseHeader* invalid[] = {
+                    reinterpret_cast<const XrCompositionLayerBaseHeader*>(&validQuad), nullptr};
+                auto invalidInfo = emptyFrame();
+                invalidInfo.layerCount = 2;
+                invalidInfo.layers = invalid;
+                require(runtime.xrEndFrame(reinterpret_cast<XrSession>(1), &invalidInfo) == XR_ERROR_LAYER_INVALID,
+                        "Invalid layer was accepted");
+                auto validInfo = emptyFrame();
+                require(runtime.xrEndFrame(reinterpret_cast<XrSession>(1), &validInfo) == XR_SUCCESS,
+                        "Valid retry after partial layer construction failed");
+                ++submitted;
+                require(state.waitFor([&] { return state.frames.size() == submitted; }),
+                        "Valid retry was not submitted");
+                std::lock_guard lock(state.mutex);
+                verifyDisabledFrame(state.frames.back(), submitted - 1);
             }
             runtime.m_frameWaited = runtime.m_frameBegun = submitted + 1;
             auto overLimit = emptyFrame();
@@ -730,6 +826,107 @@ namespace virtualdesktop_openxr {
             std::cout << "PASS: event polling and exit request finish during persistent async backend wait\n";
         }
 
+        static void gatedEnd(const wchar_t* backendDirectory) {
+            OpenXrRuntime runtime;
+            BackendState state;
+            state.gateEnd = true;
+            BackendHooks hooks(backendDirectory, state);
+            seed(runtime);
+            runtime.m_isHeadless = false;
+            runtime.m_useOculusRuntime = true;
+            runtime.m_useMirrorWindow = false;
+            OpenXrRuntime::Space space{};
+            space.referenceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+            space.poseInSpace = xr::math::Pose::Identity();
+            const auto spaceHandle = reinterpret_cast<XrSpace>(&space);
+            runtime.m_spaces.insert(spaceHandle);
+            OpenXrRuntime::Swapchain chain{};
+            chain.xrDesc.width = chain.xrDesc.height = 64;
+            chain.xrDesc.arraySize = chain.xrDesc.faceCount = chain.xrDesc.mipCount = chain.xrDesc.sampleCount = 1;
+            chain.ovrDesc.Width = chain.ovrDesc.Height = 64;
+            chain.ovrSwapchainLength = 1;
+            chain.appSwapchain.ovrSwapchain = reinterpret_cast<ovrTextureSwapChain>(uintptr_t(0x5000));
+            chain.appSwapchain.images.resize(1);
+            chain.lastReleasedIndex = 0;
+            const auto chainHandle = reinterpret_cast<XrSwapchain>(&chain);
+            runtime.m_swapchains.insert(chainHandle);
+            std::thread producer;
+            std::atomic<bool> producerDone{false};
+            std::exception_ptr error;
+            auto cleanup = MakeScopeGuard([&] {
+                state.release();
+                if (producer.joinable())
+                    producer.join();
+                runtime.m_spaces.erase(spaceHandle);
+                runtime.m_swapchains.erase(chainHandle);
+                stop(runtime, state);
+            });
+            start(runtime);
+            {
+                std::lock_guard lock(state.mutex);
+                state.releaseWait = true;
+                state.changed.notify_all();
+            }
+            std::array<XrCompositionLayerQuad, 2> quads{};
+            std::array<const XrCompositionLayerBaseHeader*, 2> layers{};
+            for (unsigned i = 0; i < quads.size(); ++i) {
+                quads[i].type = XR_TYPE_COMPOSITION_LAYER_QUAD;
+                quads[i].space = spaceHandle;
+                quads[i].eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                quads[i].subImage = {chainHandle, {{i ? 23 : 11, 0}, {1, 1}}, 0};
+                quads[i].pose = xr::math::Pose::Identity();
+                quads[i].size = {1.f, 1.f};
+                layers[i] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quads[i]);
+            }
+            auto info = emptyFrame();
+            info.layerCount = 1;
+            info.layers = layers.data();
+            require(runtime.xrEndFrame(reinterpret_cast<XrSession>(1), &info) == XR_SUCCESS, "First gated End failed");
+            require(state.waitFor([&] { return state.enteredEnd == 1; }), "Worker did not enter gated backend End");
+            runtime.m_frameWaited = runtime.m_frameBegun = 2;
+            info.layers = layers.data() + 1;
+            producer = std::thread([&] {
+                try {
+                    require(runtime.xrEndFrame(reinterpret_cast<XrSession>(1), &info) == XR_SUCCESS,
+                            "Second gated End failed");
+                } catch (...) {
+                    error = std::current_exception();
+                }
+                producerDone.store(true);
+            });
+            bool entered = false;
+            for (unsigned attempt = 0; attempt < 2000; ++attempt) {
+                if (!runtime.m_swapchainsMutex.try_lock()) {
+                    entered = true;
+                    break;
+                }
+                runtime.m_swapchainsMutex.unlock();
+                std::this_thread::sleep_for(1ms);
+            }
+            require(entered && !producerDone.load(), "Second producer did not block inside xrEndFrame");
+            {
+                std::lock_guard lock(runtime.m_asyncSubmissionMutex);
+                require(!runtime.m_asyncSubmissionReady && runtime.m_asyncNextFrameId == 1 &&
+                            runtime.m_layersForAsyncSubmission.size() == 1 &&
+                            runtime.m_layersForAsyncSubmission[0].Quad.Viewport.Pos.x == 11,
+                        "Second producer overwrote the in-flight mailbox");
+            }
+            state.release();
+            producer.join();
+            if (error)
+                std::rethrow_exception(error);
+            require(state.waitFor([&] { return state.frames.size() == 2; }), "Gated frames did not reach backend");
+            {
+                std::lock_guard lock(state.mutex);
+                require(state.frames[0].id == 0 && state.frames[1].id == 1 &&
+                            state.frames[0].quadOrder == std::vector<int>{11} &&
+                            state.frames[1].quadOrder == std::vector<int>{23},
+                        "In-flight payload or consecutive IDs were corrupted");
+            }
+            std::cout
+                << "PASS: gated backend End retains first payload and blocks second producer until ownership returns\n";
+        }
+
         static void waitRetry(const wchar_t* backendDirectory) {
             OpenXrRuntime runtime;
             BackendState state;
@@ -779,6 +976,10 @@ int wmain(int argc, wchar_t** argv) {
         using virtualdesktop_openxr::RuntimeInputRegression;
         if (mode == L"layers-sync" || mode == L"layers-async")
             RuntimeInputRegression::layerLists(argv[2], mode == L"layers-async");
+        else if (mode == L"storage-sync" || mode == L"storage-async")
+            RuntimeInputRegression::layerLists(argv[2], mode == L"storage-async", true);
+        else if (mode == L"gated-end")
+            RuntimeInputRegression::gatedEnd(argv[2]);
         else if (mode == L"startup")
             RuntimeInputRegression::startup(argv[2]);
         else if (mode == L"error-wait")

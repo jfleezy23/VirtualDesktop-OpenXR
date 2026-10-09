@@ -264,6 +264,10 @@ namespace virtualdesktop_openxr {
             m_needStartAsyncSubmissionThread = true;
         }
 
+        // The worker is joined before releasing either retained frame payload.
+        m_layersForFrame.clear();
+        m_layersForAsyncSubmission.clear();
+
         // Shutdown the body state watcher.
         if (m_bodyStateWatcherThread.joinable()) {
             m_terminateBodyStateThread = true;
