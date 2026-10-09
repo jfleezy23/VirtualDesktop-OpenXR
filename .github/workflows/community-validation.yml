@@ -150,11 +150,26 @@ jobs:
         run: |
           $source = (Resolve-Path 'virtualdesktop-openxr').Path
           $objects = (Resolve-Path 'bin/community/build/x64/ReleaseBundle/obj').Path
-          foreach ($fixture in @('vr_input_regression.cpp', 'vr_input_watcher_regression.cpp', 'nonnr_input_regression.cpp', 'nonnr_gpu_timer_regression.cpp')) {
+          foreach ($fixture in @('vr_input_regression.cpp', 'vr_input_watcher_regression.cpp', 'nonnr_input_regression.cpp', 'nonnr_gpu_timer_regression.cpp', 'nonnr_async_regression.cpp', 'nonnr_copy_preprocess_regression.cpp')) {
             & tests/vr_input_build.cmd -SourceDirectory $source -RuntimeObjectDirectory $objects -TestSource $fixture
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           & tests/build-runtime-redirect-regression.cmd
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Build the repository's isolated backend for CPU submission/ownership regressions.
+          $backendRoot = Join-Path (Get-Location) 'bin/community/cpu-backend'
+          $backendObjects = Join-Path $backendRoot 'obj'
+          New-Item -ItemType Directory -Force -Path $backendObjects | Out-Null
+          $solutionProperty = (Get-Location).Path.Replace('\', '/') + '/'
+          $backendProperty = $backendRoot.Replace('\', '/') + '/'
+          $backendObjectsProperty = $backendObjects.Replace('\', '/') + '/'
+          $backendArguments = @(
+            'OVRNull/OVRNull.vcxproj', '/t:Rebuild', '/m', '/nologo', '/v:minimal',
+            '/p:Configuration=Release', '/p:Platform=x64', "/p:SolutionDir=$solutionProperty",
+            "/p:OutDir=$backendProperty", "/p:IntDir=$backendObjectsProperty",
+            '/p:PreBuildEventUseInBuild=false', '/p:PostBuildEventUseInBuild=false'
+          )
+          & MSBuild.exe @backendArguments
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           function Invoke-Regression([string]$executable, [string[]]$arguments, [string]$name) {
             $stdout = Join-Path (Get-Location) "bin/community/$name.stdout.log"
@@ -187,6 +202,9 @@ jobs:
           Invoke-Regression 'bin/vr-input-tests/vr_input_regression.exe' @() 'input'
           Invoke-Regression 'bin/vr-input-tests/vr_input_watcher_regression.exe' @() 'watcher'
           Invoke-Regression 'bin/vr-input-tests/nonnr_gpu_timer_regression.exe' @('contract') 'nonnr-gpu-timer'
+          foreach ($mode in @('startup', 'error-wait', 'error-begin', 'error-end', 'shutdown-not-initialized', 'control-during-wait', 'wait-retry', 'layers-sync', 'layers-async', 'storage-sync', 'storage-async', 'gated-end')) {
+            Invoke-Regression 'bin/vr-input-tests/nonnr_async_regression.exe' @($mode, $backendRoot) "nonnr-async-$mode"
+          }
           foreach ($mode in @('cpu', 'query-cache', 'action-pose', 'sync-set-paths')) {
             Invoke-Regression 'bin/vr-input-tests/nonnr_input_regression.exe' @($mode) "nonnr-input-$mode"
           }
