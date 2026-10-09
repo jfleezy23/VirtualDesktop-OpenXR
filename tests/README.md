@@ -53,3 +53,25 @@ resource recovery. The depth suite verifies all four depth formats, offset and
 scaled unequal eye viewports, untouched borders, per-layer cache isolation and
 real swapchain cleanup. These fixtures do not establish every crop/gamma
 combination or headset latency or appearance.
+
+## Upstream contract regressions
+
+`build-runtime-redirect-regression.cmd` also builds `runtime_negotiation_regression.exe`. Pass the absolute candidate DLL
+path to run its 23-case interface/API range and malformed-structure matrix. It suppresses redirect reads inside the test
+process, verifies returned dispatch code belongs to that DLL, and never creates a session or writes the registry.
+Run the existing redirect success/failure controls separately to validate forwarding and dispatch lifetime.
+Append `wide` to either redirect command to test forwarding with the loader interface range `[1,2]`.
+
+Build `nonnr_input_regression.cpp` with `vr_input_build.cmd` and a fresh matching x64 ReleaseBundle object directory.
+`sync-set-paths` is CPU-only and checks that one action set cannot inherit another set's declared paths. `sync-scopes` and
+`sync-validation` require the explicit OVRNull backend directory as the second argument. They call the real runtime sync,
+state-query and space methods with an isolated input provider. Scope coverage includes all input types, aggregate values,
+excluded poses/velocities, per-hand priorities, rebinding, wildcard/union entries, unique generations and failed validation.
+
+Build `nonnr_d3d12_flush_regression.cpp` through the same helper on a D3D12-capable GPU. Run separate bounded processes for
+`success`, `blocked`, `signal`, `event`, `wait`, `noqueue` and `nofence`. It uses real queue/fence resources with injected API
+failures and validates retained resources, retryable destruction, and completion before retirement. It does not require a
+headset or exercise NR; a failed drain does not imply that gameplay can resume after partially started session teardown.
+
+See [khronos_README.md](khronos_README.md) for official stereo, pacing, swapchain and input contract checks. Keep native
+headset evidence separate from private-backend GPU tests and auto-skipped visual prompts.
