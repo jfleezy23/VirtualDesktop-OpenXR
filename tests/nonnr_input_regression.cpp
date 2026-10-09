@@ -15,10 +15,52 @@ namespace {
     std::optional<float> velocityAngularOverride;
     std::optional<float> velocityLinearOverride;
     unsigned inputStateCalls = 0;
+    thread_local bool countHeapAllocations = false;
+    thread_local size_t heapAllocations = 0;
+    using AllocateHeap = void*(NTAPI*)(HANDLE, ULONG, SIZE_T);
+    AllocateHeap originalAllocateHeap = nullptr;
+    void* NTAPI countAllocation(HANDLE heap, ULONG flags, SIZE_T bytes) {
+        if (countHeapAllocations)
+            ++heapAllocations;
+        return originalAllocateHeap(heap, flags, bytes);
+    }
     void require(bool condition, const char* message) {
         if (!condition)
             throw std::runtime_error(message);
     }
+
+    struct AllocationObserver {
+        bool hookAttached = false;
+        AllocationObserver() {
+            originalAllocateHeap =
+                reinterpret_cast<AllocateHeap>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlAllocateHeap"));
+            require(originalAllocateHeap != nullptr, "Allocation observer export missing");
+            require(DetourTransactionBegin() == NO_ERROR, "Allocation detour begin failed");
+            const auto updated = DetourUpdateThread(GetCurrentThread());
+            const auto attached = DetourAttach(reinterpret_cast<PVOID*>(&originalAllocateHeap), countAllocation);
+            if (updated || attached) {
+                DetourTransactionAbort();
+                throw std::runtime_error("Allocation detour attach failed");
+            }
+            require(DetourTransactionCommit() == NO_ERROR, "Allocation detour commit failed");
+            hookAttached = true;
+        }
+        void detach() {
+            countHeapAllocations = false;
+            if (!hookAttached)
+                return;
+            const auto begun = DetourTransactionBegin();
+            const auto updated = DetourUpdateThread(GetCurrentThread());
+            const auto detached = DetourDetach(reinterpret_cast<PVOID*>(&originalAllocateHeap), countAllocation);
+            const auto committed = DetourTransactionCommit();
+            if (begun || updated || detached || committed)
+                std::terminate();
+            hookAttached = false;
+        }
+        ~AllocationObserver() {
+            detach();
+        }
+    };
 
     // Replace only the external pose/origin provider. xrLocateSpace and all runtime math remain real.
     ovrResult OVR_CDECL
@@ -261,7 +303,7 @@ namespace virtualdesktop_openxr {
             auto& set = *reinterpret_cast<OpenXrRuntime::ActionSet*>(setHandle);
             auto& action = *reinterpret_cast<OpenXrRuntime::Action*>(actionHandle);
             runtime.m_attachedActionSets.insert(setHandle);
-            runtime.m_activeActionSets.insert(setHandle);
+            runtime.m_activeActionSets.insert(runtime.m_activeActionSets.end(), setHandle);
             runtime.m_isControllerActive[0] = true;
             runtime.m_isControllerActive[1] = true;
             runtime.m_actionSourcePriority[0] = set.effectivePriority;
@@ -470,7 +512,7 @@ namespace virtualdesktop_openxr {
                 auto& set = *reinterpret_cast<OpenXrRuntime::ActionSet*>(setHandle);
                 auto& action = *reinterpret_cast<OpenXrRuntime::Action*>(actionHandle);
                 runtime.m_attachedActionSets.insert(setHandle);
-                runtime.m_activeActionSets.insert(setHandle);
+                runtime.m_activeActionSets.insert(runtime.m_activeActionSets.end(), setHandle);
                 runtime.m_isControllerActive[0] = runtime.m_isControllerActive[1] = true;
                 runtime.m_actionSourcePriority[0] = set.effectivePriority;
                 set.generation = 1;
@@ -745,7 +787,7 @@ namespace virtualdesktop_openxr {
             };
             for (const auto& item : cases) {
                 runtime.m_activeActionSets.clear();
-                runtime.m_activeActionSets.insert(sets[0]);
+                runtime.m_activeActionSets.insert(runtime.m_activeActionSets.end(), sets[0]);
                 const uint32_t priorities[] = {3, 7, 11};
                 const uint32_t effective[] = {31, 79, 11};
                 const uint64_t generations[] = {5, 7, 0};
@@ -995,6 +1037,165 @@ namespace virtualdesktop_openxr {
             }
         }
 
+        static void timeSync(OpenXrRuntime& runtime, XrActionsSyncInfo& sync, const char* label) {
+            std::array<double, 3000> durations{};
+            for (auto& duration : durations) {
+                const auto started = std::chrono::steady_clock::now();
+                const auto result = runtime.xrSyncActions(session(), &sync);
+                duration =
+                    std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started).count();
+                require(result == XR_SUCCESS, "Uninstrumented sync failed");
+            }
+            std::sort(durations.begin(), durations.end());
+            std::cout << "MEASURE: uninstrumented " << label << " median_us=" << durations[durations.size() / 2]
+                      << " p95_us=" << durations[durations.size() * 95 / 100] << '\n';
+        }
+
+        static void syncAllocations(const wchar_t* backendDirectory, bool benchmark) {
+            OpenXrRuntime runtime;
+            seed(runtime);
+            PoseProvider poses(backendDirectory);
+            InputProvider inputs;
+            runtime.m_sessionState = XR_SESSION_STATE_FOCUSED;
+            runtime.m_cachedControllerType[0] = runtime.m_cachedControllerType[1] = "touch_controller";
+            const auto left = path(runtime, "/user/hand/left");
+            const auto right = path(runtime, "/user/hand/right");
+            const XrActionSet sets[] = {createSet(runtime, "first"), createSet(runtime, "second")};
+            for (const auto set : sets)
+                createAction(runtime, set, XR_ACTION_TYPE_FLOAT_INPUT, left, right);
+            XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+            attach.countActionSets = 2;
+            attach.actionSets = sets;
+            require(runtime.xrAttachSessionActionSets(session(), &attach) == XR_SUCCESS, "Allocation attach failed");
+            const XrActiveActionSet requests[][4] = {
+                {{sets[0], left}, {sets[0], right}, {sets[1], right}, {sets[1], right}},
+                {{sets[1], XR_NULL_PATH}, {sets[0], left}, {sets[0], XR_NULL_PATH}, {sets[1], left}},
+                {{sets[0], right}, {sets[0], right}, {sets[0], right}, {sets[0], right}}};
+            XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
+            sync.countActiveActionSets = 4;
+            sync.activeActionSets = requests[0];
+            require(runtime.xrSyncActions(session(), &sync) == XR_SUCCESS, "Allocation warmup failed");
+            AllocationObserver observer;
+            heapAllocations = 0;
+            countHeapAllocations = true;
+            // The hook must observe the same thread's real allocations, rather than silently returning zero.
+            auto* control = HeapAlloc(GetProcessHeap(), 0, 256);
+            countHeapAllocations = false;
+            require(control != nullptr, "Allocation positive control failed");
+            HeapFree(GetProcessHeap(), 0, control);
+            expect(heapAllocations > 0, "heap allocation observer positive control");
+            constexpr unsigned iterations = 3000;
+            std::array<double, iterations> durations{};
+            heapAllocations = 0;
+            bool succeeded = true;
+            const auto oldGeneration = reinterpret_cast<OpenXrRuntime::ActionSet*>(sets[0])->generation;
+            for (unsigned i = 0; i < iterations; ++i) {
+                sync.activeActionSets = requests[i % std::size(requests)];
+                countHeapAllocations = true;
+                const auto started = std::chrono::steady_clock::now();
+                const auto result = runtime.xrSyncActions(session(), &sync);
+                const auto elapsed = std::chrono::steady_clock::now() - started;
+                countHeapAllocations = false;
+                durations[i] = std::chrono::duration<double, std::micro>(elapsed).count();
+                succeeded &= result == XR_SUCCESS;
+            }
+            const auto total = heapAllocations;
+            std::sort(durations.begin(), durations.end());
+            std::cout << "MEASURE: sync iterations=" << iterations << " allocations=" << total
+                      << " per_sync=" << double(total) / iterations << " median_us=" << durations[iterations / 2]
+                      << " p95_us=" << durations[iterations * 95 / 100] << '\n';
+            expect(succeeded, "changing duplicate and wildcard requests all succeed");
+            expect(reinterpret_cast<OpenXrRuntime::ActionSet*>(sets[0])->generation == oldGeneration + iterations,
+                   "duplicate requests increment each active set once");
+            if (!benchmark)
+                expect(total <= iterations * 4, "warmed input synchronization bounds allocations across scope changes");
+            const auto tracker = path(runtime, "/user/vive_tracker_htcx/role/waist");
+            auto& scope = *reinterpret_cast<OpenXrRuntime::ActionSet*>(sets[0]);
+            scope.activeSubactionPaths = {tracker};
+            const std::string valid = "/user/vive_tracker_htcx/role/waist/input/grip/pose";
+            const std::string sibling = "/user/vive_tracker_htcx/role/waist_extra/input/grip/pose";
+            heapAllocations = 0;
+            countHeapAllocations = true;
+            const bool matches = runtime.isActionSourceActive(scope, valid);
+            const bool rejectsSibling = !runtime.isActionSourceActive(scope, sibling);
+            countHeapAllocations = false;
+            std::cout << "MEASURE: scope allocations=" << heapAllocations << '\n';
+            expect(matches && rejectsSibling, "nonhand scope retains slash boundary matching");
+            if (!benchmark)
+                expect(heapAllocations == 0, "source scope matching does not copy or concatenate paths");
+            if (benchmark) {
+                observer.detach();
+                sync.activeActionSets = requests[0];
+                timeSync(runtime, sync, "sets=2");
+            }
+            require(runtime.xrDestroySession(session()) == XR_SUCCESS, "Allocation cleanup failed");
+        }
+
+        static void syncManySets(const wchar_t* backendDirectory) {
+            OpenXrRuntime runtime;
+            seed(runtime);
+            PoseProvider poses(backendDirectory);
+            InputProvider inputs;
+            runtime.m_sessionState = XR_SESSION_STATE_FOCUSED;
+            runtime.m_cachedControllerType[0] = runtime.m_cachedControllerType[1] = "touch_controller";
+            const auto left = path(runtime, "/user/hand/left");
+            const auto right = path(runtime, "/user/hand/right");
+            std::array<XrActionSet, 32> sets{};
+            std::array<XrActiveActionSet, 64> requests{};
+            for (unsigned i = 0; i < sets.size(); ++i) {
+                char name[32]{};
+                sprintf_s(name, "set_%u", i);
+                sets[i] = createSet(runtime, name);
+                const auto actionHandle = createAction(runtime, sets[i], XR_ACTION_TYPE_FLOAT_INPUT, left, right);
+                auto& set = *reinterpret_cast<OpenXrRuntime::ActionSet*>(sets[i]);
+                set.priority = set.effectivePriority = i;
+                auto& action = *reinterpret_cast<OpenXrRuntime::Action*>(actionHandle);
+                for (const auto side : {0, 1}) {
+                    OpenXrRuntime::ActionSource source{};
+                    source.realPath =
+                        side == 0 ? "/user/hand/left/input/trigger/value" : "/user/hand/right/input/trigger/value";
+                    source.sourceIndex = OpenXrRuntime::ActionSourceIndex::Trigger;
+                    source.floatValue = set.cachedInputState.IndexTrigger;
+                    action.actionSources[source.realPath] = source;
+                }
+                requests[i * 2] = {sets[i], left};
+                requests[i * 2 + 1] = {sets[i], right};
+            }
+            XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+            attach.countActionSets = static_cast<uint32_t>(sets.size());
+            attach.actionSets = sets.data();
+            require(runtime.xrAttachSessionActionSets(session(), &attach) == XR_SUCCESS, "Many-set attach failed");
+            XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
+            sync.countActiveActionSets = static_cast<uint32_t>(requests.size());
+            sync.activeActionSets = requests.data();
+            require(runtime.xrSyncActions(session(), &sync) == XR_SUCCESS, "Many-set warmup failed");
+            constexpr unsigned iterations = 3000;
+            std::array<double, iterations> durations{};
+            AllocationObserver observer;
+            heapAllocations = 0;
+            for (auto& duration : durations) {
+                countHeapAllocations = true;
+                const auto started = std::chrono::steady_clock::now();
+                const auto result = runtime.xrSyncActions(session(), &sync);
+                duration =
+                    std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started).count();
+                countHeapAllocations = false;
+                require(result == XR_SUCCESS, "Many-set sync failed");
+            }
+            const auto allocations = heapAllocations;
+            std::sort(durations.begin(), durations.end());
+            std::cout << "MEASURE: sets=32 iterations=" << iterations << " allocations=" << allocations
+                      << " per_sync=" << double(allocations) / iterations << " median_us=" << durations[iterations / 2]
+                      << " p95_us=" << durations[iterations * 95 / 100] << '\n';
+            expect(runtime.m_activeActionSets.size() == sets.size(), "many-set duplicate requests stay unique");
+            for (const auto set : sets)
+                require(reinterpret_cast<OpenXrRuntime::ActionSet*>(set)->generation == iterations + 1,
+                        "Many-set sync advanced a duplicate generation");
+            observer.detach();
+            timeSync(runtime, sync, "sets=32 mixed-priority bindings");
+            require(runtime.xrDestroySession(session()) == XR_SUCCESS, "Many-set cleanup failed");
+        }
+
         static void syncSetPaths() {
             OpenXrRuntime runtime;
             seed(runtime);
@@ -1027,7 +1228,7 @@ namespace virtualdesktop_openxr {
             const auto set = createSet(runtime);
             const auto action = createAction(runtime, set, XR_ACTION_TYPE_POSE_INPUT, left);
             runtime.m_attachedActionSets.insert(set);
-            runtime.m_activeActionSets.insert(set);
+            runtime.m_activeActionSets.insert(runtime.m_activeActionSets.end(), set);
             OpenXrRuntime::ActionSource source{};
             source.realPath = "/user/hand/left/input/aim/pose";
             reinterpret_cast<OpenXrRuntime::Action*>(action)->actionSources[source.realPath] = source;
@@ -1085,7 +1286,7 @@ namespace virtualdesktop_openxr {
             const auto set = createSet(runtime);
             const auto action = createAction(runtime, set, XR_ACTION_TYPE_POSE_INPUT, left);
             runtime.m_attachedActionSets.insert(set);
-            runtime.m_activeActionSets.insert(set);
+            runtime.m_activeActionSets.insert(runtime.m_activeActionSets.end(), set);
             OpenXrRuntime::ActionSource source{};
             source.realPath = "/user/hand/left/input/grip/pose";
             reinterpret_cast<OpenXrRuntime::Action*>(action)->actionSources[source.realPath] = source;
@@ -1266,7 +1467,7 @@ namespace virtualdesktop_openxr {
             const auto set = createSet(runtime);
             const auto action = createAction(runtime, set, XR_ACTION_TYPE_POSE_INPUT, left);
             runtime.m_attachedActionSets.insert(set);
-            runtime.m_activeActionSets.insert(set);
+            runtime.m_activeActionSets.insert(runtime.m_activeActionSets.end(), set);
             runtime.m_controllerGripPose[0] = runtime.m_controllerAimPose[0] =
                 xr::math::Pose::Translation({1.f, 0.f, 0.f});
             runtime.m_supportsHandTracking = false;
@@ -1412,7 +1613,13 @@ namespace virtualdesktop_openxr {
                 pollLock();
             else if (mode == L"sync-set-paths")
                 syncSetPaths();
-            else if (mode == L"sync-scopes") {
+            else if (mode == L"sync-many-benchmark") {
+                require(argc == 3, "many-set benchmark requires the explicit OVRNull directory");
+                syncManySets(argv[2]);
+            } else if (mode == L"sync-allocations" || mode == L"sync-benchmark") {
+                require(argc == 3, "allocation modes require the explicit OVRNull directory");
+                syncAllocations(argv[2], mode == L"sync-benchmark");
+            } else if (mode == L"sync-scopes") {
                 require(argc == 3, "sync-scopes requires the explicit OVRNull directory");
                 syncScopes(argv[2]);
             } else if (mode == L"sync-validation" || mode == L"pinch-velocity") {

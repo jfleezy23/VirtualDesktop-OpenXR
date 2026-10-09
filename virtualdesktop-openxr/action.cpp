@@ -499,7 +499,9 @@ namespace virtualdesktop_openxr {
                     xrActionSet.subactionPaths.insert(xrAction.subactionPaths.begin(), xrAction.subactionPaths.end());
                 }
             }
+            xrActionSet.activeSubactionPaths.reserve(xrActionSet.subactionPaths.size() + 1);
         }
+        m_activeActionSets.reserve(m_attachedActionSets.size());
 
         return XR_SUCCESS;
     }
@@ -558,11 +560,14 @@ namespace virtualdesktop_openxr {
     }
 
     bool OpenXrRuntime::isActionSourceActive(const ActionSet& actionSet, const std::string& fullPath) const {
-        if (actionSet.activeSubactionPaths.count(XR_NULL_PATH)) {
+        if (std::find(actionSet.activeSubactionPaths.begin(), actionSet.activeSubactionPaths.end(), XR_NULL_PATH) !=
+            actionSet.activeSubactionPaths.end()) {
             return true;
         }
         for (const auto path : actionSet.activeSubactionPaths) {
-            if (startsWith(fullPath, getXrPath(path) + "/")) {
+            const auto it = m_strings.find(path);
+            if (it != m_strings.end() && fullPath.size() > it->second.size() &&
+                fullPath.compare(0, it->second.size(), it->second) == 0 && fullPath[it->second.size()] == '/') {
                 return true;
             }
         }
@@ -624,7 +629,9 @@ namespace virtualdesktop_openxr {
         const std::string& subActionPath = getXrPath(getInfo->subactionPath);
         const int subActionSide =
             getInfo->subactionPath == XR_NULL_PATH ? xr::Side::Count : std::max(0, getActionSide(subActionPath));
-        const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
+        const bool isActionSetActive =
+            (std::find(m_activeActionSets.begin(), m_activeActionSets.end(), xrAction.actionSet) !=
+             m_activeActionSets.end());
         for (const auto& source : xrAction.actionSources) {
             if (!startsWith(source.first, subActionPath) || !isActionSourceActive(xrActionSet, source.first)) {
                 continue;
@@ -739,7 +746,9 @@ namespace virtualdesktop_openxr {
         const std::string& subActionPath = getXrPath(getInfo->subactionPath);
         const int subActionSide =
             getInfo->subactionPath == XR_NULL_PATH ? xr::Side::Count : std::max(0, getActionSide(subActionPath));
-        const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
+        const bool isActionSetActive =
+            (std::find(m_activeActionSets.begin(), m_activeActionSets.end(), xrAction.actionSet) !=
+             m_activeActionSets.end());
         for (const auto& source : xrAction.actionSources) {
             if (!startsWith(source.first, subActionPath) || !isActionSourceActive(xrActionSet, source.first)) {
                 continue;
@@ -859,7 +868,9 @@ namespace virtualdesktop_openxr {
         const std::string& subActionPath = getXrPath(getInfo->subactionPath);
         const int subActionSide =
             getInfo->subactionPath == XR_NULL_PATH ? xr::Side::Count : std::max(0, getActionSide(subActionPath));
-        const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
+        const bool isActionSetActive =
+            (std::find(m_activeActionSets.begin(), m_activeActionSets.end(), xrAction.actionSet) !=
+             m_activeActionSets.end());
         for (const auto& source : xrAction.actionSources) {
             if (!startsWith(source.first, subActionPath) || !isActionSourceActive(xrActionSet, source.first)) {
                 continue;
@@ -977,7 +988,9 @@ namespace virtualdesktop_openxr {
         }
 
         const std::string& subActionPath = getXrPath(getInfo->subactionPath);
-        const bool isActionSetActive = m_activeActionSets.count(xrAction.actionSet);
+        const bool isActionSetActive =
+            (std::find(m_activeActionSets.begin(), m_activeActionSets.end(), xrAction.actionSet) !=
+             m_activeActionSets.end());
         state->isActive = XR_FALSE;
         for (const auto& source : xrAction.actionSources) {
             if (!startsWith(source.first, subActionPath) || !isActionSourceActive(xrActionSet, source.first)) {
@@ -1064,9 +1077,7 @@ namespace virtualdesktop_openxr {
         // TODO: Try to reduce contention here.
         std::unique_lock lock(m_actionsAndSpacesMutex);
 
-        // Stage complete per-set scopes before publishing a successful activation request.
-        std::set<XrActionSet> activeActionSets;
-        std::map<XrActionSet, std::set<XrPath>> activeSubactionPaths;
+        // Validate the entire request before changing activation or per-set scopes.
         for (uint32_t i = 0; i < syncInfo->countActiveActionSets; i++) {
             const auto& activeSet = syncInfo->activeActionSets[i];
             if (!m_attachedActionSets.count(activeSet.actionSet)) {
@@ -1080,13 +1091,21 @@ namespace virtualdesktop_openxr {
                     return XR_ERROR_PATH_UNSUPPORTED;
                 }
             }
-            activeActionSets.insert(activeSet.actionSet);
-            activeSubactionPaths[activeSet.actionSet].insert(activeSet.subactionPath);
         }
 
-        m_activeActionSets.swap(activeActionSets);
-        for (auto& scope : activeSubactionPaths) {
-            ((ActionSet*)scope.first)->activeSubactionPaths.swap(scope.second);
+        // Attachment reserves the unique-set and unique-path bounds, so these buffers retain their allocations.
+        m_activeActionSets.clear();
+        for (uint32_t i = 0; i < syncInfo->countActiveActionSets; i++) {
+            const auto& activeSet = syncInfo->activeActionSets[i];
+            auto& paths = ((ActionSet*)activeSet.actionSet)->activeSubactionPaths;
+            if (std::find(m_activeActionSets.begin(), m_activeActionSets.end(), activeSet.actionSet) ==
+                m_activeActionSets.end()) {
+                m_activeActionSets.push_back(activeSet.actionSet);
+                paths.clear();
+            }
+            if (std::find(paths.begin(), paths.end(), activeSet.subactionPath) == paths.end()) {
+                paths.push_back(activeSet.subactionPath);
+            }
         }
         uint32_t maxPriority = UINT32_MAX;
         uint32_t minPriority = 0;
@@ -1095,7 +1114,7 @@ namespace virtualdesktop_openxr {
             if (syncInfo->activeActionSets[i].subactionPath == XR_NULL_PATH) {
                 doSide[xr::Side::Left] = doSide[xr::Side::Right] = true;
             } else {
-                const int side = getActionSide(getXrPath(syncInfo->activeActionSets[i].subactionPath));
+                const int side = getActionSide(m_strings.at(syncInfo->activeActionSets[i].subactionPath));
                 if (side == xr::Side::Left || side == xr::Side::Right) {
                     doSide[side] = true;
                 }
@@ -1106,12 +1125,13 @@ namespace virtualdesktop_openxr {
             maxPriority = std::min(maxPriority, xrActionSet.priority);
             minPriority = std::max(minPriority, xrActionSet.priority);
             xrActionSet.effectivePriority = xrActionSet.priority;
-            m_activeActionSets.insert(syncInfo->activeActionSets[i].actionSet);
         }
 
         if (has_XR_EXT_active_action_set_priority && activePriorities) {
             for (uint32_t i = 0; i < activePriorities->actionSetPriorityCount; i++) {
-                if (m_activeActionSets.count(activePriorities->actionSetPriorities[i].actionSet)) {
+                if ((std::find(m_activeActionSets.begin(),
+                               m_activeActionSets.end(),
+                               activePriorities->actionSetPriorities[i].actionSet) != m_activeActionSets.end())) {
                     ActionSet& xrActionSet = *(ActionSet*)activePriorities->actionSetPriorities[i].actionSet;
                     const auto priority = activePriorities->actionSetPriorities[i].priorityOverride;
 
@@ -1260,7 +1280,8 @@ namespace virtualdesktop_openxr {
                     for (const auto& source : xrAction.actionSources) {
                         const auto sourceIndex = source.second.sourceIndex;
                         if (sourceIndex != ActionSourceIndex::Invalid) {
-                            if (m_activeActionSets.count(xrAction.actionSet) &&
+                            if ((std::find(m_activeActionSets.begin(), m_activeActionSets.end(), xrAction.actionSet) !=
+                                 m_activeActionSets.end()) &&
                                 isActionSourceActive(*(ActionSet*)xrAction.actionSet, source.first)) {
                                 const ActionSet& xrActionSet = *(ActionSet*)xrAction.actionSet;
 

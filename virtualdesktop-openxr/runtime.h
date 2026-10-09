@@ -472,7 +472,7 @@ namespace virtualdesktop_openxr {
 
             std::set<XrPath> subactionPaths;
             // Only consulted while this set is active. Null means all declared subaction paths.
-            std::set<XrPath> activeSubactionPaths{XR_NULL_PATH};
+            std::vector<XrPath> activeSubactionPaths{XR_NULL_PATH};
 
             // A copy of the input state. This is to handle when xrSyncActions() does not update all actionsets at once.
             ovrInputState cachedInputState{};
@@ -922,7 +922,7 @@ namespace virtualdesktop_openxr {
         uint64_t m_lastCpuFrameTimeUs{0};
         uint64_t m_lastGpuFrameTimeUs{0};
         ovrInputState m_cachedInputState{};
-        std::set<XrActionSet> m_activeActionSets;
+        std::vector<XrActionSet> m_activeActionSets;
         uint32_t m_actionSourcePriority[(xr::Side::Count + 1) * (size_t)ActionSourceIndex::Count]{};
         BodyTracking::BodyStateV2 m_cachedBodyState{};
         XrTime m_lastPredictedDisplayTime{0};
