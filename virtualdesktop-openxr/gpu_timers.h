@@ -32,10 +32,15 @@ namespace virtualdesktop_openxr::utils {
                 UINT64 startime = 0, endtime = 0;
                 D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disData = {0};
 
-                if (m_context->GetData(m_timeStampStart.Get(), &startime, sizeof(UINT64), 0) == S_OK &&
-                    m_context->GetData(m_timeStampEnd.Get(), &endtime, sizeof(UINT64), 0) == S_OK &&
+                // Read completed samples without submitting unrelated work as a side effect of instrumentation.
+                if (m_context->GetData(
+                        m_timeStampStart.Get(), &startime, sizeof(UINT64), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
                     m_context->GetData(
-                        m_timeStampDis.Get(), &disData, sizeof(D3D11_QUERY_DATA_TIMESTAMP_DISJOINT), 0) == S_OK &&
+                        m_timeStampEnd.Get(), &endtime, sizeof(UINT64), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
+                    m_context->GetData(m_timeStampDis.Get(),
+                                       &disData,
+                                       sizeof(D3D11_QUERY_DATA_TIMESTAMP_DISJOINT),
+                                       D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
                     !disData.Disjoint) {
                     duration = static_cast<uint64_t>(((endtime - startime) * 1e6) / disData.Frequency);
                 }
