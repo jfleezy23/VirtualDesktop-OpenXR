@@ -207,6 +207,12 @@ namespace virtualdesktop_openxr {
             }
         }
 
+        if (!xrHandTracker.useHandJointsSimulation) {
+            OnceLog("Application uses optical hand tracking\n");
+        } else {
+            OnceLog("Application uses emulated hand joints\n");
+        }
+
         *handTracker = (XrHandTrackerEXT)&xrHandTracker;
 
         // Maintain a list of known trackers for validation.

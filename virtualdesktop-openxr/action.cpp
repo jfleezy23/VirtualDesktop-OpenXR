@@ -176,6 +176,10 @@ namespace virtualdesktop_openxr {
             }
         }
 
+        if (createInfo->priority) {
+            OnceLog("Application uses actionset priorities\n");
+        }
+
         // Create the internal struct.
         auto owner = std::make_unique<ActionSet>();
         ActionSet& xrActionSet = *owner;
@@ -382,6 +386,8 @@ namespace virtualdesktop_openxr {
         }
 
         const std::string& interactionProfile = getXrPath(suggestedBindings->interactionProfile);
+        Log("Application suggests bindings for profile: %s\n", interactionProfile.c_str());
+
         const bool isEyeTracker = interactionProfile == "/interaction_profiles/ext/eye_gaze_interaction";
         const bool isViveTracker = interactionProfile == "/interaction_profiles/htc/vive_tracker_htcx";
         if (isEyeTracker) {
