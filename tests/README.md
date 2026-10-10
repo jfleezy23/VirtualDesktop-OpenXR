@@ -21,7 +21,7 @@ backend tests sequentially, in individual bounded processes.
 | `nonnr_async_regression` | `startup`, `error-wait`, `error-begin`, `error-end`, `shutdown-not-initialized`, `control-during-wait`, `wait-retry`, `layers-sync`, `layers-async` | All modes |
 | `nonnr_buffer_regression` | `cpu`, `counts`, `strings`, `string-controls`, `visibility`, `all` | `visibility`, `all` |
 | `nonnr_compositor_regression` | `lifetime`, `bounds`, `gamma`, `array-alpha`, `missing-backend`, `nt-retry`, `fence-cleanup` | `lifetime` |
-| `nonnr_gl_regression` | `storage`, `cleanup`, `wgl`, `double-fault`, `memory-create`, `texture-create`, `semaphore-create`, `semaphore-import` | None |
+| `nonnr_gl_regression` | `storage`, `cleanup`, `wgl`, `initial-wgl`, `double-fault`, `memory-create`, `texture-create`, `semaphore-create`, `semaphore-import` | None |
 | `nonnr_depth_alignment_regression` | `d16`, `d24s8`, `d32`, `d32s8`, `all` | All modes; production shader pixels on WARP with intercepted external OVR allocation |
 | `nonnr_input_regression` | `cpu`, `controls`, `float`, `action-paths`, `action-pose`, `query-cache`, `action-set-lifetime`, `events`, `poll-lock`, `sync-validation`, `pinch-velocity`, `velocity`, `velocity-controls`, `velocity-offsets`, `velocity-invalid` | Action-set lifetime, sync validation, pinch and all velocity modes |
 | `nonnr_preprocess_cache_regression` | `reuse`, `shader-retry`, `buffer-retry`, `cleanup`, `partial-cleanup`, `no-work`, `all` | None; requires native D3D11 Device5/Context4 fence support |
@@ -96,21 +96,3 @@ timeout on all modes. Native sample progress is not proof of Virtual Desktop sch
 
 - `nonnr_async_regression`: readiness and two successive frame IDs, wait/begin/end errors, retry shutdown, event/exit progress during a blocked backend wait, and first-wait retry ownership. `gated-end` holds a successful backend End while another producer waits and checks intact consecutive payloads. `storage-sync` and `storage-async` warm both retained buffers, check zero payload-sized allocations for alternating layer counts, and reject a partial payload before a valid retry. The heap observer has a positive control and excludes backend-spy allocations. All modes require an explicit OVRNull directory.
 - `nonnr_copy_preprocess_regression`: real hardware D3D11 pixels through production copy, preprocessing and frame submission, with intercepted backend indexing/commit/End. Modes: `clear`, `premultiply`, `gamma`, `direct`, `blend`, `duplicate`, `disjoint`, `overlap`, `primary-noop`, `viewport-changing`, `flags-changing`, `rotating`, `fresh-release`, `pending`, `regions-stress`, `gamma-stress`, `correction-retry`, `mixed-disjoint`, and `mixed-overlap-coverage`. It checks every pixel, unchanged source data, copy counts, packed regions, equivalent correction coverage, preservation of unaffected coverage after a different transform, and retry after a partially corrected frame. Requires an explicit OVRNull directory. Simultaneous contradictory alpha interpretations of overlapping pixels remain an output-aliasing limitation; this suite does not establish support for them or native compositor latency.
-
-## Validation checkpoint: 2026-10-09
-
-Runtime code under test: `e7ed57a` on `experimental-nr` and `bfa50e7` on `stable`.
-
-| Check | Scope | Result |
-| --- | --- | --- |
-| Matched-object local regressions | Experimental build | 63 process cases passed. |
-| Matched-object local regressions | Stable build | 32 targeted process cases passed. |
-| Actual-DLL negotiation and redirection | Experimental, stable, and installed experimental DLLs | 23 negotiation assertions and four redirect cases passed per DLL. |
-| Native Khronos headset checks | Installed experimental build, Quest 3, D3D11 and D3D12, NR disabled | 28 assertions passed; array and wide layouts with/without depth were visually confirmed. |
-| Aircar gameplay smoke test | Installed experimental build | Maintainer-reported pass; no independent timing capture. |
-
-The native checks used CTS 1.1.63.0 with its conformance layer. An initial D3D12 visual run advanced too quickly to judge;
-it was repeated and visually confirmed. Diagnostic warnings were retained separately from assertion failures.
-Stable's shared fixes received local component tests; the native headset and Aircar checks exercised the experimental build.
-These selected results do not establish full OpenXR conformance, all-game compatibility, NR image quality, or a measured
-streaming latency improvement. Runtime changes received independent code review and targeted external review.

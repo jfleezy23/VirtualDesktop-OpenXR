@@ -2,9 +2,9 @@ name: Community validation
 
 on:
   push:
-    branches: [stable, experimental-nr]
+    branches: [main, stable, 'release/*']
   pull_request:
-    branches: [stable, experimental-nr]
+    branches: [main, stable, 'release/*']
   workflow_dispatch:
 
 permissions:
@@ -25,7 +25,6 @@ jobs:
     outputs:
       base: ${{ steps.base.outputs.sha }}
       platforms: ${{ steps.base.outputs.platforms }}
-      experimental: ${{ steps.base.outputs.experimental }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -38,12 +37,9 @@ jobs:
         id: base
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
-          TARGET_BRANCH: ${{ github.base_ref || github.ref_name }}
-          STABLE_BASELINE: 1a83fec8b5c565b14b06ffa8e1eb7e4768057573
-          NR_BASELINE: 925dc598c524cb48b37fa4b0a2bff471f75fc5c4
+          STABLE_BASELINE: 6da20fe478e331c05672243fd82a9a1500cd39f5
         run: |
-          # NR's vendor imports and architecture limits belong to its inherited upstream baseline.
-          $hygieneRef = if ($env:TARGET_BRANCH -eq 'experimental-nr') { $env:NR_BASELINE } else { $env:STABLE_BASELINE }
+          $hygieneRef = $env:STABLE_BASELINE
           $hygieneSha = git rev-parse --verify "$hygieneRef^{commit}"
           if ($LASTEXITCODE -ne 0) { throw 'The source hygiene baseline is unavailable.' }
           "hygiene_sha=$hygieneSha" >> $env:GITHUB_OUTPUT
@@ -51,13 +47,7 @@ jobs:
           $sha = git rev-parse --verify "$($env:BASE_REF)^{commit}"
           if ($LASTEXITCODE -ne 0) { throw 'The review baseline is unavailable.' }
           "sha=$sha" >> $env:GITHUB_OUTPUT
-          if ($env:TARGET_BRANCH -eq 'experimental-nr') {
-            'platforms=["x64"]' >> $env:GITHUB_OUTPUT
-            'experimental=true' >> $env:GITHUB_OUTPUT
-          } else {
-            'platforms=["Win32","x64"]' >> $env:GITHUB_OUTPUT
-            'experimental=false' >> $env:GITHUB_OUTPUT
-          }
+          'platforms=["Win32","x64"]' >> $env:GITHUB_OUTPUT
       - name: Install pinned formatter
         run: |
           python -m pip install clang-format==22.1.1
@@ -112,7 +102,7 @@ jobs:
           & scripts/Build-CommunityRuntime.ps1 -Configuration $env:BUILD_CONFIGURATION -Platform $env:BUILD_PLATFORM
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Stage pinned Vulkan loader for CPU regressions
-        if: (needs.source-checks.outputs.experimental == 'true' || github.base_ref == 'stable' || github.ref_name == 'stable') && matrix.platform == 'x64' && matrix.configuration == 'ReleaseBundle'
+        if: matrix.platform == 'x64' && matrix.configuration == 'ReleaseBundle'
         run: |
           $systemLoader = Join-Path $env:SystemRoot 'System32/vulkan-1.dll'
           Write-Output "System32 Vulkan loader present before staging: $(Test-Path -LiteralPath $systemLoader)"
@@ -146,11 +136,11 @@ jobs:
             $archive.Dispose()
           }
       - name: CPU regressions on fresh matching runtime objects
-        if: (needs.source-checks.outputs.experimental == 'true' || github.base_ref == 'stable' || github.ref_name == 'stable') && matrix.platform == 'x64' && matrix.configuration == 'ReleaseBundle'
+        if: matrix.platform == 'x64' && matrix.configuration == 'ReleaseBundle'
         run: |
           $source = (Resolve-Path 'virtualdesktop-openxr').Path
           $objects = (Resolve-Path 'bin/community/build/x64/ReleaseBundle/obj').Path
-          foreach ($fixture in @('vr_input_regression.cpp', 'vr_input_watcher_regression.cpp', 'nonnr_input_regression.cpp', 'nonnr_gpu_timer_regression.cpp', 'nonnr_async_regression.cpp', 'nonnr_copy_preprocess_regression.cpp')) {
+          foreach ($fixture in @('vr_input_regression.cpp', 'vr_input_watcher_regression.cpp', 'nonnr_input_regression.cpp', 'nonnr_gpu_timer_regression.cpp', 'nonnr_async_regression.cpp', 'nonnr_copy_preprocess_regression.cpp', 'nonnr_gl_regression.cpp')) {
             & tests/vr_input_build.cmd -SourceDirectory $source -RuntimeObjectDirectory $objects -TestSource $fixture
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
@@ -202,6 +192,8 @@ jobs:
           Invoke-Regression 'bin/vr-input-tests/vr_input_regression.exe' @() 'input'
           Invoke-Regression 'bin/vr-input-tests/vr_input_watcher_regression.exe' @() 'watcher'
           Invoke-Regression 'bin/vr-input-tests/nonnr_gpu_timer_regression.exe' @('contract') 'nonnr-gpu-timer'
+          Invoke-Regression 'bin/vr-input-tests/nonnr_gl_regression.exe' @('initial-wgl') 'nonnr-gl-initial-wgl'
+          Invoke-Regression 'bin/vr-input-tests/nonnr_gl_regression.exe' @('double-fault') 'nonnr-gl-double-fault'
           foreach ($mode in @('startup', 'error-wait', 'error-begin', 'error-end', 'shutdown-not-initialized', 'control-during-wait', 'wait-retry', 'layers-sync', 'layers-async', 'storage-sync', 'storage-async', 'gated-end')) {
             Invoke-Regression 'bin/vr-input-tests/nonnr_async_regression.exe' @($mode, $backendRoot) "nonnr-async-$mode"
           }

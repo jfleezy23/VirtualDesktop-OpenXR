@@ -10,7 +10,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 
 
-STABLE_BASELINE = "1a83fec8b5c565b14b06ffa8e1eb7e4768057573"
+STABLE_BASELINE = "6da20fe478e331c05672243fd82a9a1500cd39f5"
 CPP_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
 ARTIFACT_SUFFIXES = {
     ".dll", ".exe", ".lib", ".pdb", ".obj", ".o", ".a", ".so", ".dylib",
