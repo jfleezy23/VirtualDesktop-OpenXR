@@ -339,6 +339,8 @@ namespace virtualdesktop_openxr {
                 bool premultiplyAlpha;
             };
             ovrTextureSwapChain ovrSwapchain{nullptr};
+            // Immutable dimensions of an owned precompositor output generation.
+            ovrSizei resolution{};
             std::vector<ComPtr<ID3D11Texture2D>> images;
             int lastCommittedIndex{-1};
             // Copied pixels are corrected once per region, until the next raw copy/resolve.

@@ -779,14 +779,7 @@ namespace virtualdesktop_openxr {
 
     void OpenXrRuntime::ensureSwapchainPrecompositorResources(Swapchain& xrSwapchain, const ovrSizei& resolution) {
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
-            ovrSizei currentResolution{};
-            if (xrSwapchain.stereoProjection[eye].ovrSwapchain) {
-                ovrTextureSwapChainDesc desc{};
-                CHECK_OVRCMD(
-                    ovr_GetTextureSwapChainDesc(m_ovrSession, xrSwapchain.stereoProjection[eye].ovrSwapchain, &desc));
-                currentResolution.w = desc.Width;
-                currentResolution.h = desc.Height;
-            }
+            const auto currentResolution = xrSwapchain.stereoProjection[eye].resolution;
 
             if (!xrSwapchain.stereoProjection[eye].ovrSwapchain || currentResolution.w != resolution.w ||
                 currentResolution.h != resolution.h) {
@@ -831,6 +824,10 @@ namespace virtualdesktop_openxr {
                         candidate.uavs.push_back(std::move(uav));
                     }
                 }
+                ovrTextureSwapChainDesc actualDesc{};
+                CHECK_OVRCMD(ovr_GetTextureSwapChainDesc(m_ovrSession, candidate.ovrSwapchain, &actualDesc));
+                candidate.resolution = {actualDesc.Width, actualDesc.Height};
+
                 if (xrSwapchain.stereoProjection[eye].ovrSwapchain) {
                     // Retire queued reads before replacing this generation of output resources.
                     flushSubmissionContext();

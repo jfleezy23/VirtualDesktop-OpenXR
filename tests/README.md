@@ -25,7 +25,7 @@ backend tests sequentially, in individual bounded processes.
 | `nonnr_depth_alignment_regression` | `d16`, `d24s8`, `d32`, `d32s8`, `all` | All modes; production shader pixels on WARP with intercepted external OVR allocation |
 | `nonnr_input_regression` | `cpu`, `controls`, `float`, `action-paths`, `action-pose`, `query-cache`, `action-set-lifetime`, `events`, `poll-lock`, `sync-validation`, `pinch-velocity`, `velocity`, `velocity-controls`, `velocity-offsets`, `velocity-invalid` | Action-set lifetime, sync validation, pinch and all velocity modes |
 | `nonnr_preprocess_cache_regression` | `reuse`, `shader-retry`, `buffer-retry`, `cleanup`, `partial-cleanup`, `no-work`, `all` | None; requires native D3D11 Device5/Context4 fence support |
-| `nonnr_resolution_regression` | `resize`, `reuse`, `texture`, `srv`, `uav`, `texture-right`, `srv-right`, `uav-right` | All modes; uses D3D11 WARP |
+| `nonnr_resolution_regression` | `resize`, `reuse`, `texture`, `srv`, `uav`, `texture-right`, `srv-right`, `uav-right`, `description`, `description-right` | All modes; uses D3D11 WARP |
 | `nonnr_swapchain_regression` | `alias`, `mip`, `ovr-length`, `ovr-create`, `ovr-replacement`, `mutable`, `stencil`, `retry`, `vk-retry`, `unused-rtvs`, `same-device`, `cross-device` | First five modes and `unused-rtvs`; sharing modes require native D3D11 hardware |
 
 The five `vr_input_*` suites cover action activation/session reset, callback
@@ -78,6 +78,8 @@ imports to verify completed queue work precedes allocator/list reset, failures r
 storage, and sampled-only imports avoid barriers. They do not test every sharing-handle type or command-list Close failure.
 
 The swapchain sharing modes count actual legacy shared-handle exports and verify returned texture/device identity.
+The resolution `reuse` mode checks stable output dimensions without warm bridge-descriptor calls; `description` and its
+`-right` variant reject candidate descriptors and verify the previous generation survives with successful retry pixels.
 
 See [khronos_README.md](khronos_README.md) for official stereo, pacing, swapchain and input contract checks. Keep native
 headset evidence separate from private-backend GPU tests and auto-skipped visual prompts.

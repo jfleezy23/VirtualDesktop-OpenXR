@@ -893,6 +893,7 @@ namespace virtualdesktop_openxr {
                 chain.dxgiFormatForSubmission = DXGI_FORMAT_R8G8B8A8_UNORM;
                 auto& old = chain.stereoProjection[0];
                 old.ovrSwapchain = token<ovrTextureSwapChain>(0x1000);
+                old.resolution = {8, 8};
                 old.images.push_back(image);
                 old.rtvs.push_back(rtv);
                 old.uavs.push_back(uav);
@@ -905,8 +906,9 @@ namespace virtualdesktop_openxr {
                 require(threw && ovrCreateCalls == 1 && !invalidOvrCalls,
                         "Precompositor replacement did not reach the injected OVR length failure");
                 const bool preserved = old.ovrSwapchain == token<ovrTextureSwapChain>(0x1000) &&
-                                       old.images.size() == 1 && old.images[0].Get() == image.Get() &&
-                                       old.rtvs.size() == 1 && old.rtvs[0].Get() == rtv.Get() && old.uavs.size() == 1 &&
+                                       old.resolution.w == 8 && old.resolution.h == 8 && old.images.size() == 1 &&
+                                       old.images[0].Get() == image.Get() && old.rtvs.size() == 1 &&
+                                       old.rtvs[0].Get() == rtv.Get() && old.uavs.size() == 1 &&
                                        old.uavs[0].Get() == uav.Get();
                 const bool candidateDestroyed =
                     destroyedChains.size() == 1 && destroyedChains[0] == token<ovrTextureSwapChain>(0x1100);

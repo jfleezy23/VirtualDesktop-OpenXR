@@ -22,7 +22,8 @@ namespace {
     };
     std::map<ovrTextureSwapChain, std::unique_ptr<OutputChain>> chains;
     unsigned commits;
-    enum class Failure { None, Texture, Srv, Uav };
+    unsigned descriptorCalls;
+    enum class Failure { None, Texture, Srv, Uav, Description };
     struct CreationState {
         ID3D11Device* device{};
         Failure failure{};
@@ -151,6 +152,9 @@ namespace {
             std::terminate();
     }
     ovrResult OVR_CDECL chainDesc(ovrSession, ovrTextureSwapChain handle, ovrTextureSwapChainDesc* output) {
+        ++descriptorCalls;
+        if (inject(Failure::Description, descriptorCalls))
+            return ovrError_InvalidParameter;
         const auto found = chains.find(handle);
         if (found == chains.end() || !output)
             return ovrError_InvalidParameter;
@@ -186,6 +190,7 @@ namespace {
             creation = {};
             creation.device = device;
             commits = 0;
+            descriptorCalls = 0;
             transact(true);
         }
         ~Hooks() {
@@ -326,6 +331,14 @@ namespace virtualdesktop_openxr {
                 runtime.upscaler(pointers, layer);
                 runtime.flushSubmissionContext();
                 for (unsigned eye = 0; eye < 2; ++eye) {
+                    const auto& output = input[0].stereoProjection[eye];
+                    D3D11_TEXTURE2D_DESC actual{};
+                    output.images[0]->GetDesc(&actual);
+                    require(output.resolution.w == int(actual.Width) && output.resolution.h == int(actual.Height),
+                            "Cached dimensions do not match the published output generation");
+                    const auto& backendDesc = chains.at(output.ovrSwapchain)->desc;
+                    require(output.resolution.w == backendDesc.Width && output.resolution.h == backendDesc.Height,
+                            "Cached dimensions do not match the accepted backend descriptor");
                     require(layer.ColorTexture[eye] == input[0].stereoProjection[eye].ovrSwapchain,
                             "Layer did not use its new output chain");
                     require(layer.Viewport[eye].Size.w == width * 2 && layer.Viewport[eye].Size.h == height * 2,
@@ -370,10 +383,12 @@ namespace virtualdesktop_openxr {
             Fixture fixture(directory);
             fixture.render(24, 28);
             auto retained = fixture.input[0].intermediate[eye];
+            const auto retainedOutput = fixture.input[0].stereoProjection[eye];
             creation.failure = failure;
             creation.failAt = (failure == Failure::Texture ? creation.textures
                                : failure == Failure::Srv   ? creation.srvs
-                                                           : creation.uavs) +
+                               : failure == Failure::Uav   ? creation.uavs
+                                                           : descriptorCalls) +
                               eye + 1;
             bool threw = false;
             try {
@@ -385,6 +400,14 @@ namespace virtualdesktop_openxr {
             const auto& failed = fixture.input[0].intermediate[eye];
             const bool preserved =
                 failed.image == retained.image && failed.srv == retained.srv && failed.uav == retained.uav;
+            if (failure == Failure::Description) {
+                const auto& output = fixture.input[0].stereoProjection[eye];
+                require(output.ovrSwapchain == retainedOutput.ovrSwapchain && output.images == retainedOutput.images &&
+                            output.uavs == retainedOutput.uavs && output.resolution.w == retainedOutput.resolution.w &&
+                            output.resolution.h == retainedOutput.resolution.h,
+                        "Descriptor failure replaced the previous output resources or dimensions");
+                require(chains.size() == 2, "Descriptor failure leaked its candidate output chain");
+            }
             std::cout << "failure eye=" << eye << " retained-complete-entry=" << preserved << '\n';
             fixture.render(40, 36);
             const bool recovered = fixture.complete(0, 80, 72) && fixture.complete(1, 80, 72);
@@ -414,7 +437,19 @@ namespace virtualdesktop_openxr {
             fixture.render(24, 28);
             const auto left = fixture.input[0].intermediate[0];
             const auto right = fixture.input[0].intermediate[1];
+            const auto leftOutput = fixture.input[0].stereoProjection[0];
+            const auto rightOutput = fixture.input[0].stereoProjection[1];
+            const auto descriptors = descriptorCalls;
+            require(descriptors == 2, "Output creation must query each accepted descriptor exactly once");
             fixture.render(24, 28);
+            require(descriptorCalls == descriptors, "Same-size rendering re-queried immutable output dimensions");
+            require(fixture.input[0].stereoProjection[0].ovrSwapchain == leftOutput.ovrSwapchain &&
+                        fixture.input[0].stereoProjection[0].images == leftOutput.images &&
+                        fixture.input[0].stereoProjection[0].uavs == leftOutput.uavs &&
+                        fixture.input[0].stereoProjection[1].ovrSwapchain == rightOutput.ovrSwapchain &&
+                        fixture.input[0].stereoProjection[1].images == rightOutput.images &&
+                        fixture.input[0].stereoProjection[1].uavs == rightOutput.uavs,
+                    "Same-size rendering replaced an output generation");
             require(fixture.input[0].intermediate[0].image == left.image &&
                         fixture.input[0].intermediate[0].srv == left.srv &&
                         fixture.input[0].intermediate[0].uav == left.uav &&
@@ -447,6 +482,8 @@ int wmain(int argc, wchar_t** argv) {
                 Regression::failure(argv[2], Failure::Srv, eye);
             else if (mode == L"uav" || mode == L"uav-right")
                 Regression::failure(argv[2], Failure::Uav, eye);
+            else if (mode == L"description" || mode == L"description-right")
+                Regression::failure(argv[2], Failure::Description, eye);
             else
                 throw std::runtime_error("Unknown mode");
         }
