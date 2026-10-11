@@ -1,0 +1,8 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemDefinitionGroup Condition="'$(PlatformToolset)' == 'v145'">
+    <ClCompile>
+      <!-- The pinned Windows SDK C++/WinRT header uses experimental coroutines under C++17. -->
+      <PreprocessorDefinitions>_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+</Project>
