@@ -145,8 +145,6 @@ namespace virtualdesktop_openxr {
         CHECK_HRCMD(m_ovrSubmissionFence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, fenceHandle.put()));
         CHECK_HRCMD(
             m_d3d11Device->OpenSharedFence(fenceHandle.get(), IID_PPV_ARGS(m_d3d11Fence.ReleaseAndGetAddressOf())));
-        *m_eventForSubmissionFence.put() = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
-        CHECK_MSG(m_eventForSubmissionFence.get(), "Failed to create submission event");
 
         // Frame timers.
         for (uint32_t i = 0; i < k_numGpuTimers; i++) {
@@ -352,7 +350,6 @@ namespace virtualdesktop_openxr {
         m_ovrSubmissionContextState.Reset();
         m_ovrSubmissionContext.Reset();
         m_ovrSubmissionDevice.Reset();
-        m_eventForSubmissionFence.reset();
     }
 
     // Submission can use released images before the application ever exports them.
@@ -886,7 +883,8 @@ namespace virtualdesktop_openxr {
             *eventHandle.put() = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
             CHECK_MSG(eventHandle.get(), "Failed to create flush event");
             CHECK_HRCMD(m_d3d11Fence->SetEventOnCompletion(m_fenceValue, eventHandle.get()));
-            WaitForSingleObject(eventHandle.get(), INFINITE);
+            CHECK_MSG(WaitForSingleObject(eventHandle.get(), INFINITE) == WAIT_OBJECT_0,
+                      "Failed to wait for D3D11 app flush completion");
             ResetEvent(eventHandle.get());
         }
     }
@@ -905,7 +903,8 @@ namespace virtualdesktop_openxr {
             CHECK_MSG(eventHandle.get(), "Failed to create flush event");
             CHECK_HRCMD(
                 m_ovrSubmissionCompletionFence->SetEventOnCompletion(m_submissionFenceValue, eventHandle.get()));
-            WaitForSingleObject(eventHandle.get(), INFINITE);
+            CHECK_MSG(WaitForSingleObject(eventHandle.get(), INFINITE) == WAIT_OBJECT_0,
+                      "Failed to wait for D3D11 submission flush completion");
             ResetEvent(eventHandle.get());
         }
     }
@@ -926,9 +925,10 @@ namespace virtualdesktop_openxr {
         if (!m_syncGpuWorkInEndFrame.load(std::memory_order_relaxed)) {
             CHECK_HRCMD(m_ovrSubmissionContext->Wait(m_ovrSubmissionFence.Get(), m_fenceValue));
         } else {
-            CHECK_HRCMD(m_ovrSubmissionFence->SetEventOnCompletion(m_fenceValue, m_eventForSubmissionFence.get()));
-            WaitForSingleObject(m_eventForSubmissionFence.get(), INFINITE);
-            ResetEvent(m_eventForSubmissionFence.get());
+            // A null event waits synchronously for this exact fence value without a separately reset Win32 event.
+            // D3D11 documents D3D12-equivalent null-event blocking despite the SDK's nonoptional HANDLE annotation.
+#pragma warning(suppress : 6387)
+            CHECK_HRCMD(m_ovrSubmissionFence->SetEventOnCompletion(m_fenceValue, nullptr));
         }
     }
 

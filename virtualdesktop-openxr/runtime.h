@@ -746,7 +746,6 @@ namespace virtualdesktop_openxr {
         // Submission work has its own timeline; application signals must not satisfy these waits.
         ComPtr<ID3D11Fence> m_ovrSubmissionCompletionFence;
         uint64_t m_submissionFenceValue{0};
-        wil::unique_handle m_eventForSubmissionFence;
         UINT m_gpuVendor{0};
         std::atomic<bool> m_syncGpuWorkInEndFrame{false};
         ComPtr<ID3D11SamplerState> m_linearClampSampler;

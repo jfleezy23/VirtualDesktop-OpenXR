@@ -77,6 +77,13 @@ Additional D3D12 modes `allocator`, `allocator-fail`, `allocator-wait` and `allo
 imports to verify completed queue work precedes allocator/list reset, failures remain retryable, cached imports reuse
 storage, and sampled-only imports avoid barriers. They do not test every sharing-handle type or command-list Close failure.
 
+Build `nonnr_d3d11_flush_regression.cpp` against the same fresh cohort. Run bounded native-hardware processes for `app`,
+`submission`, `app-wait`, `submission-wait`, `cpu`, `cpu-event`, `cpu-blocked`, `gpu`, `cross-cpu` and `cross-gpu`. Injected
+wait failures must retain cleanup resources; a real shared-fence gate verifies the optional CPU handoff blocks until
+producer completion. The default GPU branch must avoid CPU waits. The cross-device controls call the real D3D11 serializer
+with an opened shared fence.
+These controls do not measure headset latency or establish device-loss recovery.
+
 The swapchain sharing modes count actual legacy shared-handle exports and verify returned texture/device identity.
 The resolution `reuse` mode checks stable output dimensions without warm bridge-descriptor calls; `description` and its
 `-right` variant reject candidate descriptors and verify the previous generation survives with successful retry pixels.
