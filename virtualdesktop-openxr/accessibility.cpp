@@ -273,6 +273,10 @@ namespace {
                 ovrPoseStatef headPoseState{};
                 ovrTrackedDeviceType hmd = ovrTrackedDevice_HMD;
                 const auto result = ovr_GetDevicePoses(m_ovrSession, &hmd, 1, absTime, &headPoseState);
+                if (!OVR_UNQUALIFIED_SUCCESS(result)) {
+                    // An unavailable head cannot provide a tracked controller pose, even on qualified success.
+                    return false;
+                }
 
                 const auto headPose = ovrPoseToXrPose(headPoseState.ThePose);
 
@@ -580,7 +584,7 @@ namespace {
             // TODO: It'd be nice to properly detect and report certain parsing errors, instead of silently ignoring
             // values.
             if (const auto dominantHand = cJSON_GetObjectItemCaseSensitive(top, "dominant_hand")) {
-                m_dominantHand = std::min(1, dominantHand->valueint);
+                m_dominantHand = std::clamp(dominantHand->valueint, 0, 1);
             }
 
             if (const auto leftGripAsAim = cJSON_GetObjectItemCaseSensitive(top, "left_grip_as_aim")) {
