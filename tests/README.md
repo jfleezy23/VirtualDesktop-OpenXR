@@ -73,6 +73,10 @@ Build `nonnr_d3d12_flush_regression.cpp` through the same helper on a D3D12-capa
 failures and validates retained resources, retryable destruction, and completion before retirement. It does not require a
 headset or exercise NR; a failed drain does not imply that gameplay can resume after partially started session teardown.
 
+Additional D3D12 modes `allocator`, `allocator-fail`, `allocator-wait` and `allocator-sampled` use native shared-texture
+imports to verify completed queue work precedes allocator/list reset, failures remain retryable, cached imports reuse
+storage, and sampled-only imports avoid barriers. They do not test every sharing-handle type or command-list Close failure.
+
 The swapchain sharing modes count actual legacy shared-handle exports and verify returned texture/device identity.
 
 See [khronos_README.md](khronos_README.md) for official stereo, pacing, swapchain and input contract checks. Keep native
