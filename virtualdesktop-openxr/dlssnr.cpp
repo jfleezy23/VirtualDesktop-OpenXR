@@ -487,7 +487,7 @@ namespace virtualdesktop_openxr {
         }
 
         // Serialize and commit output.
-        const auto fenceValue = m_dlssnrContext->SubmitCommandList(cmdList);
+        const auto fenceValue = m_dlssnrContext->SubmitCommandList(std::move(cmdList));
         CHECK_HRCMD(m_ovrSubmissionContext->Wait(m_dlssnrOutFence.Get(), fenceValue));
         CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, m_dlssnrOutputSwapchain));
         m_dlssnrOutputSwapchainLastWrittenIndex = imageIndex;

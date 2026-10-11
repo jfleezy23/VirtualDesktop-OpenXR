@@ -464,6 +464,10 @@ namespace virtualdesktop_openxr {
             waitForAsyncSubmissionIdle();
         }
         flushSubmissionContext();
+        // The output Wait may have failed before D3D11 acquired a dependency on pending NR input reads.
+        if (m_dlssnrContext) {
+            m_dlssnrContext->Flush();
+        }
 
         Swapchain& xrSwapchain = *(Swapchain*)swapchain;
 

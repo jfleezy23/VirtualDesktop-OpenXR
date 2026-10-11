@@ -79,7 +79,7 @@ namespace D3D12Utils {
                                                         IID_PPV_ARGS(commandList.Commands.ReleaseAndGetAddressOf())));
                 commandList.Commands->SetName((m_DebugName + L" Command List").c_str());
             } else {
-                commandList = m_AvailableCommandList.front();
+                commandList = std::move(m_AvailableCommandList.front());
                 m_AvailableCommandList.pop_front();
 
                 // Reset the command list before reuse.
@@ -94,29 +94,49 @@ namespace D3D12Utils {
             std::unique_lock lock(m_CommandListPoolMutex);
 
             CHECK_HRCMD(CommandList.Commands->Close());
-            // TODO: This call goes through the Detoured version, which causes unwanted tracing.
-            m_CommandQueue->ExecuteCommandLists(
-                1, reinterpret_cast<ID3D12CommandList**>(CommandList.Commands.GetAddressOf()));
-            CommandList.CompletedFenceValue = ++m_CompletionFenceValue;
-            m_CommandQueue->Signal(m_CompletionFence.Get(), CommandList.CompletedFenceValue);
+            CommandList.CompletedFenceValue = m_CompletionFenceValue + 1;
+            // Own submitted work before Execute: retaining it must not allocate after the GPU can use it.
             m_PendingCommandList.push_back(std::move(CommandList));
+            auto& pending = m_PendingCommandList.back();
+            m_CompletionFenceValue = pending.CompletedFenceValue;
+            // TODO: This call goes through the Detoured version, which causes unwanted tracing.
+            m_CommandQueue->ExecuteCommandLists(1,
+                                                reinterpret_cast<ID3D12CommandList**>(pending.Commands.GetAddressOf()));
+            CHECK_HRCMD(m_CommandQueue->Signal(m_CompletionFence.Get(), m_CompletionFenceValue));
+            m_SignaledFenceValue = m_CompletionFenceValue;
 
-            return CommandList.CompletedFenceValue;
+            return m_CompletionFenceValue;
         }
 
+        // Drain the captured submission boundary. Callers retiring resources must exclude new submissions.
         void Flush() {
-            if (m_CompletionFenceValue) {
+            uint64_t fenceValue;
+            {
+                std::unique_lock lock(m_CommandListPoolMutex);
+                if (m_SignaledFenceValue < m_CompletionFenceValue) {
+                    // A failed Submit signal cannot be published to consumers. A later queue signal drains its work.
+                    const auto recoveryValue = m_CompletionFenceValue + 1;
+                    CHECK_HRCMD(m_CommandQueue->Signal(m_CompletionFence.Get(), recoveryValue));
+                    m_CompletionFenceValue = m_SignaledFenceValue = recoveryValue;
+                }
+                fenceValue = m_CompletionFenceValue;
+            }
+            if (fenceValue && !IsCommandListCompleted(fenceValue)) {
                 winrt::handle handle;
                 // Each wait must own its event; named auto-reset events can wake an unrelated queue.
                 *handle.put() = CreateEventExW(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
                 CHECK_MSG(handle.get(), "Failed to create completion event");
-                CHECK_HRCMD(m_CompletionFence->SetEventOnCompletion(m_CompletionFenceValue, handle.get()));
+                CHECK_HRCMD(m_CompletionFence->SetEventOnCompletion(fenceValue, handle.get()));
                 CHECK_MSG(WaitForSingleObject(handle.get(), INFINITE) == WAIT_OBJECT_0, "Completion wait failed");
+                // Device removal may wake an event without proving normal command completion.
+                CHECK_MSG(IsCommandListCompleted(fenceValue), "Completion fence did not reach the requested value");
             }
         }
 
         bool IsCommandListCompleted(uint64_t CompletedFenceValue) {
-            return m_CompletionFence->GetCompletedValue() >= CompletedFenceValue;
+            const auto completedValue = m_CompletionFence->GetCompletedValue();
+            CHECK_MSG(completedValue != UINT64_MAX, "Command completion device was removed");
+            return completedValue >= CompletedFenceValue;
         }
 
         ID3D12Fence* GetCompletionFence() const {
@@ -136,6 +156,7 @@ namespace D3D12Utils {
         std::deque<CommandList> m_PendingCommandList;
         ComPtr<ID3D12Fence> m_CompletionFence;
         uint64_t m_CompletionFenceValue{0};
+        uint64_t m_SignaledFenceValue{0};
 
         const std::wstring m_DebugName;
     };
