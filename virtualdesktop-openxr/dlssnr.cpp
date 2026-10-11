@@ -214,8 +214,7 @@ namespace virtualdesktop_openxr {
 
     void OpenXrRuntime::upliftLayer(const XrSwapchainSubImage** views,
                                     const XrSwapchainSubImage** depth,
-                                    float nearZ,
-                                    float farZ,
+                                    const bool* depthInverted,
                                     ovrLayerEyeFov& layer) {
         TraceLocalActivity(local);
         TraceLoggingWriteStart(local, "DLSSNR");
@@ -297,7 +296,7 @@ namespace virtualdesktop_openxr {
                 std::min(eyeResolution.h, (int)xr::math::AlignTo<4>((uint32_t)(eyeResolution.h * foveatedScale)))};
             const ovrVector2i offset = {(eyeResolution.w - eyeFoveatedResolution.w) / 2,
                                         (eyeResolution.h - eyeFoveatedResolution.h) / 2};
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthInverted, nearZ > farZ);
+            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthInverted, depthInverted[eye]);
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Enabled, true);
 
             // (Re)create with the desired resolution.
@@ -386,12 +385,6 @@ namespace virtualdesktop_openxr {
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_MVecScaleY, motionVectorScaleY);
 #endif
 
-            // The parameter map persists across frames. Clear optional inputs before rebinding them.
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Depth, (ID3D12Resource*)nullptr);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseX, 0);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseY, 0);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectWidth, 0);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectHeight, 0);
             if (depth[0] && depth[1]) {
                 Swapchain& xrDepthSwapchain = *(Swapchain*)depth[eye]->swapchain;
                 m_ngxParameters->Set(
@@ -416,6 +409,13 @@ namespace virtualdesktop_openxr {
                 m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseY, depthBox.top);
                 m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectWidth, depthBox.right - depthBox.left);
                 m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectHeight, depthBox.bottom - depthBox.top);
+            } else {
+                // The parameter map persists across frames. Clear all optional depth bindings when unavailable.
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Depth, (ID3D12Resource*)nullptr);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseX, 0);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseY, 0);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectWidth, 0);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectHeight, 0);
             }
 
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Reset, false);

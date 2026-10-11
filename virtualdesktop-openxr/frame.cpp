@@ -662,8 +662,7 @@ namespace virtualdesktop_openxr {
 
         const XrSwapchainSubImage* subImages[xr::StereoView::Count] = {};
         const XrSwapchainSubImage* depthSubImages[xr::StereoView::Count] = {};
-        float nearZ = 0.01f;
-        float farZ = 100.f;
+        bool depthInverted[xr::StereoView::Count]{};
 
         // Start without depth. We might change the type to ovrLayerType_EyeFovDepth further below.
         layer.Header.Type = ovrLayerType_EyeFov;
@@ -814,8 +813,7 @@ namespace virtualdesktop_openxr {
                             (depth->farZ * depth->nearZ) / (depth->nearZ - depth->farZ);
                         layer.EyeFovDepth.ProjectionDesc.Projection32 = -1.f;
 
-                        nearZ = depth->nearZ;
-                        farZ = depth->farZ;
+                        depthInverted[viewIndex] = depth->nearZ > depth->farZ;
 
                         break;
                     }
@@ -833,7 +831,7 @@ namespace virtualdesktop_openxr {
 
         // Run Neural Rendering if needed.
         if (needUplifting) {
-            upliftLayer(subImages, depthSubImages, nearZ, farZ, layer.EyeFov);
+            upliftLayer(subImages, depthSubImages, depthInverted, layer.EyeFov);
         }
 
         // Run the upscaler or sharpening if needed.

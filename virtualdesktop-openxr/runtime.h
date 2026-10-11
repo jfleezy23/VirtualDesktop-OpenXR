@@ -709,8 +709,7 @@ namespace virtualdesktop_openxr {
         void ensureSwapchainDlssnrResources(Swapchain& xrSwapchain, uint32_t slice);
         void upliftLayer(const XrSwapchainSubImage** views,
                          const XrSwapchainSubImage** depth,
-                         float nearZ,
-                         float farZ,
+                         const bool* depthInverted,
                          ovrLayerEyeFov& layer);
 
         // Instance & OVR state.

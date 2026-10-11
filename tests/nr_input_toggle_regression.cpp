@@ -13,6 +13,8 @@ namespace {
             throw std::runtime_error(message);
     }
     std::atomic<DWORD> enabled{};
+    DWORD coverage = 100;
+    bool expectDepth[2] = {true, true};
     std::wstring settingsKey;
     decltype(&RegGetValueW) originalRead = RegGetValueW;
 
@@ -26,7 +28,9 @@ namespace {
         const std::wstring_view setting(name);
         if (setting == L"DLSSNR_Enabled")
             value = enabled.load();
-        else if (setting == L"FoveationSize" || setting == L"upscaling")
+        else if (setting == L"FoveationSize")
+            value = coverage;
+        else if (setting == L"upscaling")
             value = 100;
         else if (setting == L"quirk_use_depth" || setting == L"quirk_disable_async_submission")
             value = 1;
@@ -88,7 +92,7 @@ namespace {
         SettingsReadHook& operator=(const SettingsReadHook&) = delete;
     };
 
-    void readColor(ovrSession session, const ovrLayerEyeFovDepth& layer, unsigned eye) {
+    void readColor(ovrSession session, const ovrLayerEyeFov& layer, unsigned eye) {
         auto texture = getCommitted(session, layer.ColorTexture[eye]);
         D3D11_TEXTURE2D_DESC desc{};
         texture->GetDesc(&desc);
@@ -130,12 +134,15 @@ namespace {
             try {
                 bool found{};
                 for (unsigned i = 0; i < count; ++i) {
-                    if (!layers[i] || layers[i]->Type != ovrLayerType_EyeFovDepth)
+                    if (!layers[i] ||
+                        (layers[i]->Type != ovrLayerType_EyeFovDepth && layers[i]->Type != ovrLayerType_EyeFov))
                         continue;
-                    const auto& layer = *reinterpret_cast<const ovrLayerEyeFovDepth*>(layers[i]);
+                    require((layers[i]->Type == ovrLayerType_EyeFovDepth) == (expectDepth[0] || expectDepth[1]),
+                            "Unexpected native projection depth type");
                     for (unsigned eye = 0; eye < 2; ++eye) {
-                        checkDepth(session, layer, eye);
-                        readColor(session, layer, eye);
+                        if (expectDepth[eye])
+                            checkDepth(session, *reinterpret_cast<const ovrLayerEyeFovDepth*>(layers[i]), eye);
+                        readColor(session, *reinterpret_cast<const ovrLayerEyeFov*>(layers[i]), eye);
                     }
                     found = true;
                     break;
@@ -215,6 +222,136 @@ namespace {
 
 namespace virtualdesktop_openxr {
     struct RuntimeInputRegression {
+        struct ParameterSpy final : NVSDK_NGX_Parameter {
+            NVSDK_NGX_Parameter* original;
+            unsigned writes{};
+            explicit ParameterSpy(NVSDK_NGX_Parameter* parameters) : original(parameters) {
+            }
+            void count(const char* name) {
+                if (!strcmp(name, "DLSSNR.Depth") || !strcmp(name, "DLSSNR.DepthSubrectBaseX") ||
+                    !strcmp(name, "DLSSNR.DepthSubrectBaseY") || !strcmp(name, "DLSSNR.DepthSubrectWidth") ||
+                    !strcmp(name, "DLSSNR.DepthSubrectHeight"))
+                    ++writes;
+            }
+#define FORWARD_PARAMETER(type)                                                                                        \
+    void Set(const char* name, type value) override {                                                                  \
+        count(name);                                                                                                   \
+        original->Set(name, value);                                                                                    \
+    }                                                                                                                  \
+    NVSDK_NGX_Result Get(const char* name, type* value) const override {                                               \
+        return original->Get(name, value);                                                                             \
+    }
+            FORWARD_PARAMETER(unsigned long long)
+            FORWARD_PARAMETER(float)
+            FORWARD_PARAMETER(double)
+            FORWARD_PARAMETER(unsigned int)
+            FORWARD_PARAMETER(int)
+            FORWARD_PARAMETER(ID3D11Resource*)
+            FORWARD_PARAMETER(ID3D12Resource*)
+            FORWARD_PARAMETER(void*)
+#undef FORWARD_PARAMETER
+            void Reset() override {
+                original->Reset();
+            }
+        };
+        struct Observation {
+            OpenXrRuntime& runtime;
+            ParameterSpy parameters;
+            decltype(&::NVSDK_NGX_D3D12_EvaluateFeature) evaluate[2];
+            NVSDK_NGX_Handle* features[2];
+            XrSwapchain depth{};
+            bool inverted[2]{};
+            bool metadata{};
+            bool writes{};
+            unsigned failures{}, evaluations{};
+            inline static Observation* active{};
+            Observation(bool checkMetadata, bool checkWrites)
+                : runtime(*static_cast<OpenXrRuntime*>(GetInstance())), parameters(runtime.m_ngxParameters),
+                  metadata(checkMetadata), writes(checkWrites) {
+                require(parameters.original && runtime.m_dlssnrFeature[0] && runtime.m_dlssnrFeature[1],
+                        "Real NR must be warm before observing parameters");
+                for (unsigned eye = 0; eye < 2; ++eye) {
+                    evaluate[eye] = runtime.m_dlssnrFeatureEvaluate[eye];
+                    features[eye] = runtime.m_dlssnrFeature[eye];
+                }
+                require(features[0] != features[1], "NR eyes must have separate features");
+                active = this;
+                runtime.m_ngxParameters = &parameters;
+                runtime.m_dlssnrFeatureEvaluate[0] = observedEvaluate<0>;
+                runtime.m_dlssnrFeatureEvaluate[1] = observedEvaluate<1>;
+            }
+            ~Observation() {
+                runtime.m_ngxParameters = parameters.original;
+                for (unsigned eye = 0; eye < 2; ++eye)
+                    runtime.m_dlssnrFeatureEvaluate[eye] = evaluate[eye];
+                active = nullptr;
+            }
+            Observation(const Observation&) = delete;
+            Observation& operator=(const Observation&) = delete;
+            void check(bool value, const char* message, unsigned eye) {
+                if (!value) {
+                    ++failures;
+                    std::cerr << "ASSERTION FAILED: " << message << " eye=" << eye << '\n';
+                }
+            }
+            template <unsigned eye>
+            static NVSDK_NGX_Result NVSDK_CONV observedEvaluate(ID3D12GraphicsCommandList* commands,
+                                                                const NVSDK_NGX_Handle* feature,
+                                                                const NVSDK_NGX_Parameter* input,
+                                                                PFN_NVSDK_NGX_ProgressCallback callback) {
+                auto& observation = *active;
+                int inversion{}, rect[4]{};
+                ID3D12Resource* resource{};
+                const auto* parameters = observation.parameters.original;
+                observation.check(input == &observation.parameters && feature == observation.features[eye],
+                                  "Feature/parameter observation lost the real warmed identity",
+                                  eye);
+                observation.check(NVSDK_NGX_SUCCEED(parameters->Get("DLSSNR.DepthInverted", &inversion)),
+                                  "Depth inversion parameter is missing",
+                                  eye);
+                observation.check(NVSDK_NGX_SUCCEED(parameters->Get("DLSSNR.Depth", &resource)),
+                                  "Depth resource parameter is missing",
+                                  eye);
+                const char* names[] = {"DLSSNR.DepthSubrectBaseX",
+                                       "DLSSNR.DepthSubrectBaseY",
+                                       "DLSSNR.DepthSubrectWidth",
+                                       "DLSSNR.DepthSubrectHeight"};
+                for (unsigned i = 0; i < 4; ++i)
+                    observation.check(NVSDK_NGX_SUCCEED(parameters->Get(names[i], &rect[i])),
+                                      "Depth rectangle parameter is missing",
+                                      eye);
+                const bool hasDepth = expectDepth[0] && expectDepth[1];
+                if (hasDepth) {
+                    auto& chain = *reinterpret_cast<OpenXrRuntime::Swapchain*>(observation.depth);
+                    auto& slice = chain.resolvedSlices[eye];
+                    observation.check(resource == slice.dlssnrImages[slice.lastCommittedIndex].Get(),
+                                      "NR bound the wrong eye/depth generation",
+                                      eye);
+                    const int extent = (int)xr::math::AlignTo<4>((uint32_t)(512 * (coverage * .01f)));
+                    const int offset = (512 - extent) / 2;
+                    observation.check(rect[0] == offset && rect[1] == offset && rect[2] == extent && rect[3] == extent,
+                                      "NR depth crop differs from actual high-coverage color crop",
+                                      eye);
+                    if (observation.metadata)
+                        observation.check(bool(inversion) == observation.inverted[eye],
+                                          "NR used the other eye's depth convention",
+                                          eye);
+                } else {
+                    observation.check(!resource && !rect[0] && !rect[1] && !rect[2] && !rect[3],
+                                      "Optional depth bindings were not fully cleared",
+                                      eye);
+                }
+                if (observation.writes)
+                    observation.check(observation.parameters.writes == 5, "Redundant depth parameter writes", eye);
+                std::cout << "NR parameters eye=" << eye << " inverted=" << inversion << " depth=" << hasDepth
+                          << " writes=" << observation.parameters.writes << " crop=" << rect[0] << ',' << rect[1] << ','
+                          << rect[2] << ',' << rect[3] << '\n';
+                observation.parameters.writes = 0;
+                ++observation.evaluations;
+                // Private vendor implementations must receive their own allocation, never our forwarding proxy.
+                return observation.evaluate[eye](commands, feature, parameters, callback);
+            }
+        };
         static PFN_xrGetInstanceProcAddr initialize(const char* privateFolder, const char* stateFolder) {
             dllHome = std::filesystem::absolute(privateFolder);
             programData = std::filesystem::absolute(stateFolder);
@@ -226,7 +363,8 @@ namespace virtualdesktop_openxr {
             enabled = value;
             auto& runtime = *static_cast<OpenXrRuntime*>(GetInstance());
             runtime.refreshSettings();
-            require(runtime.m_dlssnrSettings.enabled == value && runtime.m_dlssnrSettings.foveationSize == 1.f,
+            require(runtime.m_dlssnrSettings.enabled == value &&
+                        runtime.m_dlssnrSettings.foveationSize == coverage * .01f,
                     "Synthetic settings were not published through real refreshSettings");
         }
         static unsigned checkCaches(XrSwapchain handle, const char* kind, const char* phase, bool freshOff) {
@@ -264,7 +402,14 @@ int main(int argc, char** argv) {
     std::cout << std::unitbuf;
     XrInstance instance{};
     try {
-        require(argc == 3, "Usage: nr_input_toggle_regression <private-OVRNull-NR-folder> <private-test-state-folder>");
+        require(argc >= 3 && argc <= 5,
+                "Usage: nr_input_toggle_regression <backend> <state> [metadata|writes|controls] [90|100]");
+        const std::string mode = argc >= 4 ? argv[3] : "toggle";
+        require(mode == "toggle" || mode == "metadata" || mode == "writes" || mode == "controls", "Unknown mode");
+        if (argc == 5) {
+            require(!strcmp(argv[4], "90") || !strcmp(argv[4], "100"), "Coverage must be 90 or 100");
+            coverage = !strcmp(argv[4], "90") ? 90 : 100;
+        }
         SettingsReadHook settings;
         const auto getProc = virtualdesktop_openxr::RuntimeInputRegression::initialize(argv[1], argv[2]);
         XR_CHECK(getProc(XR_NULL_HANDLE, "xrCreateInstance", reinterpret_cast<PFN_xrVoidFunction*>(&xrCreateInstance)));
@@ -355,10 +500,24 @@ int main(int argc, char** argv) {
             Images colorB, depthB;
             using Regression = virtualdesktop_openxr::RuntimeInputRegression;
             std::vector<ComPtr<ID3D12Resource>> colorImportsB, depthImportsB;
-            const char* phases[] = {
-                "A-OFF-fresh", "A-ON", "A-OFF-cached", "B-OFF-fresh", "B-ON", "B-OFF-cached", "B-ON-cached"};
-            for (int frame = 0; frame < 7; ++frame) {
-                const bool nr = frame == 1 || frame == 4 || frame == 6;
+            std::unique_ptr<Regression::Observation> observation;
+            const char* phases[] = {"A-OFF-fresh",
+                                    "A-ON",
+                                    "A-OFF-cached",
+                                    "B-OFF-fresh",
+                                    "B-ON",
+                                    "B-OFF-cached",
+                                    "B-ON-cached",
+                                    "depth-asymmetric",
+                                    "depth-absent",
+                                    "depth-right-only",
+                                    "depth-left-only",
+                                    "depth-restored"};
+            const int frameCount = mode == "toggle" ? 7 : 12;
+            for (int frame = 0; frame < frameCount; ++frame) {
+                const bool nr = frame == 1 || frame == 4 || frame >= 6;
+                if (frame == 7)
+                    observation = std::make_unique<Regression::Observation>(mode == "metadata", mode == "writes");
                 Regression::setEnabled(nr);
                 if (frame == 3) {
                     colorB = createImages(session, DXGI_FORMAT_R8G8B8A8_UNORM, 512, 512, false);
@@ -419,6 +578,18 @@ int main(int argc, char** argv) {
                     depths[eye].maxDepth = 1;
                     depths[eye].nearZ = .1f;
                     depths[eye].farZ = 100;
+                    if (observation) {
+                        expectDepth[eye] = frame != 8 && !(frame == 9 && eye == 0) && !(frame == 10 && eye == 1);
+                        if (!expectDepth[eye])
+                            views[eye].next = nullptr;
+                        const bool inverted = (frame == 7 && eye == 1) || (frame == 11 && eye == 0);
+                        if (inverted) {
+                            depths[eye].nearZ = 100;
+                            depths[eye].farZ = .1f;
+                        }
+                        observation->inverted[eye] = inverted;
+                        observation->depth = depth.chain;
+                    }
                 }
                 XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
                 layer.space = space;
@@ -455,6 +626,10 @@ int main(int argc, char** argv) {
                 }
                 checkHr(device->GetDeviceRemovedReason());
             }
+            if (observation) {
+                failures += observation->failures;
+                require(observation->evaluations == 10, "Not all real vendor evaluations were observed");
+            }
         } // Detach native observations before normal instance teardown unloads OVRNull.
         context->ClearState();
         context->Flush();
@@ -462,9 +637,10 @@ int main(int argc, char** argv) {
         instance = XR_NULL_HANDLE;
         std::cout << "normal instance/session teardown completed; frames=" << captured
                   << " color/depth cache assertion failures=" << failures << '\n';
-        require(!failures, "NR-off fresh color/depth swapchains were imported eagerly");
+        require(!failures, "NR native cache/parameter assertions failed");
         std::cout << "PASS: native synchronous live OFF/ON/OFF with fresh pair B, complete cached imports, both-eye "
-                     "color/depth readback and real NR at FoveationSize=100\n";
+                     "color/depth readback and real NR; mode="
+                  << mode << " FoveationSize=" << coverage << '\n';
         return 0;
     } catch (const std::exception& error) {
         if (instance && xrDestroyInstance) {
