@@ -26,7 +26,7 @@ backend tests sequentially, in individual bounded processes.
 | `nonnr_input_regression` | `cpu`, `controls`, `float`, `action-paths`, `action-pose`, `query-cache`, `action-set-lifetime`, `events`, `poll-lock`, `sync-validation`, `pinch-velocity`, `velocity`, `velocity-controls`, `velocity-offsets`, `velocity-invalid` | Action-set lifetime, sync validation, pinch and all velocity modes |
 | `nonnr_preprocess_cache_regression` | `reuse`, `shader-retry`, `buffer-retry`, `cleanup`, `partial-cleanup`, `no-work`, `all` | None; requires native D3D11 Device5/Context4 fence support |
 | `nonnr_resolution_regression` | `resize`, `reuse`, `texture`, `srv`, `uav`, `texture-right`, `srv-right`, `uav-right` | All modes; uses D3D11 WARP |
-| `nonnr_swapchain_regression` | `alias`, `mip`, `ovr-length`, `ovr-create`, `ovr-replacement`, `mutable`, `stencil`, `retry`, `vk-retry`, `unused-rtvs` | First five modes and `unused-rtvs` |
+| `nonnr_swapchain_regression` | `alias`, `mip`, `ovr-length`, `ovr-create`, `ovr-replacement`, `mutable`, `stencil`, `retry`, `vk-retry`, `unused-rtvs`, `same-device`, `cross-device` | First five modes and `unused-rtvs`; sharing modes require native D3D11 hardware |
 
 The five `vr_input_*` suites cover action activation/session reset, callback
 draining/constructor unwind, settings publication, visibility event lifetime,
@@ -72,6 +72,8 @@ Build `nonnr_d3d12_flush_regression.cpp` through the same helper on a D3D12-capa
 `success`, `blocked`, `signal`, `event`, `wait`, `noqueue` and `nofence`. It uses real queue/fence resources with injected API
 failures and validates retained resources, retryable destruction, and completion before retirement. It does not require a
 headset or exercise NR; a failed drain does not imply that gameplay can resume after partially started session teardown.
+
+The swapchain sharing modes count actual legacy shared-handle exports and verify returned texture/device identity.
 
 See [khronos_README.md](khronos_README.md) for official stereo, pacing, swapchain and input contract checks. Keep native
 headset evidence separate from private-backend GPU tests and auto-skipped visual prompts.

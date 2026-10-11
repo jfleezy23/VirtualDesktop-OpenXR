@@ -488,8 +488,11 @@ namespace virtualdesktop_openxr {
 
         std::vector<HANDLE> textureHandles;
         if (!initialized) {
-            // Query the swapchain textures.
-            textureHandles = getSwapchainImages(xrSwapchain);
+            if (skipSharing) {
+                ensureAppSwapchainImages(xrSwapchain);
+            } else {
+                textureHandles = getSwapchainImages(xrSwapchain);
+            }
         }
 
         // Export each D3D11 texture from the submission device into the application device.
