@@ -39,7 +39,7 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
           TARGET_BRANCH: ${{ github.base_ref || github.ref_name }}
-          STABLE_BASELINE: 1a83fec8b5c565b14b06ffa8e1eb7e4768057573
+          STABLE_BASELINE: 6da20fe478e331c05672243fd82a9a1500cd39f5
           NR_BASELINE: 925dc598c524cb48b37fa4b0a2bff471f75fc5c4
         run: |
           # NR's vendor imports and architecture limits belong to its inherited upstream baseline.
@@ -150,7 +150,7 @@ jobs:
         run: |
           $source = (Resolve-Path 'virtualdesktop-openxr').Path
           $objects = (Resolve-Path 'bin/community/build/x64/ReleaseBundle/obj').Path
-          foreach ($fixture in @('vr_input_regression.cpp', 'vr_input_watcher_regression.cpp', 'nonnr_input_regression.cpp', 'nonnr_gpu_timer_regression.cpp', 'nonnr_async_regression.cpp', 'nonnr_copy_preprocess_regression.cpp')) {
+          foreach ($fixture in @('vr_input_regression.cpp', 'vr_input_watcher_regression.cpp', 'nonnr_input_regression.cpp', 'nonnr_gpu_timer_regression.cpp', 'nonnr_async_regression.cpp', 'nonnr_copy_preprocess_regression.cpp', 'nonnr_gl_regression.cpp')) {
             & tests/vr_input_build.cmd -SourceDirectory $source -RuntimeObjectDirectory $objects -TestSource $fixture
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
@@ -202,6 +202,8 @@ jobs:
           Invoke-Regression 'bin/vr-input-tests/vr_input_regression.exe' @() 'input'
           Invoke-Regression 'bin/vr-input-tests/vr_input_watcher_regression.exe' @() 'watcher'
           Invoke-Regression 'bin/vr-input-tests/nonnr_gpu_timer_regression.exe' @('contract') 'nonnr-gpu-timer'
+          Invoke-Regression 'bin/vr-input-tests/nonnr_gl_regression.exe' @('initial-wgl') 'nonnr-gl-initial-wgl'
+          Invoke-Regression 'bin/vr-input-tests/nonnr_gl_regression.exe' @('double-fault') 'nonnr-gl-double-fault'
           foreach ($mode in @('startup', 'error-wait', 'error-begin', 'error-end', 'shutdown-not-initialized', 'control-during-wait', 'wait-retry', 'layers-sync', 'layers-async', 'storage-sync', 'storage-async', 'gated-end')) {
             Invoke-Regression 'bin/vr-input-tests/nonnr_async_regression.exe' @($mode, $backendRoot) "nonnr-async-$mode"
           }

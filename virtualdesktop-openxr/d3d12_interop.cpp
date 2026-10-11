@@ -192,6 +192,7 @@ namespace virtualdesktop_openxr {
                 // We keep our code simple by only using a single command list, which means we must wait before reusing
                 // it.
                 flushD3D12CommandQueue();
+                CHECK_HRCMD(m_d3d12CommandAllocator->Reset());
 
                 // Prepare to execute barriers.
                 CHECK_HRCMD(m_d3d12CommandList->Reset(m_d3d12CommandAllocator.Get(), nullptr));

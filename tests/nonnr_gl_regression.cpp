@@ -477,6 +477,38 @@ namespace virtualdesktop_openxr {
             checkHr(device->GetDeviceRemovedReason());
             std::cout << "PASS: GL " << mode << " failure preserves ownership and context\n";
         }
+        static void initialContextFailure() {
+            OpenXrRuntime runtime;
+            runtime.stopRegistryWatcher();
+            spy = {};
+            GlHooks hooks;
+            XrGraphicsBindingOpenGLWin32KHR binding{XR_TYPE_GRAPHICS_BINDING_OPENGL_WIN32_KHR};
+            binding.hDC = fakeDC;
+            binding.hGLRC = fakeRC;
+            spy.rejectContext = true;
+            bool initialThrew = false;
+            try {
+                runtime.initializeOpenGL(binding);
+            } catch (const std::exception&) {
+                initialThrew = true;
+            }
+            const bool published = runtime.isOpenGLSession();
+            bool cleanupThrew = false;
+            try {
+                runtime.cleanupOpenGL();
+            } catch (const std::exception&) {
+                cleanupThrew = true;
+            }
+            const auto restores = spy.restoreCalls;
+            spy.rejectContext = false;
+            // Retire the baseline's unusable published state before asserting.
+            runtime.cleanupOpenGL();
+            require(initialThrew && !published && !cleanupThrew && restores == 1,
+                    "Failed initial WGL binding published an unusable context or blocked rollback");
+            require(spy.semaphores.empty() && spy.queries.empty() && !spy.invalidCalls,
+                    "Failed initial WGL binding performed GL resource work");
+            std::cout << "PASS: failed initial WGL binding leaves cleanup retryable\n";
+        }
         static void doubleFault() {
             spy = {};
             GlHooks hooks;
@@ -583,10 +615,12 @@ int main(int argc, char** argv) {
     try {
         require(argc == 2,
                 "usage: nonnr_gl_regression storage | cleanup | wgl | double-fault | memory-create | texture-create | "
-                "semaphore-create | semaphore-import");
+                "semaphore-create | semaphore-import | initial-wgl");
         const std::string mode = argv[1];
         if (mode == "double-fault")
             virtualdesktop_openxr::RuntimeInputRegression::doubleFault();
+        else if (mode == "initial-wgl")
+            virtualdesktop_openxr::RuntimeInputRegression::initialContextFailure();
         else if (mode == "semaphore-create" || mode == "semaphore-import")
             virtualdesktop_openxr::RuntimeInputRegression::semaphoreInitialization(mode == "semaphore-create");
         else if (mode == "storage" || mode == "cleanup" || mode == "wgl" || mode == "memory-create" ||

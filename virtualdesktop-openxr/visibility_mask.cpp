@@ -75,6 +75,8 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_VALIDATION_FAILURE;
         }
 
+        OnceLog("Application uses visibility mask\n");
+
         // Ignore ridiculously big masks.
         const float visibilityMaskScale = m_overrideVisibilityMaskScale.load(std::memory_order_relaxed);
         if (visibilityMaskScale > 10.f) {

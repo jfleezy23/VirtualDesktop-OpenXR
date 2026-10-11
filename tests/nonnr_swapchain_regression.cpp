@@ -154,6 +154,58 @@ namespace {
         OvrHooks& operator=(const OvrHooks&) = delete;
     };
 
+    using GetSharedHandle = HRESULT(STDMETHODCALLTYPE*)(IDXGIResource*, HANDLE*);
+    GetSharedHandle originalSharedHandle;
+    std::set<IDXGIResource*> watchedSharedResources;
+    unsigned sharedHandleCalls;
+    HRESULT STDMETHODCALLTYPE countSharedHandle(IDXGIResource* resource, HANDLE* output) {
+        if (watchedSharedResources.count(resource))
+            ++sharedHandleCalls;
+        return originalSharedHandle(resource, output);
+    }
+    class SharedHandleHooks {
+      public:
+        explicit SharedHandleHooks(const std::vector<ComPtr<ID3D11Texture2D>>& images) {
+            for (const auto& image : images) {
+                ComPtr<IDXGIResource1> resource;
+                checkHr(image.As(&resource));
+                watchedSharedResources.insert(resource.Get());
+                resources.push_back(std::move(resource));
+            }
+            originalSharedHandle =
+                reinterpret_cast<GetSharedHandle>((*reinterpret_cast<void***>(resources[0].Get()))[8]);
+            sharedHandleCalls = 0;
+            require(DetourTransactionBegin() == NO_ERROR, "Detour begin failed");
+            LONG result = DetourUpdateThread(GetCurrentThread());
+            if (result == NO_ERROR)
+                result = DetourAttach(reinterpret_cast<PVOID*>(&originalSharedHandle), countSharedHandle);
+            if (result == NO_ERROR)
+                result = DetourTransactionCommit();
+            else
+                DetourTransactionAbort();
+            require(result == NO_ERROR, "Shared-handle hook installation failed");
+        }
+        ~SharedHandleHooks() {
+            LONG result = DetourTransactionBegin();
+            if (result == NO_ERROR)
+                result = DetourUpdateThread(GetCurrentThread());
+            if (result == NO_ERROR)
+                result = DetourDetach(reinterpret_cast<PVOID*>(&originalSharedHandle), countSharedHandle);
+            if (result == NO_ERROR)
+                result = DetourTransactionCommit();
+            else
+                DetourTransactionAbort();
+            if (result != NO_ERROR)
+                std::terminate();
+            watchedSharedResources.clear();
+        }
+        SharedHandleHooks(const SharedHandleHooks&) = delete;
+        SharedHandleHooks& operator=(const SharedHandleHooks&) = delete;
+
+      private:
+        std::vector<ComPtr<IDXGIResource1>> resources;
+    };
+
     using CreateRtv = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*,
                                                   ID3D11Resource*,
                                                   const D3D11_RENDER_TARGET_VIEW_DESC*,
@@ -572,6 +624,57 @@ namespace virtualdesktop_openxr {
             runtime.m_vkDispatch.vkDestroyImage = destroyImage;
             runtime.m_vkDispatch.vkFreeMemory = freeMemory;
         }
+        static void sharing(bool crossDevice) {
+            OpenXrRuntime runtime;
+            runtime.stopRegistryWatcher();
+            ComPtr<ID3D11Device> device;
+            ComPtr<ID3D11DeviceContext> context;
+            installD3D(runtime, device, context);
+            ComPtr<ID3D11Device> appDevice = device;
+            if (crossDevice) {
+                checkHr(D3D11CreateDevice(nullptr,
+                                          D3D_DRIVER_TYPE_HARDWARE,
+                                          nullptr,
+                                          0,
+                                          nullptr,
+                                          0,
+                                          D3D11_SDK_VERSION,
+                                          appDevice.ReleaseAndGetAddressOf(),
+                                          nullptr,
+                                          nullptr));
+            }
+            checkHr(appDevice.As(&runtime.m_d3d11Device));
+            auto desc = textureDescription();
+            // An unshared image is sufficient when no device boundary is crossed.
+            desc.MiscFlags = crossDevice ? D3D11_RESOURCE_MISC_SHARED : 0;
+            OpenXrRuntime::Swapchain chain{};
+            chain.ovrSwapchainLength = 2;
+            for (unsigned i = 0; i < 2; ++i) {
+                ComPtr<ID3D11Texture2D> image;
+                checkHr(device->CreateTexture2D(&desc, nullptr, image.GetAddressOf()));
+                chain.appSwapchain.images.push_back(std::move(image));
+            }
+            XrSwapchainImageD3D11KHR images[2]{{XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR},
+                                               {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR}};
+            SharedHandleHooks hooks(chain.appSwapchain.images);
+            require(runtime.getSwapchainImagesD3D11(chain, images, 2) == XR_SUCCESS, "D3D11 enumeration failed");
+            require(sharedHandleCalls == (crossDevice ? 2u : 0u), "Enumeration exported unused shared handles");
+            const auto retained = chain.d3d11Images;
+            require(runtime.getSwapchainImagesD3D11(chain, images, 2) == XR_SUCCESS && chain.d3d11Images == retained,
+                    "Cached enumeration replaced imported images");
+            require(sharedHandleCalls == (crossDevice ? 2u : 0u), "Cached enumeration exported handles again");
+            for (unsigned i = 0; i < 2; ++i) {
+                ComPtr<ID3D11Device> owner;
+                images[i].texture->GetDevice(owner.GetAddressOf());
+                require(owner == appDevice, "Returned image belongs to the wrong application device");
+                require((images[i].texture == chain.appSwapchain.images[i].Get()) == !crossDevice,
+                        "Same-device identity or cross-device import changed");
+            }
+            checkHr(appDevice->GetDeviceRemovedReason());
+            checkHr(device->GetDeviceRemovedReason());
+            std::cout << "PASS: D3D11 " << (crossDevice ? "cross-device shared import" : "same-device unshared images")
+                      << " and cached enumeration\n";
+        }
         static void importRetry() {
             OpenXrRuntime runtime;
             runtime.stopRegistryWatcher();
@@ -790,6 +893,7 @@ namespace virtualdesktop_openxr {
                 chain.dxgiFormatForSubmission = DXGI_FORMAT_R8G8B8A8_UNORM;
                 auto& old = chain.stereoProjection[0];
                 old.ovrSwapchain = token<ovrTextureSwapChain>(0x1000);
+                old.resolution = {8, 8};
                 old.images.push_back(image);
                 old.rtvs.push_back(rtv);
                 old.uavs.push_back(uav);
@@ -802,8 +906,9 @@ namespace virtualdesktop_openxr {
                 require(threw && ovrCreateCalls == 1 && !invalidOvrCalls,
                         "Precompositor replacement did not reach the injected OVR length failure");
                 const bool preserved = old.ovrSwapchain == token<ovrTextureSwapChain>(0x1000) &&
-                                       old.images.size() == 1 && old.images[0].Get() == image.Get() &&
-                                       old.rtvs.size() == 1 && old.rtvs[0].Get() == rtv.Get() && old.uavs.size() == 1 &&
+                                       old.resolution.w == 8 && old.resolution.h == 8 && old.images.size() == 1 &&
+                                       old.images[0].Get() == image.Get() && old.rtvs.size() == 1 &&
+                                       old.rtvs[0].Get() == rtv.Get() && old.uavs.size() == 1 &&
                                        old.uavs[0].Get() == uav.Get();
                 const bool candidateDestroyed =
                     destroyedChains.size() == 1 && destroyedChains[0] == token<ovrTextureSwapChain>(0x1100);
@@ -921,6 +1026,9 @@ int wmain(int argc, wchar_t** argv) {
                 virtualdesktop_openxr::RuntimeInputRegression::ovrCreateFailure(argv[2]);
             else
                 virtualdesktop_openxr::RuntimeInputRegression::ovrReplacementFailure(argv[2]);
+        } else if (mode == L"same-device" || mode == L"cross-device") {
+            require(argc == 2, "Device sharing fixture takes no backend argument");
+            virtualdesktop_openxr::RuntimeInputRegression::sharing(mode == L"cross-device");
         } else if (mode == L"vk-retry") {
             require(argc == 2, "Vulkan import-retry fixture takes no backend argument");
             virtualdesktop_openxr::RuntimeInputRegression::vulkanImportRetry();

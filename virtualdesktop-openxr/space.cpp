@@ -111,6 +111,12 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_POSE_INVALID;
         }
 
+        if (createInfo->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_STAGE) {
+            OnceLog("Application uses stage space\n");
+        } else if (createInfo->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR_EXT) {
+            OnceLog("Application uses local floor\n");
+        }
+
         std::unique_lock lock(m_actionsAndSpacesMutex);
 
         // Create the internal struct.

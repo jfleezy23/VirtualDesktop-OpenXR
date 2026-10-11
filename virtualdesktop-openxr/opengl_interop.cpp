@@ -94,11 +94,10 @@ namespace virtualdesktop_openxr {
         // Gather function pointers for the OpenGL extensions we are going to use.
         initializeOpenGLDispatch();
 
-        m_glContext.glDC = glBindings.hDC;
-        m_glContext.glRC = glBindings.hGLRC;
-        m_glContext.valid = true;
-
-        GlContextSwitch context(m_glContext);
+        const GlContext candidateContext{glBindings.hDC, glBindings.hGLRC, true};
+        GlContextSwitch context(candidateContext);
+        // Failed initial binding must not publish an unusable context for rollback.
+        m_glContext = candidateContext;
 
 #ifdef _DEBUG
         m_glDispatch.glDebugMessageCallback(DebugProc, nullptr);
