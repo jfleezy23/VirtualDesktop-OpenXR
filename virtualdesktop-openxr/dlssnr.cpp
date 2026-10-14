@@ -489,7 +489,11 @@ namespace virtualdesktop_openxr {
         // Serialize and commit output.
         const auto fenceValue = m_dlssnrContext->SubmitCommandList(std::move(cmdList));
         CHECK_HRCMD(m_ovrSubmissionContext->Wait(m_dlssnrOutFence.Get(), fenceValue));
-        CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, m_dlssnrOutputSwapchain));
+        if (m_frameGenerationMode) {
+            m_precompositor.pendingColourCommits[0] = m_dlssnrOutputSwapchain;
+        } else {
+            CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, m_dlssnrOutputSwapchain));
+        }
         m_dlssnrOutputSwapchainLastWrittenIndex = imageIndex;
 
         // Patch the layer.
@@ -497,6 +501,11 @@ namespace virtualdesktop_openxr {
             layer.ColorTexture[eye] = m_dlssnrOutputSwapchain;
             layer.Viewport[eye].Pos = {(int)eye * resolution.w, 0};
             layer.Viewport[eye].Size = {views[eye]->imageRect.extent.width, views[eye]->imageRect.extent.height};
+            if (m_frameGenerationMode) {
+                ComPtr<ID3D11Resource> resource;
+                m_dlssnrOutputSwapchainSrvs[imageIndex]->GetResource(&resource);
+                CHECK_HRCMD(resource.As(&m_precompositor.finalNrColour[eye]));
+            }
         }
 
         TraceLoggingWriteStop(local, "DLSSNR");

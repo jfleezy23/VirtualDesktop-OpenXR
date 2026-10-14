@@ -15,7 +15,7 @@ namespace virtualdesktop_openxr::log {
 }
 
 namespace {
-    enum class Fault { None, Wait, Begin, End, NotInitialized };
+    enum class Fault { None, Wait, Begin, End, NotInitialized, Timeout };
 
     struct SubmittedFrame {
         long long id;
@@ -42,6 +42,12 @@ namespace {
         std::vector<ovrTextureSwapChain> createdChains;
         std::vector<ovrTextureSwapChain> destroyedChains;
         Fault fault{Fault::None};
+        long long faultFrameId{-1};
+        unsigned recoverAfterFaults{};
+        bool visible{true}, recenter{};
+        unsigned recenterClears{};
+        std::function<void(const ovrLayerHeader* const*, unsigned)> observeLayers;
+        std::function<void(long long)> observeWait;
 
         template <typename Predicate>
         bool waitFor(Predicate predicate, std::chrono::milliseconds timeout = 2000ms) {
@@ -176,15 +182,24 @@ namespace {
 
     ovrResult OVR_CDECL interceptedWait(ovrSession, long long frameId) {
         auto& state = *backendState;
+        if (state.observeWait) {
+            state.observeWait(frameId);
+        }
         std::unique_lock lock(state.mutex);
         ++state.waitCalls;
         state.waitedIds.push_back(frameId);
         state.changed.notify_all();
         state.changed.wait(lock, [&] { return state.releaseWait; });
-        if (state.fault == Fault::Wait || state.fault == Fault::NotInitialized) {
+        if ((state.fault == Fault::Wait || state.fault == Fault::NotInitialized) &&
+            (state.faultFrameId < 0 || state.faultFrameId == frameId) &&
+            (!state.recoverAfterFaults || state.faultCalls < state.recoverAfterFaults)) {
             ++state.faultCalls;
             state.changed.notify_all();
             return state.fault == Fault::Wait ? ovrError_DisplayLost : ovrError_NotInitialized;
+        }
+        if (state.fault == Fault::Timeout) {
+            ++state.faultCalls;
+            return ovrError_Timeout;
         }
         return ovrSuccess;
     }
@@ -194,10 +209,11 @@ namespace {
         std::lock_guard lock(state.mutex);
         ++state.beginCalls;
         state.begunIds.push_back(frameId);
-        if (state.fault == Fault::Begin)
+        const bool failed = state.fault == Fault::Begin && (state.faultFrameId < 0 || state.faultFrameId == frameId);
+        if (failed)
             ++state.faultCalls;
         state.changed.notify_all();
-        return state.fault == Fault::Begin ? ovrError_DisplayLost : ovrSuccess;
+        return failed ? ovrError_DisplayLost : ovrSuccess;
     }
 
     ovrResult OVR_CDECL interceptedEnd(ovrSession,
@@ -213,6 +229,9 @@ namespace {
             payloadBytes.store(0, std::memory_order_relaxed);
         state.changed.notify_all();
         state.changed.wait(lock, [&] { return !state.gateEnd || state.releaseEnd; });
+        if (state.observeLayers) {
+            state.observeLayers(layers, layerCount);
+        }
         SubmittedFrame frame{frameId, layerCount, {}, scale ? scale->HmdSpaceToWorldScaleInMeters : 0.f};
         ULONG_PTR stackLow = 0, stackHigh = 0;
         GetCurrentThreadStackLimits(&stackLow, &stackHigh);
@@ -228,15 +247,19 @@ namespace {
             }
         }
         state.frames.push_back(std::move(frame));
-        if (state.fault == Fault::End)
+        const bool failed = state.fault == Fault::End && (state.faultFrameId < 0 || state.faultFrameId == frameId);
+        if (failed)
             ++state.faultCalls;
         state.changed.notify_all();
-        return state.fault == Fault::End ? ovrError_DisplayLost : ovrSuccess;
+        return failed ? ovrError_DisplayLost : ovrSuccess;
     }
 
     ovrResult OVR_CDECL interceptedStatus(ovrSession, ovrSessionStatus* status) {
+        std::lock_guard lock(backendState->mutex);
         *status = {};
-        status->HmdPresent = status->HmdMounted = status->IsVisible = ovrTrue;
+        status->HmdPresent = status->HmdMounted = ovrTrue;
+        status->IsVisible = backendState->visible;
+        status->ShouldRecenter = backendState->recenter;
         return ovrSuccess;
     }
 

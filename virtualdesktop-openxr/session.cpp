@@ -265,6 +265,7 @@ namespace virtualdesktop_openxr {
         }
 
         // The worker is joined before releasing either retained frame payload.
+        cleanupFrameGeneration();
         m_layersForFrame.clear();
         m_layersForAsyncSubmission.clear();
 
@@ -398,6 +399,28 @@ namespace virtualdesktop_openxr {
         m_useAsyncSubmission = !m_isHeadless && !m_useApplicationDeviceForSubmission &&
                                !getSetting("quirk_disable_async_submission").value_or(false);
         m_needStartAsyncSubmissionThread = m_useAsyncSubmission;
+        const auto requestedFrameGeneration =
+            RegGetDword(HKEY_LOCAL_MACHINE, RegPrefix, "FrameGenerationMode").value_or(0);
+        m_frameGenerationMode = m_useAsyncSubmission && (requestedFrameGeneration == 2 || requestedFrameGeneration == 3)
+                                    ? static_cast<uint32_t>(requestedFrameGeneration)
+                                    : 0;
+#ifndef _WIN64
+        m_frameGenerationMode = 0;
+#endif
+        m_frameGenerationUnavailable = false;
+        m_fgWaitedReservation = m_fgBegunReservation = {};
+        m_fgNextReservedNativeId = 0;
+        m_fgLastReservedTime = m_fgPreviousCapturedTime = 0;
+        m_fgHistoryEpoch = m_fgPreviousHistoryEpoch = 0;
+        m_fgObservedVisible = m_fgObservedRecenter = false;
+        {
+            std::unique_lock lock(m_dlssnrSettingsMutex);
+            m_fgDesiredMultiplier = m_frameGenerationMode && m_dlssnrSettings.enabled ? m_frameGenerationMode : 1;
+        }
+        m_fgNeedReprime = false;
+        m_fgTimelineReanchor = false;
+        m_fgWorkerGroupNativeId = m_fgPublishedEndNativeId = 0;
+        m_fgActiveSubmission = m_fgActiveOwnedPixels = false;
         // Creation of the submission threads is deferred to the first xrWaitFrame() to accomodate OpenComposite quirks.
 
         // Start the body watcher thread.

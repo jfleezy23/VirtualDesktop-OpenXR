@@ -3,7 +3,9 @@
 from pathlib import Path
 import contextlib
 import importlib.util
+import hashlib
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -158,6 +160,30 @@ class HygieneTests(unittest.TestCase):
         self.assert_passes()
         self.write("external/vendor.cpp", "int  inherited; \n")
         self.assert_rejects("whitespace")
+
+    def vendor_manifest(self, content):
+        self.write("nr-frame-generation/vendor/ofxr/source.cpp", content)
+        self.write("nr-frame-generation/vendor/ofxr/manifest.json", json.dumps({
+            "repository": "djules75/OFXR-Bridge",
+            "commit": "07449429c139e5d2070b6f0855ed5323de7cee00",
+            "files": {"source.cpp": hashlib.sha256(content.encode()).hexdigest()},
+        }) + "\n")
+
+    def test_manifest_vendor_preserves_format_but_still_checks_source(self):
+        self.vendor_manifest("int  inherited;\n")
+        self.assert_passes()
+        self.vendor_manifest("int  inherited; \n")
+        self.assert_rejects("whitespace")
+
+    def test_manifest_vendor_rejects_modified_content(self):
+        self.vendor_manifest("int  inherited;\n")
+        self.write("nr-frame-generation/vendor/ofxr/source.cpp", "int modified;\n")
+        self.assert_rejects("vendor identity")
+
+    def test_manifest_vendor_rejects_nonmanifest_file(self):
+        self.vendor_manifest("int inherited;\n")
+        self.write("nr-frame-generation/vendor/ofxr/new.cpp", "int additional;\n")
+        self.assert_rejects("vendor identity")
 
     def test_case_collision_in_index_fails_even_for_vendor(self):
         blob = self.git("hash-object", "-w", "--stdin", input=b"text\n").strip().decode()

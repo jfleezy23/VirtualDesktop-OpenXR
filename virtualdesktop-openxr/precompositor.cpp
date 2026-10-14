@@ -294,7 +294,15 @@ namespace virtualdesktop_openxr {
                                                  1);
             }
 
-            CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, xrSwapchain.stereoProjection[eye].ovrSwapchain));
+            if (m_frameGenerationMode) {
+                m_precompositor.pendingColourCommits[eye + 1] = xrSwapchain.stereoProjection[eye].ovrSwapchain;
+            } else {
+                CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, xrSwapchain.stereoProjection[eye].ovrSwapchain));
+            }
+            xrSwapchain.stereoProjection[eye].lastCommittedIndex = imageIndex;
+            if (m_frameGenerationMode && m_precompositor.finalNrColour[eye]) {
+                m_precompositor.finalNrColour[eye] = xrSwapchain.stereoProjection[eye].images[imageIndex];
+            }
 
             // Patch the layer.
             layer.ColorTexture[eye] = xrSwapchain.stereoProjection[eye].ovrSwapchain;

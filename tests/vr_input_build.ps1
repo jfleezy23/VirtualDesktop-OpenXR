@@ -15,6 +15,7 @@ $output = Join-Path $repo 'bin/vr-input-tests'
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 $includeDirectories = @(
     $SourceDirectory, $RuntimeObjectDirectory, (Join-Path $repo 'RuntimeConfiguration'),
+    (Join-Path $repo 'nr-frame-generation/include'),
     (Join-Path $repo 'external/OpenXR-SDK/include'),
     (Join-Path $repo 'external/OpenXR-SDK/src/common'),
     (Join-Path $repo 'external/OpenXR-MixedReality/Shared'),

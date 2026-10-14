@@ -90,12 +90,24 @@ namespace virtualdesktop_openxr {
             if (!m_sessionLossPending) {
                 m_sessionLossPending = !m_hmdStatus.HmdPresent || m_hmdStatus.DisplayLost || m_hmdStatus.ShouldQuit;
             }
-            if (!m_shouldRecenter && m_hmdStatus.ShouldRecenter) {
+            const bool recentering = !m_shouldRecenter && m_hmdStatus.ShouldRecenter;
+            const bool recenterSignal = m_hmdStatus.ShouldRecenter && !m_fgObservedRecenter;
+            if (recentering) {
                 // We will send one event for each world-locked reference space (LOCAL, STAGE and LOCAL_FLOOR_EXT).
                 m_shouldRecenter = !(has_XR_EXT_local_floor || m_apiMinor >= 1) ? 2 : 3;
                 m_recenterTime = ovrTimeToXrTime(ovr_GetTimeInSeconds());
 
                 ovr_ClearShouldRecenterFlag(m_ovrSession);
+            }
+            if (m_frameGenerationMode && (recenterSignal || m_fgObservedVisible != !!m_hmdStatus.IsVisible)) {
+                CHECK_MSG(m_fgHistoryEpoch != UINT64_MAX, "Frame-generation history epoch exhausted");
+                ++m_fgHistoryEpoch;
+                m_fgObservedVisible = !!m_hmdStatus.IsVisible;
+            }
+            if (m_frameGenerationMode) {
+                // Clearing the backend flag acknowledges this signal. Pending
+                // application events must not hide a subsequent backend recenter.
+                m_fgObservedRecenter = !recentering && !!m_hmdStatus.ShouldRecenter;
             }
             updateSessionState();
 
@@ -167,7 +179,15 @@ namespace virtualdesktop_openxr {
             }
 
             // Wait for OVR to be ready for the next frame.
-            const long long ovrFrameId = m_frameWaited;
+            if (m_frameGenerationMode && m_fgTimelineReanchor.exchange(false)) {
+                m_fgNextReservedNativeId = std::max(m_fgWorkerGroupNativeId.load(), m_fgPublishedEndNativeId.load());
+                if (m_frameBegun > m_frameCompleted) {
+                    m_fgNextReservedNativeId += std::clamp(m_fgBegunReservation.multiplier, 1u, 3u);
+                }
+                m_fgLastReservedTime = 0;
+            }
+            const long long ovrFrameId =
+                m_frameGenerationMode ? static_cast<long long>(m_fgNextReservedNativeId) : m_frameWaited;
             if (!m_useAsyncSubmission) {
                 TraceLocalActivity(waitToBeginFrame);
                 TraceLoggingWriteStart(waitToBeginFrame, "OVR_WaitToBeginFrame", TLArg(ovrFrameId, "FrameId"));
@@ -180,7 +200,11 @@ namespace virtualdesktop_openxr {
                     const bool doRunningStart = m_useRunningStart.load(std::memory_order_relaxed);
                     const double predictedFrameDuration = m_predictedFrameDuration;
                     lock.unlock();
-                    waitForAsyncSubmissionIdle(doRunningStart, predictedFrameDuration);
+                    if (m_frameGenerationMode) {
+                        waitForFrameGenerationCapacity();
+                    } else {
+                        waitForAsyncSubmissionIdle(doRunningStart, predictedFrameDuration);
+                    }
                     lock.lock();
                 }
                 TraceLoggingWrite(g_traceProvider, "AcquiredFrame", TLArg(ovrFrameId, "FrameId"));
@@ -192,6 +216,24 @@ namespace virtualdesktop_openxr {
 
             const double now = ovr_GetTimeInSeconds();
             double predictedDisplayTime = ovr_GetPredictedDisplayTime(m_ovrSession, ovrFrameId);
+            if (m_frameGenerationMode) {
+                const auto period = static_cast<int64_t>(m_idealFrameDuration * 1e9);
+                auto first = ovrTimeToXrTime(predictedDisplayTime);
+                if (m_fgLastReservedTime && m_fgLastReservedTime <= INT64_MAX - period) {
+                    first = std::max(first, m_fgLastReservedTime + period);
+                }
+                const auto multiplier = m_fgDesiredMultiplier.load();
+                m_fgWaitedReservation = m_frameGenerationCadence.reserve(
+                    ovrTimeToXrTime(now), first, period, multiplier, m_fgNextReservedNativeId);
+                m_fgWaitedReservation.historyEpoch = m_fgHistoryEpoch;
+                m_fgWaitedReservation.shouldRender = !!frameState->shouldRender;
+                if (m_fgWaitedReservation.valid) {
+                    frameState->predictedDisplayTime = m_fgWaitedReservation.currentTarget;
+                    m_fgLastReservedTime = m_fgWaitedReservation.currentTarget;
+                    m_fgNextReservedNativeId += multiplier;
+                    predictedDisplayTime = xrTimeToOvrTime(frameState->predictedDisplayTime);
+                }
+            }
             TraceLoggingWrite(g_traceProvider,
                               "WaitFrame",
                               TLArg(now, "Now"),
@@ -200,16 +242,22 @@ namespace virtualdesktop_openxr {
                               TLArg(waitTimer.query(), "WaitDurationUs"));
 
             // Setup the app frame for use and the next frame for this call.
-            frameState->predictedDisplayTime = ovrTimeToXrTime(predictedDisplayTime);
+            frameState->predictedDisplayTime = m_frameGenerationMode && m_fgWaitedReservation.valid
+                                                   ? m_fgWaitedReservation.currentTarget
+                                                   : ovrTimeToXrTime(predictedDisplayTime);
 
             // Workaround: during early calls, OVR times might violate OpenXR rules.
             if (frameState->predictedDisplayTime <= m_lastPredictedDisplayTime) {
                 frameState->predictedDisplayTime = m_lastPredictedDisplayTime + 1;
+                m_fgWaitedReservation.valid = false;
             }
             m_lastPredictedDisplayTime = frameState->predictedDisplayTime;
 
             // We always use the native frame duration, regardless of Smart Smoothing.
-            frameState->predictedDisplayPeriod = (XrDuration)(m_predictedFrameDuration * 1e9);
+            frameState->predictedDisplayPeriod =
+                (XrDuration)(m_frameGenerationMode && m_fgWaitedReservation.valid
+                                 ? m_fgWaitedReservation.period * m_fgWaitedReservation.multiplier
+                                 : m_predictedFrameDuration * 1e9);
 
             m_frameTimerApp.start();
 
@@ -292,6 +340,16 @@ namespace virtualdesktop_openxr {
             // xrBeginFrame refers to the next frame and the previously begun frame is forfeited by the application."
             // Therefore, we always advance m_frameBegun even upon discard.
             m_frameBegun = m_frameWaited;
+            if (m_frameGenerationMode) {
+                if (frameDiscarded) {
+                    // Returned timestamps cannot be rewritten. This frame is
+                    // NR-only; future waits reanchor against the native worker.
+                    m_fgWaitedReservation.valid = false;
+                    m_fgNeedReprime = true;
+                    m_fgTimelineReanchor = true;
+                }
+                m_fgBegunReservation = m_fgWaitedReservation;
+            }
 
             if (IsTraceEnabled()) {
                 waitTimer.stop();
@@ -407,11 +465,20 @@ namespace virtualdesktop_openxr {
             if (m_useAsyncSubmission) {
                 // Polling and exit requests must still progress while the backend is waiting.
                 lock2.unlock();
-                waitForAsyncSubmissionIdle();
+                if (m_frameGenerationMode) {
+                    waitForFrameGenerationCapacity();
+                } else {
+                    waitForAsyncSubmissionIdle();
+                }
                 lock2.lock();
 
                 // From this point, we know that the asynchronous thread is waiting, and we may use the submission
                 // context.
+            }
+
+            std::unique_lock contextLease(m_fgContextMutex, std::defer_lock);
+            if (m_frameGenerationMode) {
+                contextLease.lock();
             }
 
             // Serializes the app work between D3D12/Vulkan and D3D11.
@@ -444,6 +511,8 @@ namespace virtualdesktop_openxr {
             m_precompositor.isFirstProjectionLayer = true;
             m_precompositor.resolvedSwapchainImages.clear();
             m_precompositor.pendingSwapchainCommits.clear();
+            m_precompositor.finalNrColour = {};
+            m_precompositor.pendingColourCommits = {};
             m_precompositor.sharpenFactor = m_sharpenFactor.load(std::memory_order_relaxed);
             {
                 // Both eyes and all layers in this frame use the same live NR configuration.
@@ -528,6 +597,28 @@ namespace virtualdesktop_openxr {
                 layersAllocator.push_back({});
                 layersAllocator.back().Header.Type = ovrLayerType_Disabled;
             }
+            if (m_frameGenerationMode) {
+                const bool captured = prepareFrameGeneration(*frameEndInfo);
+                if (!captured) {
+                    for (auto chain : m_precompositor.pendingColourCommits) {
+                        if (!chain) {
+                            continue;
+                        }
+                        // An internal source must not fill a compositor chain
+                        // that no End references. Fallback still commits every
+                        // final color chain before publishing the full layers.
+                        const bool submitted =
+                            std::any_of(layersAllocator.begin(), layersAllocator.end(), [&](const auto& layer) {
+                                return (layer.Header.Type == ovrLayerType_EyeFov ||
+                                        layer.Header.Type == ovrLayerType_EyeFovDepth) &&
+                                       (layer.EyeFov.ColorTexture[0] == chain || layer.EyeFov.ColorTexture[1] == chain);
+                            });
+                        if (submitted) {
+                            CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, chain));
+                        }
+                    }
+                }
+            }
 
             if (IsTraceEnabled() && m_gpuTimerPrecomposition[0]) {
                 m_gpuTimerPrecomposition[m_currentTimerIndex]->stop();
@@ -603,7 +694,22 @@ namespace virtualdesktop_openxr {
                                   TLArg(lastPrecompositionTime, "LastPrecompositionTimeUs"));
 
                 std::unique_lock lock(m_asyncSubmissionMutex);
+                if (m_frameGenerationMode && m_asyncSubmissionError) {
+                    std::rethrow_exception(m_asyncSubmissionError);
+                }
+                if (m_frameGenerationMode) {
+                    CHECK_MSG(!m_terminateAsyncThread, "Frame-generation submission is stopping");
+                }
                 m_layersForAsyncSubmission.swap(layersAllocator);
+                if (m_frameGenerationMode) {
+                    CHECK_MSG(!m_fgTransactionForSubmission.ticket.token, "Unretired frame-generation publication");
+                    m_fgTransactionForSubmission = std::move(m_fgTransactionForFrame);
+                    m_fgTransactionForFrame = {};
+                    m_fgReservationForSubmission = m_fgBegunReservation;
+                    m_fgPublishedEndNativeId =
+                        std::max(m_fgWorkerGroupNativeId.load(), m_fgPublishedEndNativeId.load()) +
+                        std::clamp(m_fgBegunReservation.multiplier, 1u, 3u);
+                }
                 m_asyncNextFrameId = m_frameBegun;
                 m_asyncSubmissionReady = false;
 
@@ -1235,6 +1341,10 @@ namespace virtualdesktop_openxr {
     }
 
     void OpenXrRuntime::asyncSubmissionThread() {
+        if (m_frameGenerationMode) {
+            asyncFrameGenerationThread();
+            return;
+        }
         TraceLocalActivity(local);
         TraceLoggingWriteStart(local, "AsyncSubmissionThread");
 
@@ -1342,7 +1452,11 @@ namespace virtualdesktop_openxr {
         std::unique_lock lock(m_asyncSubmissionMutex);
 
         bool wokeUpEarly = false;
-        const auto ready = [&] { return m_asyncSubmissionReady || m_terminateAsyncThread || m_asyncSubmissionError; };
+        const auto ready = [&] {
+            return m_terminateAsyncThread || m_asyncSubmissionError ||
+                   (m_asyncSubmissionReady &&
+                    (!m_frameGenerationMode || (!m_fgActiveSubmission && m_layersForAsyncSubmission.empty())));
+        };
         if (doRunningStart && m_lastWaitToBeginFrameTime != std::chrono::high_resolution_clock::time_point{}) {
             constexpr double RunningStart = 0.002;
             const auto timeout =

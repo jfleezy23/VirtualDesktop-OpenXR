@@ -2,6 +2,8 @@
 
 import argparse
 import difflib
+import hashlib
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -26,6 +28,8 @@ SECRET_PATTERNS = (
     re.compile(r"\b(?:password|client_secret|api_key|access_token)\s*[:=]\s*['\"][^'\"\s]{8,}['\"]", re.IGNORECASE),
 )
 MACHINE_PATH = re.compile(r"[A-Za-z]:[/\\](?:Users|Documents and Settings)[/\\]|/(?:Users|home)/[^/\s]+/", re.IGNORECASE)
+VENDOR_ROOT = "nr-frame-generation/vendor/ofxr/"
+VENDOR_PIN = "07449429c139e5d2070b6f0855ed5323de7cee00"
 
 
 class CheckError(Exception):
@@ -105,6 +109,28 @@ def check_repository(repo, base, formatter):
 
     format_inputs = []
     checked = 0
+    immutable_vendor = set()
+    manifest_path = repo / VENDOR_ROOT / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest["repository"] != "djules75/OFXR-Bridge" or manifest["commit"] != VENDOR_PIN:
+                raise ValueError("wrong source pin")
+            for name, digest in manifest["files"].items():
+                relative = Path(name)
+                if relative.is_absolute() or ".." in relative.parts or "\\" in name:
+                    raise ValueError("invalid source path")
+                path = VENDOR_ROOT + name
+                physical = repo / path
+                if not physical.is_file() or physical.is_symlink() or hashlib.sha256(physical.read_bytes()).hexdigest() != digest:
+                    failures.append(f"vendor identity: {path}")
+                else:
+                    immutable_vendor.add(path)
+            for path in tracked | untracked:
+                if path.startswith(VENDOR_ROOT) and path != VENDOR_ROOT + "manifest.json" and path not in immutable_vendor:
+                    failures.append(f"vendor identity: {path} (not an immutable manifest member)")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            failures.append("vendor identity: invalid immutable source manifest")
     for path in sorted(tracked | untracked):
         physical_path = repo / path
         if not physical_path.is_file():
@@ -140,7 +166,7 @@ def check_repository(repo, base, formatter):
                     failures.append(f"machine path: {path}:{number}")
         if current_text.endswith("\n\n") and not (previous_text or "").endswith("\n\n"):
             failures.append(f"whitespace: {path} (new blank line at end of file)")
-        if relative_path.suffix.lower() in CPP_SUFFIXES and not path.casefold().startswith("external/"):
+        if relative_path.suffix.lower() in CPP_SUFFIXES and not path.casefold().startswith("external/") and path not in immutable_vendor:
             if path not in base_tree:
                 format_inputs.append((path, current_text, []))
             elif ranges:

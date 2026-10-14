@@ -4,6 +4,7 @@ param(
     [string]$SourceDirectory = '',
     [string]$OutputDirectory = '',
     [string]$MsBuildPath = '',
+    [string]$VCToolsVersion = '',
     [switch]$Analyze
 )
 $ErrorActionPreference = 'Stop'
@@ -66,6 +67,7 @@ $arguments = @(
     '/fl', "/flp:LogFile=$output/build.log;Verbosity=normal;NoSummary"
 )
 if ($Analyze) { $arguments += '/p:WholeProgramOptimization=false' }
+if ($VCToolsVersion) { $arguments += "/p:VCToolsVersion=$VCToolsVersion" }
 & $MsBuildPath @arguments
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Output "PASS: core $Configuration|$Platform (analyze=$Analyze); objects: $objects"

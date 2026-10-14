@@ -1,0 +1,43 @@
+{
+  "repository": "djules75/OFXR-Bridge",
+  "commit": "07449429c139e5d2070b6f0855ed5323de7cee00",
+  "files": {
+    "src/d3d12/d3d12_history.cpp": "ca74f5e78d5fac066f7eedcd82138b5c9660f5006e22bce050a2c7b56d3f6c2e",
+    "src/d3d12/d3d12_frame_synthesizer.cpp": "fa68a0c3e378f99d83c6f17b8bb9d16affd522bdf7a2d44001a734d005680453",
+    "src/common/dlss_motion_vectors.cpp": "f0be8d3c9449d53273e76e6625ab66adc7f2dbccc8ad4963a12b2460cb5d6139",
+    "src/core/pose.cpp": "11e0d62d44a4e22ba890bfd76ba6af2a39264192734ca5f8c92ec93eda426e70",
+    "src/layer/bridge_flight_logger.cpp": "0adb955f3ebdf51499ea1e0015b98b0db93c94cec2e56b046c9f904f3dd7f2c5",
+    "src/d3d12/frame_synthesis.hlsl": "d3877bdf64a5a788089f9fced47847185a4ab4946d9e8e10cda41a1221484e37",
+    "LICENSE": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
+    "THIRD_PARTY.md": "e6a7a175acc60dcd7de31d463709d30712a8865d6a345242484ab29a099cf42a",
+    "licenses/AMD-FidelityFX-MIT.txt": "82cf74fc23885107c7f69249ac3f1dac55898ff68320eb2c753984cae6b2d78a",
+    "include/xrfg/d3d12_history.hpp": "538839ea53898dff93bd86f90ba00ac14871c2e4200f02389d7c2f2453b325ef",
+    "include/xrfg/d3d12_frame_synthesizer.hpp": "0cc635b00c1b0e9b50e39916f0565a54519230cc1fca6ec6a9bc385c48821735",
+    "include/xrfg/dlss_motion_vectors.hpp": "0064414236bfd20be680f00292205652812c59c421b8d471b5067bf8a31eccfa",
+    "include/xrfg/pose.hpp": "72a4e3c83420270ea393f68f1c74781f24cb21081f217793b9e7877befbe9997",
+    "include/xrfg/fps_overlay_model.hpp": "570c3d545623e940d31474f52e559ae64ac92cf89b76c1e24b390cd09742781b",
+    "include/xrfg/bridge_flight_logger.hpp": "f0df00f9eea3195e79b1952daacfcb942c3ee08c1ab4a9b45561ba9a058aae7e",
+    "external/NVIDIA-Optical-Flow-SDK-5.0.7/Optical_Flow_SDK_5.0.7/NvOFInterface/nvOpticalFlowCommon.h": "2fa56acc259045a829b8f1c4d8465d3f23610a51d8547c9b3ba211049f6d0a7b",
+    "external/NVIDIA-Optical-Flow-SDK-5.0.7/Optical_Flow_SDK_5.0.7/NvOFInterface/nvOpticalFlowD3D12.h": "802261e5e77052e249f77d554c1d9caaefbfea31357b73766e158a6f7b9e762b"
+  },
+  "upstream_files": {
+    "src/d3d12/d3d12_history.cpp": "ca74f5e78d5fac066f7eedcd82138b5c9660f5006e22bce050a2c7b56d3f6c2e",
+    "src/d3d12/d3d12_frame_synthesizer.cpp": "fa68a0c3e378f99d83c6f17b8bb9d16affd522bdf7a2d44001a734d005680453",
+    "src/common/dlss_motion_vectors.cpp": "f0be8d3c9449d53273e76e6625ab66adc7f2dbccc8ad4963a12b2460cb5d6139",
+    "src/core/pose.cpp": "11e0d62d44a4e22ba890bfd76ba6af2a39264192734ca5f8c92ec93eda426e70",
+    "src/layer/bridge_flight_logger.cpp": "0adb955f3ebdf51499ea1e0015b98b0db93c94cec2e56b046c9f904f3dd7f2c5",
+    "src/d3d12/frame_synthesis.hlsl": "d3877bdf64a5a788089f9fced47847185a4ab4946d9e8e10cda41a1221484e37",
+    "LICENSE": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
+    "THIRD_PARTY.md": "e6a7a175acc60dcd7de31d463709d30712a8865d6a345242484ab29a099cf42a",
+    "licenses/AMD-FidelityFX-MIT.txt": "82cf74fc23885107c7f69249ac3f1dac55898ff68320eb2c753984cae6b2d78a",
+    "include/xrfg/d3d12_history.hpp": "538839ea53898dff93bd86f90ba00ac14871c2e4200f02389d7c2f2453b325ef",
+    "include/xrfg/d3d12_frame_synthesizer.hpp": "0cc635b00c1b0e9b50e39916f0565a54519230cc1fca6ec6a9bc385c48821735",
+    "include/xrfg/dlss_motion_vectors.hpp": "0064414236bfd20be680f00292205652812c59c421b8d471b5067bf8a31eccfa",
+    "include/xrfg/pose.hpp": "72a4e3c83420270ea393f68f1c74781f24cb21081f217793b9e7877befbe9997",
+    "include/xrfg/fps_overlay_model.hpp": "570c3d545623e940d31474f52e559ae64ac92cf89b76c1e24b390cd09742781b",
+    "include/xrfg/bridge_flight_logger.hpp": "f0df00f9eea3195e79b1952daacfcb942c3ee08c1ab4a9b45561ba9a058aae7e",
+    "external/NVIDIA-Optical-Flow-SDK-5.0.7/Optical_Flow_SDK_5.0.7/NvOFInterface/nvOpticalFlowCommon.h": "cdbdbf0797fc02d2de1051520d4164bb1e36b7722009f46cb16216675319436a",
+    "external/NVIDIA-Optical-Flow-SDK-5.0.7/Optical_Flow_SDK_5.0.7/NvOFInterface/nvOpticalFlowD3D12.h": "f12bbc6c54278cb5d3ae81723ca0363644f672fc3e72b635a709470ffdd6886f"
+  },
+  "normalization": "NVIDIA interface headers: trailing horizontal whitespace only"
+}

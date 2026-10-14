@@ -817,11 +817,13 @@ namespace virtualdesktop_openxr {
                     desc.MipLevels = 1;
                     desc.SampleCount = 1;
                     if (isSRGBFormat(xrSwapchain.dxgiFormatForSubmission)) {
-                        desc.Format = OVR_FORMAT_B8G8R8A8_UNORM_SRGB;
-                        format = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+                        desc.Format =
+                            m_frameGenerationMode ? OVR_FORMAT_R8G8B8A8_UNORM_SRGB : OVR_FORMAT_B8G8R8A8_UNORM_SRGB;
+                        format =
+                            m_frameGenerationMode ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
                     } else {
-                        desc.Format = OVR_FORMAT_B8G8R8A8_UNORM;
-                        format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                        desc.Format = m_frameGenerationMode ? OVR_FORMAT_R8G8B8A8_UNORM : OVR_FORMAT_B8G8R8A8_UNORM;
+                        format = m_frameGenerationMode ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM;
                     }
                     desc.BindFlags = ovrTextureBind_DX_RenderTarget | ovrTextureBind_DX_UnorderedAccess;
                     desc.MiscFlags = ovrTextureMisc_DX_Typeless;

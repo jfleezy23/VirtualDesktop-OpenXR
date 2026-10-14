@@ -27,6 +27,7 @@
 #include "framework/dispatch.gen.h"
 
 #include "accessibility.h"
+#include "frame_generation.h"
 #include "utils.h"
 
 #include "BodyState.h"
@@ -312,6 +313,7 @@ namespace virtualdesktop_openxr {
 
       private:
         friend struct RuntimeInputRegression;
+        friend struct RuntimeFrameGenerationRegression;
 
         struct SettingsWatcherState {
             wil::unique_handle event;
@@ -414,6 +416,10 @@ namespace virtualdesktop_openxr {
         };
 
         struct PrecompositorState {
+            std::array<ComPtr<ID3D11Texture2D>, xr::StereoView::Count> finalNrColour;
+            // NR plus the two final sharpen/upscale outputs. In FG sessions
+            // commit only final chains actually sent down the legacy path.
+            std::array<ovrTextureSwapChain, 3> pendingColourCommits{};
             DlssnrSettings dlssnrSettings;
             float sharpenFactor{0.f};
             // State for the current frame.
@@ -878,6 +884,39 @@ namespace virtualdesktop_openxr {
         std::vector<ovrLayer_Union> m_layersForFrame;
         std::vector<ovrLayer_Union> m_layersForAsyncSubmission;
         std::chrono::high_resolution_clock::time_point m_lastWaitToBeginFrameTime{};
+
+        uint32_t m_frameGenerationMode{};
+        bool m_frameGenerationUnavailable{};
+        std::atomic<uint32_t> m_fgDesiredMultiplier{1};
+        std::atomic<bool> m_fgNeedReprime{false};
+        std::atomic<bool> m_fgTimelineReanchor{false};
+        std::atomic<uint64_t> m_fgWorkerGroupNativeId{0}, m_fgPublishedEndNativeId{0};
+        // Graphics/host methods use this lease. Queue waits never hold it.
+        std::mutex m_fgContextMutex;
+        // Protected by m_asyncSubmissionMutex. Legacy chains require full drain.
+        bool m_fgActiveSubmission{}, m_fgActiveOwnedPixels{};
+        std::unique_ptr<FrameGeneration> m_frameGeneration;
+        FrameGenerationCadence m_frameGenerationCadence;
+        PredictionReservation m_fgWaitedReservation, m_fgBegunReservation;
+        uint64_t m_fgNextReservedNativeId{};
+        int64_t m_fgLastReservedTime{}, m_fgPreviousCapturedTime{};
+        uint64_t m_fgHistoryEpoch{}, m_fgPreviousHistoryEpoch{};
+        bool m_fgObservedVisible{}, m_fgObservedRecenter{};
+        XrSpace m_fgPreviousSpace{XR_NULL_HANDLE};
+        std::array<ovrFovPort, 2> m_fgPreviousFov{};
+        float m_fgPreviousSharpen{};
+        DlssnrSettings m_fgPreviousSettings;
+        OwnedFrameTransaction m_fgTransactionForFrame, m_fgTransactionForSubmission;
+        OwnedFrameTransaction m_fgFailedTransaction;
+        std::vector<ovrLayer_Union> m_fgFailedLayers;
+        std::array<std::array<SwapchainSlice, 3>, 2> m_fgPresentationBanks;
+        PredictionReservation m_fgReservationForSubmission;
+        ovrSizei m_fgEyeResolution{};
+        DXGI_FORMAT m_fgFormat{DXGI_FORMAT_UNKNOWN};
+        bool prepareFrameGeneration(const XrFrameEndInfo& info);
+        void cleanupFrameGeneration();
+        void asyncFrameGenerationThread();
+        void waitForFrameGenerationCapacity();
 
         // Body tracking thread.
         bool m_terminateBodyStateThread{false};

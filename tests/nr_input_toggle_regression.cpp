@@ -14,7 +14,18 @@ namespace {
     }
     std::atomic<DWORD> enabled{};
     DWORD coverage = 100;
+    DWORD requestedFrameGeneration{}, nrSharpenSetting{}, nrUpscalingSetting{100};
     bool expectDepth[2] = {true, true};
+    std::function<void(const ovrLayerEyeFov&)> observeProjection;
+    std::function<void(long long)> observeNativeEnd;
+    std::function<void(ovrTextureSwapChain)> observeNativeCommit;
+    ovrResult OVR_CDECL captureCommit(ovrSession session, ovrTextureSwapChain chain) {
+        const auto result = hookCommit(session, chain);
+        if (OVR_SUCCESS(result) && observeNativeCommit) {
+            observeNativeCommit(chain);
+        }
+        return result;
+    }
     std::wstring settingsKey;
     decltype(&RegGetValueW) originalRead = RegGetValueW;
 
@@ -31,10 +42,16 @@ namespace {
         else if (setting == L"FoveationSize")
             value = coverage;
         else if (setting == L"upscaling")
-            value = 100;
-        else if (setting == L"quirk_use_depth" || setting == L"quirk_disable_async_submission")
+            value = nrUpscalingSetting;
+        else if (setting == L"FrameGenerationMode")
+            value = requestedFrameGeneration;
+        else if (setting == L"sharpen")
+            value = nrSharpenSetting;
+        else if (setting == L"quirk_disable_async_submission")
+            value = requestedFrameGeneration ? 0 : 1;
+        else if (setting == L"quirk_use_depth")
             value = 1;
-        else if (setting != L"sharpen")
+        else
             return ERROR_FILE_NOT_FOUND;
         if (type)
             *type = REG_DWORD;
@@ -132,6 +149,9 @@ namespace {
         {
             std::lock_guard lock(captureMutex);
             try {
+                if (observeNativeEnd) {
+                    observeNativeEnd(frame);
+                }
                 bool found{};
                 for (unsigned i = 0; i < count; ++i) {
                     if (!layers[i] ||
@@ -143,6 +163,9 @@ namespace {
                         if (expectDepth[eye])
                             checkDepth(session, *reinterpret_cast<const ovrLayerEyeFovDepth*>(layers[i]), eye);
                         readColor(session, *reinterpret_cast<const ovrLayerEyeFov*>(layers[i]), eye);
+                    }
+                    if (observeProjection) {
+                        observeProjection(*reinterpret_cast<const ovrLayerEyeFov*>(layers[i]));
                     }
                     found = true;
                     break;
@@ -177,7 +200,7 @@ namespace {
             if (result == NO_ERROR)
                 result = DetourUpdateThread(GetCurrentThread());
             if (result == NO_ERROR)
-                result = DetourAttach(reinterpret_cast<PVOID*>(&originalCommit), hookCommit);
+                result = DetourAttach(reinterpret_cast<PVOID*>(&originalCommit), captureCommit);
             if (result == NO_ERROR)
                 result = DetourAttach(reinterpret_cast<PVOID*>(&originalEnd), captureEnd);
             if (result == NO_ERROR)
@@ -197,7 +220,7 @@ namespace {
             if (result == NO_ERROR)
                 result = DetourDetach(reinterpret_cast<PVOID*>(&originalEnd), captureEnd);
             if (result == NO_ERROR)
-                result = DetourDetach(reinterpret_cast<PVOID*>(&originalCommit), hookCommit);
+                result = DetourDetach(reinterpret_cast<PVOID*>(&originalCommit), captureCommit);
             if (result == NO_ERROR)
                 result = DetourTransactionCommit();
             else if (transaction)
@@ -398,6 +421,7 @@ namespace virtualdesktop_openxr {
     };
 } // namespace virtualdesktop_openxr
 
+#ifndef VDXR_NR_HELPERS_ONLY
 int main(int argc, char** argv) {
     std::cout << std::unitbuf;
     XrInstance instance{};
@@ -654,3 +678,4 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
+#endif

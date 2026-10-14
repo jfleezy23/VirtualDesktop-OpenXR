@@ -463,6 +463,10 @@ namespace virtualdesktop_openxr {
         if (m_useAsyncSubmission && !m_needStartAsyncSubmissionThread) {
             waitForAsyncSubmissionIdle();
         }
+        std::unique_lock contextLease(m_fgContextMutex, std::defer_lock);
+        if (m_frameGenerationMode) {
+            contextLease.lock();
+        }
         flushSubmissionContext();
         // The output Wait may have failed before D3D11 acquired a dependency on pending NR input reads.
         if (m_dlssnrContext) {
