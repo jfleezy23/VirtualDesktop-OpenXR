@@ -506,7 +506,7 @@ namespace virtualdesktop_openxr {
                     HRESULT result;
                     do {
                         {
-                            std::unique_lock contextLease(m_fgContextMutex);
+                            std::unique_lock retirementLease(m_fgContextMutex);
                             result = m_frameGeneration->retire(transaction);
                         }
                         if (result != VDXRFG_E_BUSY) {
