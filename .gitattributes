@@ -1,1 +1,4 @@
 *.gen.* text eol=lf
+
+# Preserve the exact bytes recorded in the pinned frame-generation manifests.
+nr-frame-generation/vendor/** -text
