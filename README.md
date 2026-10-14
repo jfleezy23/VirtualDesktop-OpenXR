@@ -27,6 +27,16 @@ render-target views.
 On the NR branch, inputs are prepared only when that frame enables NR. Imports become visible only after a complete
 generation is ready, and failed NT imports retain the owned export needed for retry. NR coverage is configurable.
 
+The experimental branch also includes optional **OFXR 2×/3× PC frame generation** after NR, sharpening and upscaling,
+with Off / OFXR 2× / OFXR 3× in the NR Controls panel. Final real frames retain full NR processing when synthesis is late.
+GPU copies are staged before the next producer can block the shared submission context, and destination readiness uses
+a GPU fence event rather than timer polling.
+
+For installation, controls and rollback, follow the [NR/FG quick start](docs/NR-FG-QUICKSTART.md).
+Download the Windows x64 runtime and controls package from [Releases](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases).
+The [FG regression guide](tests/frame-generation.md) describes supported inputs, build requirements and test limits.
+The optional OFXR-derived module has separate [LGPL-3.0 notices and corresponding-source requirements](nr-frame-generation/NOTICE.md).
+
 These changes have local regression and build evidence. That evidence covers specific correctness and resource-creation
 behavior; it does not establish a measured headset latency, FPS, or image-quality improvement.
 
@@ -42,7 +52,8 @@ Core builds do not validate an installer. Proprietary NR vendor DLLs are supplie
 
 This is an independent community project. For the original runtime's documentation, see the
 [upstream wiki](https://github.com/mbucchia/VirtualDesktop-OpenXR/wiki). This fork makes no Khronos conformance claim and
-is provided as-is under the [MIT license](LICENSE); third-party notices remain in [THIRD_PARTY](THIRD_PARTY).
+is provided as-is. The runtime's [MIT license](LICENSE) and inherited [third-party notices](THIRD_PARTY) remain intact;
+the optional OFXR-derived synthesis module contains LGPL-3.0 code as documented in its [notice](nr-frame-generation/NOTICE.md).
 
 ## Upstream credit
 
