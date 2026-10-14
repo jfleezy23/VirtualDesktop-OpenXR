@@ -6,8 +6,8 @@ from tkinter import messagebox, ttk
 import winreg
 
 
-#REGISTRY_PATH = r"SOFTWARE\Virtual Desktop, Inc.\OpenXR"
-REGISTRY_PATH = r"SOFTWARE\VirtualDesktop-OpenXR"
+#REGISTRY_PATH = r"SOFTWARE\VirtualDesktop-OpenXR"
+REGISTRY_PATH = r"SOFTWARE\Virtual Desktop, Inc.\OpenXR"
 ENABLE_VALUE_NAME = "DLSSNR_Enabled"
 VALUE_NAMES = (
     "DLSSNR_Style",
@@ -19,6 +19,34 @@ VALUE_NAMES = (
 )
 VALUE_MAXIMUMS = (2, 100, 100, 100, 100, 100)
 VALUE_DEFAULTS = (0, 100, 20, 70, 50, 66)
+FRAME_GENERATION_VALUE_NAME = "FrameGenerationMode"
+FRAME_GENERATION_MODES = {"Off": 0, "OFXR 2×": 2, "OFXR 3×": 3}
+
+
+def read_frame_generation_mode():
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, 0,
+            winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
+        ) as key:
+            value, kind = winreg.QueryValueEx(key, FRAME_GENERATION_VALUE_NAME)
+    except FileNotFoundError:
+        return 0
+    if kind != winreg.REG_DWORD or value not in FRAME_GENERATION_MODES.values():
+        raise ValueError("Invalid saved frame-generation setting; select Off, OFXR 2× or OFXR 3×.")
+    return value
+
+
+def write_frame_generation_mode(value):
+    if value not in FRAME_GENERATION_MODES.values():
+        raise ValueError("Unsupported frame-generation mode")
+    with winreg.CreateKeyEx(
+        winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, 0,
+        winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY,
+    ) as key:
+        winreg.SetValueEx(key, FRAME_GENERATION_VALUE_NAME, 0, winreg.REG_DWORD, value)
+    if read_frame_generation_mode() != value:
+        raise OSError("Frame-generation setting readback did not match the selection")
 
 
 def is_elevated():
@@ -42,7 +70,7 @@ def relaunch_as_admin():
 def read_values():
     values = list(VALUE_DEFAULTS)
     try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH) as key:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
             for index, name in enumerate(VALUE_NAMES):
                 try:
                     value, _ = winreg.QueryValueEx(key, name)
@@ -56,7 +84,7 @@ def read_values():
 
 def read_enabled():
     try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH) as key:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
             value, _ = winreg.QueryValueEx(key, ENABLE_VALUE_NAME)
             return bool(int(value))
     except FileNotFoundError:
@@ -67,7 +95,7 @@ def write_value(name, value):
     maximum = 2 if name == "DLSSNR_Style" else 100
     value = max(0, min(maximum, int(value)))
     with winreg.CreateKeyEx(
-        winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, 0, winreg.KEY_SET_VALUE
+        winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, 0, winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY
     ) as key:
         winreg.SetValueEx(key, name, 0, winreg.REG_DWORD, int(value))
 
@@ -125,11 +153,45 @@ class VDXRRegistryApp:
                 row=index + 3, column=2, sticky="e", padx=(8, 0), pady=4
             )
 
-        self.status = tk.StringVar(value=REGISTRY_PATH)
+        fg_error = None
+        try:
+            mode = read_frame_generation_mode()
+        except (ValueError, OSError) as error:
+            mode, fg_error = 0, str(error)
+        self.saved_frame_generation = next(label for label, value in FRAME_GENERATION_MODES.items() if value == mode)
+        self.frame_generation = tk.StringVar(value=self.saved_frame_generation)
+        ttk.Label(frame, text="PC frame generation").grid(row=9, column=0, sticky="w", pady=(12, 4))
+        selector = ttk.Combobox(
+            frame, textvariable=self.frame_generation, values=tuple(FRAME_GENERATION_MODES),
+            state="readonly", width=22,
+        )
+        selector.grid(row=9, column=1, columnspan=2, sticky="ew", pady=(12, 4))
+        selector.bind("<<ComboboxSelected>>", self.on_frame_generation_changed)
+        ttk.Label(frame, text="Restart the game after changing frame generation.").grid(
+            row=10, column=0, columnspan=3, sticky="w",
+        )
+        ttk.Label(frame, text="Turn SSW off in Virtual Desktop when testing OFXR.").grid(
+            row=11, column=0, columnspan=3, sticky="w",
+        )
+        self.status = tk.StringVar(value=fg_error or REGISTRY_PATH)
         ttk.Label(frame, textvariable=self.status).grid(
-            row=9, column=0, columnspan=3, sticky="w", pady=(12, 0)
+            row=12, column=0, columnspan=3, sticky="w", pady=(12, 0)
         )
         self.set_slider_state()
+
+    def on_frame_generation_changed(self, _event=None):
+        selection = self.frame_generation.get()
+        try:
+            write_frame_generation_mode(FRAME_GENERATION_MODES[selection])
+        except PermissionError:
+            self.frame_generation.set(self.saved_frame_generation)
+            self.status.set("Administrator access is required to save frame generation.")
+        except (OSError, ValueError, KeyError) as error:
+            self.frame_generation.set(self.saved_frame_generation)
+            self.status.set(f"Frame-generation setting error: {error}")
+        else:
+            self.saved_frame_generation = selection
+            self.status.set(f"Saved {selection}; restart the game.")
 
     def set_slider_state(self):
         state = tk.NORMAL if self.enabled.get() else tk.DISABLED
