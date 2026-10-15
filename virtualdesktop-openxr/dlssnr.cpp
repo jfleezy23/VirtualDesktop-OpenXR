@@ -504,7 +504,7 @@ namespace virtualdesktop_openxr {
             if (m_frameGenerationMode) {
                 ComPtr<ID3D11Resource> resource;
                 m_dlssnrOutputSwapchainSrvs[imageIndex]->GetResource(&resource);
-                CHECK_HRCMD(resource.As(&m_precompositor.finalNrColour[eye]));
+                CHECK_HRCMD(resource.As(&m_precompositor.finalColour[eye]));
             }
         }
 
@@ -622,33 +622,51 @@ namespace virtualdesktop_openxr {
     }
 
     void OpenXrRuntime::initializeDlssnrResources() {
+        if (m_dlssnrResourcesInitialized) {
+            return;
+        }
+        ComPtr<ID3D12Device> device;
+        std::unique_ptr<D3D12Utils::CommandContext> context;
+        ComPtr<ID3D12Fence> inFence;
+        ComPtr<ID3D11Fence> outFence;
+        NVSDK_NGX_Parameter* parameters{};
+        auto releaseParameters = MakeScopeGuard([&] {
+            if (parameters) {
+                NVSDK_NGX_D3D12_DestroyParameters(parameters);
+            }
+        });
         // DLSS-NR requires a D3D12 context. Create one on the matching adapter.
         ComPtr<IDXGIDevice> dxgiDevice;
         CHECK_HRCMD(m_ovrSubmissionDevice->QueryInterface(IID_PPV_ARGS(dxgiDevice.ReleaseAndGetAddressOf())));
 
         ComPtr<IDXGIAdapter> dxgiAdapter;
         CHECK_HRCMD(dxgiDevice->GetAdapter(dxgiAdapter.ReleaseAndGetAddressOf()));
-        CHECK_HRCMD(D3D12CreateDevice(
-            dxgiAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(m_dlssnrDevice.ReleaseAndGetAddressOf())));
+        if (m_dlssnrDevice) {
+            // Retry capability/module setup on the same successfully initialized
+            // SDK device; never repeatedly initialize a different device graph.
+            device = m_dlssnrDevice;
+        } else {
+            CHECK_HRCMD(D3D12CreateDevice(
+                dxgiAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device.ReleaseAndGetAddressOf())));
+        }
 
-        m_dlssnrContext = std::make_unique<D3D12Utils::CommandContext>(m_dlssnrDevice.Get());
+        context = std::make_unique<D3D12Utils::CommandContext>(device.Get());
 
         // We'll use a fence to serialize pre-compositor output to DLSS-NR input.
         {
             wil::unique_handle fenceHandle;
             CHECK_HRCMD(
                 m_ovrSubmissionCompletionFence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, fenceHandle.put()));
-            CHECK_HRCMD(m_dlssnrDevice->OpenSharedHandle(fenceHandle.get(),
-                                                         IID_PPV_ARGS(m_dlssnrInFence.ReleaseAndGetAddressOf())));
+            CHECK_HRCMD(device->OpenSharedHandle(fenceHandle.get(), IID_PPV_ARGS(inFence.ReleaseAndGetAddressOf())));
         }
 
         // We'll use a fence to serialize DLSS-NR output to OVR input.
         {
             wil::unique_handle handle;
-            CHECK_HRCMD(m_dlssnrDevice->CreateSharedHandle(
-                m_dlssnrContext->GetCompletionFence(), nullptr, GENERIC_ALL, nullptr, handle.put()));
-            CHECK_HRCMD(m_ovrSubmissionDevice->OpenSharedFence(
-                handle.get(), IID_PPV_ARGS(m_dlssnrOutFence.ReleaseAndGetAddressOf())));
+            CHECK_HRCMD(
+                device->CreateSharedHandle(context->GetCompletionFence(), nullptr, GENERIC_ALL, nullptr, handle.put()));
+            CHECK_HRCMD(
+                m_ovrSubmissionDevice->OpenSharedFence(handle.get(), IID_PPV_ARGS(outFence.ReleaseAndGetAddressOf())));
         }
 
         NVSDK_NGX_FeatureCommonInfo commonInfo{};
@@ -660,22 +678,35 @@ namespace virtualdesktop_openxr {
 #endif
         commonInfo.PathListInfo.Path = paths;
         commonInfo.PathListInfo.Length = std::size(paths);
-        CHECK_NGXCMD(NVSDK_NGX_D3D12_Init(
-            123456, virtualdesktop_openxr::programData.c_str(), m_dlssnrDevice.Get(), &commonInfo));
+        if (!m_dlssnrDevice) {
+            CHECK_NGXCMD(
+                NVSDK_NGX_D3D12_Init(123456, virtualdesktop_openxr::programData.c_str(), device.Get(), &commonInfo));
+        }
 
-        CHECK_NGXCMD(NVSDK_NGX_D3D12_GetCapabilityParameters(&m_ngxParameters));
+        // Capability acquisition can fail after SDK initialization. Retain its
+        // device across that failure; readiness still requires the complete
+        // graph below. Global NGX shutdown could disturb the host game's DLSS.
+        m_dlssnrDevice = device;
+
+        CHECK_NGXCMD(NVSDK_NGX_D3D12_GetCapabilityParameters(&parameters));
         if (ngx::dlssnrModule) {
             CHECK_MSG(ngx::Init_Ext && ngx::Shutdown1, "DLSS-NR module load did not complete");
-            CHECK_NGXCMD(ngx::Init_Ext(123456,
-                                       virtualdesktop_openxr::programData.c_str(),
-                                       m_dlssnrDevice.Get(),
-                                       NVSDK_NGX_Version_API,
-                                       nullptr));
-            ngx::initializedDevice = m_dlssnrDevice;
+            CHECK_NGXCMD(ngx::Init_Ext(
+                123456, virtualdesktop_openxr::programData.c_str(), device.Get(), NVSDK_NGX_Version_API, nullptr));
+            ngx::initializedDevice = device;
         }
+        // Publish the complete context/fences/parameters before allowing NR.
+        m_dlssnrDevice = std::move(device);
+        m_dlssnrContext = std::move(context);
+        m_dlssnrInFence = std::move(inFence);
+        m_dlssnrOutFence = std::move(outFence);
+        m_ngxParameters = parameters;
+        parameters = nullptr;
+        m_dlssnrResourcesInitialized = true;
     }
 
     void OpenXrRuntime::cleanupDlssnrResources() {
+        m_dlssnrResourcesInitialized = false;
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
             if (m_dlssnrFeature[eye]) {
                 CHECK_NGXCMD(m_dlssnrFeatureRelease[eye](m_dlssnrFeature[eye]));

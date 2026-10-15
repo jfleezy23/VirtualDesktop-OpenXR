@@ -76,7 +76,36 @@ namespace {
             std::array<uint32_t, 5> stats{};
             inspectStats(stats.data(), static_cast<uint32_t>(stats.size()));
             initCountAtFault = stats[0];
-            throw std::runtime_error("TEST ONLY: settings read after manual NR reinitialization");
+            throw std::runtime_error("TEST ONLY: session settings read");
+        }
+        // Keep the injected environment local to this process. Never change a
+        // player's NR/FG settings to run an API ownership regression.
+        if (key == HKEY_LOCAL_MACHINE && subkey && value &&
+            (wcsstr(subkey, L"Virtual Desktop, Inc.\\OpenXR") || wcsstr(subkey, L"VirtualDesktop-OpenXR"))) {
+            DWORD setting{};
+            if (!wcscmp(value, L"DLSSNR_Enabled") || !wcscmp(value, L"quirk_disable_async_submission")) {
+                setting = 1;
+            } else if (!wcscmp(value, L"FoveationSize")) {
+                setting = 100;
+            } else if (wcscmp(value, L"FrameGenerationMode")) {
+                return originalRegGetValue(key, subkey, value, flags, type, data, size);
+            }
+            if (type) {
+                *type = REG_DWORD;
+            }
+            if (!size) {
+                return data ? ERROR_INVALID_PARAMETER : ERROR_SUCCESS;
+            }
+            const auto available = *size;
+            *size = sizeof(setting);
+            if (!data) {
+                return ERROR_SUCCESS;
+            }
+            if (available < sizeof(setting)) {
+                return ERROR_MORE_DATA;
+            }
+            memcpy(data, &setting, sizeof(setting));
+            return ERROR_SUCCESS;
         }
         return originalRegGetValue(key, subkey, value, flags, type, data, size);
     }
@@ -85,14 +114,14 @@ namespace {
             throw std::runtime_error("Cannot install isolated settings fault");
     }
     struct SettingsFault {
-        SettingsFault(GetStats stats) {
+        SettingsFault(GetStats stats, bool armed = true) {
             faultThread = GetCurrentThreadId();
             inspectStats = stats;
             checkDetour(DetourTransactionBegin());
             checkDetour(DetourUpdateThread(GetCurrentThread()));
             checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalRegGetValue), faultRegGetValue));
             checkDetour(DetourTransactionCommit());
-            faultArmed = true;
+            faultArmed = armed;
         }
         ~SettingsFault() {
             faultArmed = false;
@@ -134,6 +163,7 @@ int main(int argc, char** argv) {
         auto getModuleName = reinterpret_cast<GetModuleName>(GetProcAddress(mock, "NR_Test_GetModuleName"));
         if (!getVariant || !getStats || !getHealth || !getModuleName || getVariant() != variant)
             throw std::runtime_error("Wrong facade: refusing to run against a vendor NR module");
+        SettingsFault isolatedSettings(getStats, false);
         HMODULE runtime = LoadLibraryW(runtimePath.c_str());
         if (!runtime)
             throw std::runtime_error("Cannot load isolated runtime");
@@ -216,6 +246,11 @@ int main(int argc, char** argv) {
         create.systemId = system;
         XrSession session{};
         XR_CHECK(xrCreateSession(instance, &create, &session));
+        std::array<uint32_t, 5> creationStats{};
+        getStats(creationStats.data(), static_cast<uint32_t>(creationStats.size()));
+        if (creationStats[0]) {
+            throw std::runtime_error("NR initialized during session creation before its first frame");
+        }
         XrSessionBeginInfo begin{XR_TYPE_SESSION_BEGIN_INFO};
         begin.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         XR_CHECK(xrBeginSession(session, &begin));
@@ -316,29 +351,28 @@ int main(int argc, char** argv) {
                 const auto oldInitCount = stats[0];
                 XrSession partial = reinterpret_cast<XrSession>(uintptr_t(0xbadf00d));
                 XrResult failedCreate{};
-                {
-                    SettingsFault fault(getStats);
-                    failedCreate = xrCreateSession(instance, &create, &partial);
-                }
-                requireResult(failedCreate, XR_ERROR_RUNTIME_FAILURE, "CreateSession after NR reinit settings fault");
+                faultArmed = true;
+                failedCreate = xrCreateSession(instance, &create, &partial);
+                faultArmed = false;
+                requireResult(failedCreate, XR_ERROR_RUNTIME_FAILURE, "CreateSession settings fault before lazy NR");
                 getStats(stats.data(), static_cast<uint32_t>(stats.size()));
                 std::array<uint32_t, 4> health{};
                 getHealth(health.data(), static_cast<uint32_t>(health.size()));
                 std::cout << "fault observed=" << faultObserved << " init at fault=" << initCountAtFault
                           << " init/shutdown=" << stats[0] << '/' << stats[4] << " initialized device=" << health[2]
                           << '\n';
-                if (!faultObserved || initCountAtFault != oldInitCount + 1)
-                    throw std::runtime_error("Settings fault did not run after actual manual NR reinitialization");
-                if (stats[0] != oldInitCount + 1 || stats[4] != stats[0] || health[2] || health[3] != stats[0])
-                    throw std::runtime_error("Failed CreateSession retained an initialized NR device without shutdown");
+                if (!faultObserved || initCountAtFault != oldInitCount)
+                    throw std::runtime_error("Session settings failure unexpectedly initialized NR");
+                if (stats[0] != oldInitCount || stats[4] != stats[0] || health[2] || health[3] != stats[0])
+                    throw std::runtime_error("Failed CreateSession must not initialize lazy NR resources");
                 if (partial != XR_NULL_HANDLE)
                     throw std::runtime_error("Failed CreateSession published/retained a session handle");
                 XrSession retry{};
                 XR_CHECK(xrCreateSession(instance, &create, &retry));
                 requireResult(xrDestroySession(retry), XR_SUCCESS, "DestroySession after retry create");
                 getStats(stats.data(), static_cast<uint32_t>(stats.size()));
-                if (stats[0] != oldInitCount + 2 || stats[4] != stats[0])
-                    throw std::runtime_error("Session retry did not pair every manual NR initialization with shutdown");
+                if (stats[0] != oldInitCount || stats[4] != stats[0])
+                    throw std::runtime_error("Session creation without an NR frame must not initialize NR");
                 requireResult(xrDestroyInstance(instance), XR_SUCCESS, "DestroyInstance after partial create retry");
             } else if (mode == "foreign-import") {
                 using ChangeImport = BOOL(__cdecl*)();

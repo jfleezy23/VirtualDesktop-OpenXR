@@ -267,7 +267,10 @@ namespace virtualdesktop_openxr {
             }
             D3D11_TEXTURE2D_DESC description{};
             input.colour[eye]->GetDesc(&description);
-            if (description.SampleDesc.Count != 1 || description.ArraySize != 1 || !rect.width || !rect.height ||
+            // Runtime-resolved array slice zero can alias the app array; its
+            // selected image is subresource zero. Higher slices are resolved
+            // to standalone images before reaching this interface.
+            if (description.SampleDesc.Count != 1 || !description.ArraySize || !rect.width || !rect.height ||
                 rect.width != state.info.eyeWidth || rect.height != state.info.height ||
                 uint64_t(rect.x) + rect.width > description.Width ||
                 uint64_t(rect.y) + rect.height > description.Height ||

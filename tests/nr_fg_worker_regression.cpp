@@ -164,8 +164,9 @@ namespace virtualdesktop_openxr {
             runtime.m_fgDesiredMultiplier = 3;
             runtime.m_precompositor.dlssnrSettings.enabled = true;
             runtime.m_precompositor.dlssnrSettings.foveationSize = 1.f;
-            runtime.m_precompositor.finalNrColour[0] = runtime.m_precompositor.finalNrColour[1] = hw.texture();
+            runtime.m_precompositor.finalColour[0] = runtime.m_precompositor.finalColour[1] = hw.texture();
             runtime.m_fgBegunReservation.valid = true;
+            runtime.m_fgBegunReservation.shouldRender = true;
             runtime.m_fgBegunReservation.currentTarget = 1000000000;
             runtime.m_layersForFrame.resize(1);
             auto& projection = runtime.m_layersForFrame[0].EyeFov;
@@ -207,7 +208,7 @@ namespace virtualdesktop_openxr {
                     "failed optional allocation is not retried every frame");
             require(runtime.m_precompositor.dlssnrSettings.enabled &&
                         runtime.m_precompositor.dlssnrSettings.foveationSize == 1.f &&
-                        runtime.m_precompositor.finalNrColour[0] && runtime.m_layersForFrame.size() == 1,
+                        runtime.m_precompositor.finalColour[0] && runtime.m_layersForFrame.size() == 1,
                     "fallback retains final NR pixels, coverage and layer");
             runtime.cleanupSessionResources();
             cleanup.Deactivate();
@@ -378,8 +379,7 @@ namespace virtualdesktop_openxr {
                     end.displayTime - 3 * period, end.displayTime - 2 * period, period, 3, frame * 3);
                 runtime.m_fgBegunReservation.historyEpoch = epoch;
                 const auto pixels = scene(frame * 8);
-                runtime.m_precompositor.finalNrColour[0] = runtime.m_precompositor.finalNrColour[1] =
-                    hw.texture(&pixels);
+                runtime.m_precompositor.finalColour[0] = runtime.m_precompositor.finalColour[1] = hw.texture(&pixels);
                 require(runtime.prepareFrameGeneration(end), "eligible finalized input remains on FG path");
                 auto& transaction = runtime.m_fgTransactionForFrame;
                 hw.await(*runtime.m_frameGeneration, transaction);
@@ -529,22 +529,23 @@ namespace virtualdesktop_openxr {
             runtime.m_fgDesiredMultiplier = 3;
             runtime.m_precompositor.dlssnrSettings.enabled = true;
             runtime.m_precompositor.dlssnrSettings.foveationSize = 1.f;
-            runtime.m_precompositor.finalNrColour[0] = runtime.m_precompositor.finalNrColour[1] = hw.texture();
+            runtime.m_precompositor.finalColour[0] = runtime.m_precompositor.finalColour[1] = hw.texture();
             runtime.m_fgBegunReservation.valid = true;
             runtime.m_fgBegunReservation.currentTarget = 1000000000;
             runtime.m_layersForFrame.resize(1);
             runtime.m_layersForFrame[0].Header.Type = ovrLayerType_EyeFov;
+            runtime.m_fgBegunReservation.shouldRender = true;
             runtime.m_layersForFrame[0].EyeFov.Viewport[0].Size = {eyeWidth, height};
             runtime.m_layersForFrame[0].EyeFov.Viewport[1].Size = {eyeWidth, height};
             if (scenario == L"unequal-eyes") {
                 runtime.m_layersForFrame[0].EyeFov.Viewport[1].Size.w -= 4;
             } else if (scenario == L"bgra") {
                 D3D11_TEXTURE2D_DESC desc{};
-                runtime.m_precompositor.finalNrColour[0]->GetDesc(&desc);
+                runtime.m_precompositor.finalColour[0]->GetDesc(&desc);
                 desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
                 ComPtr<ID3D11Texture2D> bgra;
                 success(hw.device->CreateTexture2D(&desc, nullptr, &bgra), "unsupported final BGRA control");
-                runtime.m_precompositor.finalNrColour[0] = runtime.m_precompositor.finalNrColour[1] = bgra;
+                runtime.m_precompositor.finalColour[0] = runtime.m_precompositor.finalColour[1] = bgra;
             }
             XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
             end.displayTime = 1000000000;

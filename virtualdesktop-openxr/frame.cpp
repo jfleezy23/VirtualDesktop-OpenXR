@@ -511,7 +511,7 @@ namespace virtualdesktop_openxr {
             m_precompositor.isFirstProjectionLayer = true;
             m_precompositor.resolvedSwapchainImages.clear();
             m_precompositor.pendingSwapchainCommits.clear();
-            m_precompositor.finalNrColour = {};
+            m_precompositor.finalColour = {};
             m_precompositor.pendingColourCommits = {};
             m_precompositor.sharpenFactor = m_sharpenFactor.load(std::memory_order_relaxed);
             {
@@ -600,6 +600,22 @@ namespace virtualdesktop_openxr {
             if (m_frameGenerationMode) {
                 const bool captured = prepareFrameGeneration(*frameEndInfo);
                 if (!captured) {
+                    // Raw ordinary inputs were held back for FG just like
+                    // NR/upscale outputs. Commit only chains actually used by
+                    // the complete fallback layers, retaining pending copies.
+                    const auto pending = m_precompositor.pendingSwapchainCommits;
+                    for (const auto& [swapchain, slice] : pending) {
+                        const auto chain = swapchain->resolvedSlices[slice].ovrSwapchain;
+                        const bool submitted =
+                            std::any_of(layersAllocator.begin(), layersAllocator.end(), [&](const auto& layer) {
+                                return (layer.Header.Type == ovrLayerType_EyeFov ||
+                                        layer.Header.Type == ovrLayerType_EyeFovDepth) &&
+                                       (layer.EyeFov.ColorTexture[0] == chain || layer.EyeFov.ColorTexture[1] == chain);
+                            });
+                        if (submitted) {
+                            resolveSwapchainImage(*swapchain, slice, m_precompositor.resolvedSwapchainImages);
+                        }
+                    }
                     for (auto chain : m_precompositor.pendingColourCommits) {
                         if (!chain) {
                             continue;
@@ -618,6 +634,10 @@ namespace virtualdesktop_openxr {
                         }
                     }
                 }
+                // Fallback also reads newly private ordinary source images.
+                // Protect application reuse whether FG accepted this input or
+                // submitted the complete original layers instead.
+                protectFrameGenerationSources();
             }
 
             if (IsTraceEnabled() && m_gpuTimerPrecomposition[0]) {
@@ -766,6 +786,12 @@ namespace virtualdesktop_openxr {
         const bool needUpscaling = m_precompositor.isFirstProjectionLayer && (canUpscale || canSharpen);
         const bool needUplifting = m_precompositor.isFirstProjectionLayer && m_precompositor.dlssnrSettings.enabled;
 
+        // FG-only and ordinary sessions do not need NGX or an NR device. Keep
+        // live NR toggling by initializing before the first NR resource import.
+        if (needUplifting && !m_dlssnrResourcesInitialized) {
+            initializeDlssnrResources();
+        }
+
         const XrSwapchainSubImage* subImages[xr::StereoView::Count] = {};
         const XrSwapchainSubImage* depthSubImages[xr::StereoView::Count] = {};
         bool depthInverted[xr::StereoView::Count]{};
@@ -811,7 +837,9 @@ namespace virtualdesktop_openxr {
             resolveSwapchainImage(xrSwapchain,
                                   proj.views[viewIndex].subImage.imageArrayIndex,
                                   m_precompositor.resolvedSwapchainImages,
-                                  needUpscaling ||
+                                  (m_frameGenerationMode && m_precompositor.isFirstProjectionLayer &&
+                                   (needUplifting || m_d3d11Context || m_d3d12CommandQueue)) ||
+                                      needUpscaling ||
                                       needUplifting /* Skip committing if we will not use the swapchain directly */);
             layer.EyeFov.ColorTexture[viewIndex] =
                 xrSwapchain.resolvedSlices[proj.views[viewIndex].subImage.imageArrayIndex].ovrSwapchain;
@@ -825,6 +853,11 @@ namespace virtualdesktop_openxr {
                                      proj.views[viewIndex].subImage.imageArrayIndex,
                                      proj.layerFlags,
                                      proj.views[viewIndex].subImage.imageRect);
+
+            if (m_frameGenerationMode && m_precompositor.isFirstProjectionLayer && !needUplifting) {
+                const auto& slice = xrSwapchain.resolvedSlices[proj.views[viewIndex].subImage.imageArrayIndex];
+                m_precompositor.finalColour[viewIndex] = slice.images[slice.lastCommittedIndex];
+            }
 
             layer.EyeFov.Viewport[viewIndex].Pos.x = proj.views[viewIndex].subImage.imageRect.offset.x;
             layer.EyeFov.Viewport[viewIndex].Pos.y = proj.views[viewIndex].subImage.imageRect.offset.y;

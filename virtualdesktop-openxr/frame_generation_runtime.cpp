@@ -20,10 +20,11 @@ namespace virtualdesktop_openxr {
             return false;
         };
         const bool eligible = m_frameGenerationMode && !m_frameGenerationUnavailable && m_useAsyncSubmission &&
-                              !m_useApplicationDeviceForSubmission && settings.enabled &&
-                              settings.foveationSize >= .90f && info.layerCount == 1 && m_layersForFrame.size() == 1 &&
-                              m_layersForFrame[0].Header.Type == ovrLayerType_EyeFov &&
-                              m_precompositor.finalNrColour[0] && m_precompositor.finalNrColour[1] &&
+                              !m_useApplicationDeviceForSubmission &&
+                              (!settings.enabled || settings.foveationSize >= .90f) && info.layerCount == 1 &&
+                              (settings.enabled || m_d3d11Context || m_d3d12CommandQueue) &&
+                              m_layersForFrame.size() == 1 && m_layersForFrame[0].Header.Type == ovrLayerType_EyeFov &&
+                              m_precompositor.finalColour[0] && m_precompositor.finalColour[1] &&
                               m_fgBegunReservation.valid && m_fgBegunReservation.shouldRender && info.layers &&
                               info.layers[0] && info.displayTime == m_fgBegunReservation.currentTarget;
         if (!eligible) {
@@ -41,6 +42,11 @@ namespace virtualdesktop_openxr {
                 return bypass();
             }
         }
+        const auto& leftSource = *reinterpret_cast<const Swapchain*>(sourceProjection.views[0].subImage.swapchain);
+        const auto& rightSource = *reinterpret_cast<const Swapchain*>(sourceProjection.views[1].subImage.swapchain);
+        if (isSRGBFormat(leftSource.dxgiFormatForSubmission) != isSRGBFormat(rightSource.dxgiFormatForSubmission)) {
+            return bypass();
+        }
         if (m_fgNeedReprime.exchange(false)) {
             m_fgPreviousCapturedTime = 0;
         }
@@ -51,7 +57,7 @@ namespace virtualdesktop_openxr {
             return bypass();
         }
         D3D11_TEXTURE2D_DESC texture{};
-        m_precompositor.finalNrColour[0]->GetDesc(&texture);
+        m_precompositor.finalColour[0]->GetDesc(&texture);
         DXGI_FORMAT format = m_precompositor.isProj0SRGB ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
         if (texture.Format != DXGI_FORMAT_R8G8B8A8_TYPELESS && texture.Format != format &&
             texture.Format != DXGI_FORMAT_R8G8B8A8_UNORM) {
@@ -74,6 +80,11 @@ namespace virtualdesktop_openxr {
             // its own chain; committing S2 never changes what S1 points to.
             auto rollback = MakeScopeGuard([&] { cleanupFrameGeneration(); });
             try {
+                ComPtr<IDXGIDevice> device;
+                CHECK_HRCMD(m_ovrSubmissionDevice.As(&device));
+                ComPtr<IDXGIAdapter> adapter;
+                CHECK_HRCMD(device->GetAdapter(&adapter));
+                CHECK_HRCMD(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_fgDevice)));
                 for (auto& bank : m_fgPresentationBanks) {
                     for (unsigned role = 0; role < bank.size(); ++role) {
                         if (role == 1 && m_frameGenerationMode == 2) {
@@ -112,7 +123,7 @@ namespace virtualdesktop_openxr {
             m_frameGeneration = std::make_unique<FrameGeneration>();
             FrameGeneration::InitInfo init{m_ovrSubmissionDevice.Get(),
                                            m_ovrSubmissionContext.Get(),
-                                           m_dlssnrDevice.Get(),
+                                           m_fgDevice.Get(),
                                            std::filesystem::absolute(dllHome / L"vdxr-frame-generation.dll"),
                                            static_cast<uint32_t>(size.w),
                                            static_cast<uint32_t>(size.h),
@@ -158,7 +169,7 @@ namespace virtualdesktop_openxr {
             m_fgPreviousCapturedTime = 0;
         }
         FinalProjectionInput input;
-        input.colour = m_precompositor.finalNrColour;
+        input.colour = m_precompositor.finalColour;
         input.serial = m_frameBegun;
         input.time = info.displayTime;
         input.period = m_fgBegunReservation.period;
@@ -192,6 +203,18 @@ namespace virtualdesktop_openxr {
             return bypass();
         }
         CHECK_HRCMD(result);
+        if (!settings.enabled) {
+            // Ordinary sources can alias the application's swapchain. Queue B
+            // into its private presentation image before xrEndFrame returns,
+            // while the producer still owns this context. The worker reuses
+            // this exact prepared copy rather than rereading reused app pixels.
+            auto& real = m_fgPresentationBanks[m_fgTransactionForFrame.ticket.bank][2];
+            int image{};
+            CHECK_OVRCMD(ovr_GetTextureSwapChainCurrentIndex(m_ovrSession, real.ovrSwapchain, &image));
+            CHECK_MSG(image >= 0 && static_cast<size_t>(image) < real.images.size(), "Invalid FG real-frame image");
+            CHECK_HRCMD(m_frameGeneration->copyOutput(
+                m_fgTransactionForFrame, FrameGenerationRole::real, real.images[image].Get()));
+        }
         m_fgPreviousCapturedTime = input.time;
         m_fgPreviousHistoryEpoch = m_fgBegunReservation.historyEpoch;
         m_fgPreviousSpace = info.layers[0]->space;
@@ -202,6 +225,34 @@ namespace virtualdesktop_openxr {
         m_fgPreviousSettings = settings;
         m_fgDesiredMultiplier = m_frameGenerationMode;
         return true;
+    }
+
+    void OpenXrRuntime::protectFrameGenerationSources() {
+        if (m_precompositor.dlssnrSettings.enabled || (!m_d3d11Context && !m_d3d12CommandQueue)) {
+            return;
+        }
+        // Returning from EndFrame permits the app to reuse its images on
+        // an independent queue. Order those future writes after both source
+        // copies without a CPU wait or a dependency on FG synthesis.
+        if (!m_fgSourceFence11 && !m_fgSourceFence12) {
+            wil::unique_handle handle;
+            CHECK_HRCMD(
+                m_ovrSubmissionCompletionFence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, handle.put()));
+            if (m_d3d12CommandQueue) {
+                CHECK_HRCMD(m_d3d12Device->OpenSharedHandle(handle.get(), IID_PPV_ARGS(&m_fgSourceFence12)));
+            } else {
+                CHECK_HRCMD(m_d3d11Device->OpenSharedFence(handle.get(), IID_PPV_ARGS(&m_fgSourceFence11)));
+            }
+        }
+        const auto complete = ++m_submissionFenceValue;
+        CHECK_HRCMD(m_ovrSubmissionContext->Signal(m_ovrSubmissionCompletionFence.Get(), complete));
+        m_ovrSubmissionContext->Flush();
+        if (m_d3d12CommandQueue) {
+            CHECK_HRCMD(m_d3d12CommandQueue->Wait(m_fgSourceFence12.Get(), complete));
+        } else {
+            CHECK_HRCMD(m_d3d11Context->Wait(m_fgSourceFence11.Get(), complete));
+            m_d3d11Context->Flush();
+        }
     }
 
     void OpenXrRuntime::cleanupFrameGeneration() {
@@ -246,6 +297,9 @@ namespace virtualdesktop_openxr {
         }
         m_fgEyeResolution = {};
         m_fgFormat = DXGI_FORMAT_UNKNOWN;
+        m_fgDevice.Reset();
+        m_fgSourceFence11.Reset();
+        m_fgSourceFence12.Reset();
         m_fgPreviousCapturedTime = 0;
         m_fgFailedLayers.clear();
         m_frameGenerationCadence.reset();

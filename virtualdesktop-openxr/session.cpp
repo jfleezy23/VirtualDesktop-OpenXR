@@ -164,7 +164,6 @@ namespace virtualdesktop_openxr {
                 }
 
                 initializePrecompositorResources();
-                initializeDlssnrResources();
             } else {
                 // We initialize a submission device since OVR needs one to create a swapchain before being able to wait
                 // frames.
@@ -413,10 +412,8 @@ namespace virtualdesktop_openxr {
         m_fgLastReservedTime = m_fgPreviousCapturedTime = 0;
         m_fgHistoryEpoch = m_fgPreviousHistoryEpoch = 0;
         m_fgObservedVisible = m_fgObservedRecenter = false;
-        {
-            std::unique_lock lock(m_dlssnrSettingsMutex);
-            m_fgDesiredMultiplier = m_frameGenerationMode && m_dlssnrSettings.enabled ? m_frameGenerationMode : 1;
-        }
+        // The first accepted input primes history with a single real frame.
+        m_fgDesiredMultiplier = 1;
         m_fgNeedReprime = false;
         m_fgTimelineReanchor = false;
         m_fgWorkerGroupNativeId = m_fgPublishedEndNativeId = 0;

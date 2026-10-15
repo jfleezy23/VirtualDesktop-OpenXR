@@ -578,7 +578,7 @@ namespace virtualdesktop_openxr {
         ensureSwapchainSliceResources(xrSwapchain, slice);
 
         const auto tuple = std::make_pair(&xrSwapchain, slice);
-        const bool needCopy = (slice > 0 || !xrSwapchain.appSwapchain.ovrSwapchain);
+        const bool needCopy = xrSwapchain.resolvedSlices[slice].ovrSwapchain != xrSwapchain.appSwapchain.ovrSwapchain;
         if (resolved.count(tuple)) {
             if (skipCommit || !m_precompositor.pendingSwapchainCommits.count(tuple)) {
                 return;
@@ -779,8 +779,16 @@ namespace virtualdesktop_openxr {
         if (xrSwapchain.resolvedSlices.size() <= slice) {
             xrSwapchain.resolvedSlices.resize(slice + 1);
         }
-        if (!xrSwapchain.resolvedSlices[slice].ovrSwapchain) {
-            if (slice == 0 && xrSwapchain.appSwapchain.ovrSwapchain) {
+        // Ordinary FG may hold app images across many index wraps without
+        // committing them. A private resolved source keeps fallback commits
+        // independent of the application's circular acquisition history.
+        const bool privateSource =
+            m_frameGenerationMode && !m_precompositor.dlssnrSettings.enabled && (m_d3d11Context || m_d3d12CommandQueue);
+        const bool replaceAlias =
+            privateSource && xrSwapchain.appSwapchain.ovrSwapchain &&
+            xrSwapchain.resolvedSlices[slice].ovrSwapchain == xrSwapchain.appSwapchain.ovrSwapchain;
+        if (!xrSwapchain.resolvedSlices[slice].ovrSwapchain || replaceAlias) {
+            if (slice == 0 && xrSwapchain.appSwapchain.ovrSwapchain && !privateSource) {
                 SwapchainSlice candidate = xrSwapchain.appSwapchain;
                 xrSwapchain.resolvedSlices[slice] = std::move(candidate);
                 return;

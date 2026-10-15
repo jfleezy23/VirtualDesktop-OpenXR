@@ -16,6 +16,9 @@ namespace {
     DWORD coverage = 100;
     DWORD requestedFrameGeneration{}, nrSharpenSetting{}, nrUpscalingSetting{100};
     bool expectDepth[2] = {true, true};
+    bool readSubmittedColour = true;
+    bool checkOffColourEdges = false;
+    std::array<std::array<unsigned, 4>, 2> expectedOffColour{{{32, 64, 96, 255}, {32, 64, 96, 255}}};
     std::function<void(const ovrLayerEyeFov&)> observeProjection;
     std::function<void(long long)> observeNativeEnd;
     std::function<void(ovrTextureSwapChain)> observeNativeCommit;
@@ -133,12 +136,24 @@ namespace {
                             (viewport.Pos.y + viewport.Size.h / 2) * mapped.RowPitch +
                             (viewport.Pos.x + viewport.Size.w / 2) * 4;
         const std::array<unsigned, 4> actual{pixel[0], pixel[1], pixel[2], pixel[3]};
+        bool edgesCorrect = true;
+        if (checkOffColourEdges && !enabled.load()) {
+            for (const auto& corner : std::array<std::array<int, 2>, 4>{{{0, 0},
+                                                                         {viewport.Size.w - 1, 0},
+                                                                         {0, viewport.Size.h - 1},
+                                                                         {viewport.Size.w - 1, viewport.Size.h - 1}}}) {
+                const auto* edge = static_cast<const uint8_t*>(mapped.pData) +
+                                   (viewport.Pos.y + corner[1]) * mapped.RowPitch + (viewport.Pos.x + corner[0]) * 4;
+                edgesCorrect &= std::array<unsigned, 4>{edge[0], edge[1], edge[2], edge[3]} == expectedOffColour[eye];
+            }
+        }
         context->Unmap(staging.Get(), 0);
+        require(edgesCorrect, "NR-off cropped eye edges preserve the submitted subrectangle");
         std::cout << "native color eye=" << eye << " NR=" << enabled.load() << " rgba=" << actual[0] << ',' << actual[1]
                   << ',' << actual[2] << ',' << actual[3] << '\n';
         require(actual[3] == 255, "Submitted color alpha is incorrect");
         if (!enabled.load())
-            require(actual == std::array<unsigned, 4>{32, 64, 96, 255}, "NR-off color pixels changed");
+            require(actual == expectedOffColour[eye], "NR-off color pixels changed");
         checkHr(device->GetDeviceRemovedReason());
     }
     ovrResult OVR_CDECL captureEnd(ovrSession session,
@@ -162,7 +177,9 @@ namespace {
                     for (unsigned eye = 0; eye < 2; ++eye) {
                         if (expectDepth[eye])
                             checkDepth(session, *reinterpret_cast<const ovrLayerEyeFovDepth*>(layers[i]), eye);
-                        readColor(session, *reinterpret_cast<const ovrLayerEyeFov*>(layers[i]), eye);
+                        if (readSubmittedColour) {
+                            readColor(session, *reinterpret_cast<const ovrLayerEyeFov*>(layers[i]), eye);
+                        }
                     }
                     if (observeProjection) {
                         observeProjection(*reinterpret_cast<const ovrLayerEyeFov*>(layers[i]));
@@ -409,7 +426,12 @@ namespace virtualdesktop_openxr {
             auto& runtime = *static_cast<OpenXrRuntime*>(GetInstance());
             require(runtime.m_precompositor.dlssnrSettings.enabled == bool(enabled.load()),
                     "xrEndFrame did not capture the current live NR settings");
-            checkHr(runtime.m_dlssnrDevice->GetDeviceRemovedReason());
+            if (runtime.m_dlssnrDevice) {
+                checkHr(runtime.m_dlssnrDevice->GetDeviceRemovedReason());
+            } else {
+                require(freshOff && !runtime.m_dlssnrResourcesInitialized,
+                        "only a fresh NR-off path may lack the lazy NR device");
+            }
             return failures;
         }
         static std::vector<ComPtr<ID3D12Resource>> imports(XrSwapchain handle) {

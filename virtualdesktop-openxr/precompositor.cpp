@@ -300,8 +300,8 @@ namespace virtualdesktop_openxr {
                 CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, xrSwapchain.stereoProjection[eye].ovrSwapchain));
             }
             xrSwapchain.stereoProjection[eye].lastCommittedIndex = imageIndex;
-            if (m_frameGenerationMode && m_precompositor.finalNrColour[eye]) {
-                m_precompositor.finalNrColour[eye] = xrSwapchain.stereoProjection[eye].images[imageIndex];
+            if (m_frameGenerationMode) {
+                m_precompositor.finalColour[eye] = xrSwapchain.stereoProjection[eye].images[imageIndex];
             }
 
             // Patch the layer.

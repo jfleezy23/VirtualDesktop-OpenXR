@@ -416,7 +416,7 @@ namespace virtualdesktop_openxr {
         };
 
         struct PrecompositorState {
-            std::array<ComPtr<ID3D11Texture2D>, xr::StereoView::Count> finalNrColour;
+            std::array<ComPtr<ID3D11Texture2D>, xr::StereoView::Count> finalColour;
             // NR plus the two final sharpen/upscale outputs. In FG sessions
             // commit only final chains actually sent down the legacy path.
             std::array<ovrTextureSwapChain, 3> pendingColourCommits{};
@@ -886,6 +886,9 @@ namespace virtualdesktop_openxr {
         std::chrono::high_resolution_clock::time_point m_lastWaitToBeginFrameTime{};
 
         uint32_t m_frameGenerationMode{};
+        ComPtr<ID3D12Device> m_fgDevice;
+        ComPtr<ID3D11Fence> m_fgSourceFence11;
+        ComPtr<ID3D12Fence> m_fgSourceFence12;
         bool m_frameGenerationUnavailable{};
         std::atomic<uint32_t> m_fgDesiredMultiplier{1};
         std::atomic<bool> m_fgNeedReprime{false};
@@ -914,6 +917,7 @@ namespace virtualdesktop_openxr {
         ovrSizei m_fgEyeResolution{};
         DXGI_FORMAT m_fgFormat{DXGI_FORMAT_UNKNOWN};
         bool prepareFrameGeneration(const XrFrameEndInfo& info);
+        void protectFrameGenerationSources();
         void cleanupFrameGeneration();
         void asyncFrameGenerationThread();
         void waitForFrameGenerationCapacity();
@@ -984,6 +988,7 @@ namespace virtualdesktop_openxr {
 
         // DLSS-NR
         ComPtr<ID3D12Device> m_dlssnrDevice;
+        bool m_dlssnrResourcesInitialized{};
         ComPtr<ID3D12Fence> m_dlssnrInFence;
         ComPtr<ID3D11Fence> m_dlssnrOutFence;
         std::unique_ptr<D3D12Utils::CommandContext> m_dlssnrContext;

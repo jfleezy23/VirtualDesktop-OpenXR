@@ -86,6 +86,7 @@ def main():
             parser.error("The runtime DLL does not match a successful cohort build.")
         manifest.update(runtime_sha256=sha256(runtime), compiler_version=build["compiler_version"])
         backend = output / "backend"
+        ordinary_backend = output / "backend-nr-off"
         tests = cohort / "tests"
 
         def runtime_case(name, exe, *arguments):
@@ -105,8 +106,13 @@ def main():
             cases.append((name, [str(binary), *map(str, arguments)]))
 
         if args.suite in {"integration", "all"}:
-            for scenario in ("native", "upscaled", "discard"):
+            for scenario in ("native", "upscaled", "discard", "nr-toggle"):
                 runtime_case("nr-" + scenario, "nr_fg_runtime_regression", backend, output / ("state-" + scenario), scenario)
+            for scenario in ("nr-off-2", "nr-off-3", "nr-off-upscaled", "nr-off-cropped", "nr-off-packed",
+                             "nr-off-reuse", "nr-off-bypass", "nr-off-reuse-bypass",
+                             "nr-off-d3d12", "nr-off-d3d12-reuse", "nr-off-d3d12-reuse-bypass"):
+                runtime_case(scenario, "nr_fg_runtime_regression", ordinary_backend,
+                             output / ("state-" + scenario), scenario)
         if args.suite in {"presenter", "all"}:
             for multiplier, scenario in ((2, "normal"), (3, "normal"), (3, "late"), (3, "capacity")):
                 runtime_case(f"worker-{multiplier}-{scenario}", "nr_fg_worker_regression", backend, module, multiplier, scenario)
@@ -135,6 +141,10 @@ def main():
             manifest[name + "_sha256"] = sha256(source)
         shutil.copy2(runtime, backend / runtime.name)
         shutil.copy2(module, backend / module.name)
+        ordinary_backend.mkdir()
+        for name in ("LibOVRRT64_1.dll", runtime.name, module.name):
+            shutil.copy2(backend / name, ordinary_backend / name)
+        manifest["nr_off_backend_excludes_vendor"] = not (ordinary_backend / "nvngx_dlssnr.dll").exists()
     manifest["review_time_source_sha256"] = {
         p.relative_to(repo).as_posix(): sha256(p) for folder in ("virtualdesktop-openxr", "tests", "nr-frame-generation")
         for p in (repo / folder).rglob("*") if p.is_file() and p.suffix in {".cpp", ".c", ".h", ".hpp", ".hlsl", ".py"}
