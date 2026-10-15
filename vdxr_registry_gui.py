@@ -160,22 +160,25 @@ class VDXRRegistryApp:
             mode, fg_error = 0, str(error)
         self.saved_frame_generation = next(label for label, value in FRAME_GENERATION_MODES.items() if value == mode)
         self.frame_generation = tk.StringVar(value=self.saved_frame_generation)
-        ttk.Label(frame, text="PC frame generation").grid(row=9, column=0, sticky="w", pady=(12, 4))
+        ttk.Label(frame, text="Requested PC frame generation").grid(row=9, column=0, sticky="w", pady=(12, 4))
         selector = ttk.Combobox(
             frame, textvariable=self.frame_generation, values=tuple(FRAME_GENERATION_MODES),
             state="readonly", width=22,
         )
         selector.grid(row=9, column=1, columnspan=2, sticky="ew", pady=(12, 4))
         selector.bind("<<ComboboxSelected>>", self.on_frame_generation_changed)
-        ttk.Label(frame, text="Restart the game after changing frame generation.").grid(
+        ttk.Label(frame, text="OFXR works with NR on or off; restart after changing FG.").grid(
             row=10, column=0, columnspan=3, sticky="w",
         )
         ttk.Label(frame, text="Turn SSW off in Virtual Desktop when testing OFXR.").grid(
             row=11, column=0, columnspan=3, sticky="w",
         )
+        ttk.Label(frame, text="With NR enabled, use at least 90% coverage (100% recommended).").grid(
+            row=12, column=0, columnspan=3, sticky="w",
+        )
         self.status = tk.StringVar(value=fg_error or REGISTRY_PATH)
         ttk.Label(frame, textvariable=self.status).grid(
-            row=12, column=0, columnspan=3, sticky="w", pady=(12, 0)
+            row=13, column=0, columnspan=3, sticky="w", pady=(12, 0)
         )
         self.set_slider_state()
 
