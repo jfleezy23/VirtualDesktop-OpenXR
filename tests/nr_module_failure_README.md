@@ -5,7 +5,7 @@ and four **test-only** unsigned NGX facades. The facade produces no rendered ima
 Never install it in Virtual Desktop Streamer or use it to evaluate image quality.
 
 Copy a chosen facade as `nvngx_dlssnr.dll` beside an isolated VDXR runtime and
-prepare the existing OVRNull/NR-enabled test environment. Run GPU cases sequentially:
+prepare the existing isolated OVRNull test environment. NR-on, 100% coverage, FG-off and synchronous submission are injected as process-local registry reads; user settings are never written. Run GPU cases sequentially:
 
 ```powershell
 .\tests\build-module-failure-regression.cmd
@@ -18,13 +18,12 @@ The executable rejects a facade whose exported variant does not match its mode:
 | --- | --- | --- |
 | `missing-export` | `bin/tests/module-missing` | Two failed frames cannot publish an incomplete NGX dispatch table; teardown and fresh instance creation succeed. |
 | `shutdown-retry` | `bin/tests/module-shutdown` | One vendor shutdown failure returns an API error; dropping the test's VDXR reference leaves its code pinned, a second instance is rejected, and direct same-handle cleanup retry succeeds. |
-| `partial-create` | `bin/tests/module-partial` | After one rendered stub frame and session teardown, an actual main-thread registry read throws once after manual NR reinitialization. Failed session creation must immediately pair initialization/shutdown, return a null session, and permit a clean retry. |
+| `partial-create` | `bin/tests/module-partial` | After one rendered stub frame and session teardown, an actual main-thread registry read throws once during session creation. Failed and retried session creation must perform no NR initialization, return a null failed session, and permit a clean retry. The first submitted NR frame is the lazy initialization boundary. |
 | `foreign-import` | `bin/tests/module-import` | The fake module replaces its own actual `GetModuleFileNameW` import with a foreign function while retaining VDXR's shim. Teardown must preserve that foreign pointer and report failure, pin VDXR, then succeed after the fixture restores the owned shim. |
 
 The settings failure uses Detours and changes no registry values. Its thread and
 value filter prevents the asynchronous registry watcher from consuming the fault.
-The harness records the initialization count inside the fault to prove it ran after
-the NR reinitialization, rather than during unrelated setup.
+The harness records the initialization count inside the fault to prove session creation did not initialize NR before the failure. Every mode also verifies that fresh session creation performs no NR initialization before its first submitted NR frame.
 
 All facades track live feature membership and marker values before dereferencing a
 release/evaluation handle. They reject duplicate initialization, device-mismatched

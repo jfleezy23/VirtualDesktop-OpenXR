@@ -15,7 +15,7 @@ The package was tested locally on an RTX 4090. Compatible NVIDIA hardware and a 
 3. Back up the existing files with these names from `%ProgramFiles%\Virtual Desktop Streamer\OpenXR`:
    `virtualdesktop-openxr.dll`, `vdxr-frame-generation.dll` and `vdxr_registry_gui.py`. Record any that were absent.
 4. Copy the package's three files into that OpenXR folder, accepting Windows administrator access when prompted.
-   Leave the runtime JSON, stock 32-bit DLL and other files intact. Keep your licensed `nvngx_dlssnr.dll` beside the runtime.
+   Leave the runtime JSON, stock 32-bit DLL and other files intact. Keep your licensed `nvngx_dlssnr.dll` beside the runtime if you want NR. FG with NR off does not initialize NR or require this vendor DLL.
 5. In Streamer's Options, select **VDXR** as the OpenXR runtime. Fully restart the game after installation.
 
 The files do not change runtime registration, existing NR settings, or the saved FG mode when copied.
@@ -35,18 +35,17 @@ You can create a desktop shortcut to the same command. Opening the panel only re
 ## Choose a mode
 
 1. Turn **SSW Off** in Virtual Desktop. Disable any external OFXR frame-generation layer for this comparison.
-2. In NR Controls, enable NR and set **FoveationSize / NR coverage to 100%**. Keep your preferred NR style and face/hair settings.
+2. In NR Controls, leave NR off for ordinary frame generation, or enable it for neural rendering plus FG. Keep **FoveationSize / NR coverage at 100%** when NR is on; FG does not lower coverage or change face/hair settings.
 3. Select **Off**, **OFXR 2×** or **OFXR 3×** under PC frame generation. The selection saves immediately.
 4. Close and relaunch the game after changing FG mode. NR strength/detail controls can be adjusted during play.
 
-Off retains ordinary NR. OFXR 2× adds one synthetic frame between real frames; 3× adds two when the runtime's eligibility
+Off disables OFXR and retains the selected ordinary or NR processing path. OFXR 2× adds one synthetic frame between real frames; 3× adds two when the runtime's eligibility
 and deadline checks pass. These are PC-generated frames; VD's separate headset-side SSW should remain off for this test.
 The selector shows the saved request, not proof that FG is active in the current game.
 
-FG currently requires NR, at least 90% coverage, and an eligible full color-only stereo projection through VDXR.
-Use 100% coverage for this configuration. Unsupported depth, overlay or format/layout submissions retain the ordinary path.
+FG accepts an eligible full color-only stereo projection through VDXR. With NR off, the current independent path supports DirectX 11 and DirectX 12. When NR is on, coverage must be at least 90%; use 100% for this configuration. Unsupported depth, overlay or format/layout submissions retain the ordinary path.
 Games running through native Oculus or SteamVR do not acquire these features simply because the files are installed;
-those titles need a compatible OpenXR translation path. Turning NR off also bypasses this post-NR FG integration.
+those titles need a compatible OpenXR translation path. NR and OFXR are independent: NR off with OFXR 2× or 3× processes the ordinary final stereo images. Unsupported inputs or missed deadlines can still fall back to real frames.
 
 ## First check
 

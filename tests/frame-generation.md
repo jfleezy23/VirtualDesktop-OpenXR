@@ -1,9 +1,8 @@
-# Post-NR frame generation
+# Optional stereo frame generation
 
 This x64 experimental integration uses the retained OFXR D3D12 synthesis core
-as an optional adjacent DLL, vdxr-frame-generation.dll. It runs after NR,
-sharpening and upscaling. Each real input receives NR once per eye; synthesized
-outputs are not fed through NR again. NR coverage must be at least 90%.
+as an optional adjacent DLL, vdxr-frame-generation.dll. It runs after final stereo processing, including NR when enabled, sharpening and upscaling. Each real input receives NR once per eye; synthesized
+outputs are not fed through NR again. When NR is enabled, coverage must be at least 90%.
 The validated local configuration retains 100% coverage.
 
 ## Controls and activation
@@ -21,8 +20,7 @@ this package adds PC-side 2X and 3X rather than stacking generators.
 The initial integration accepts one complete color-only stereo projection with
 matching RGBA eye dimensions, runtime-owned asynchronous submission and valid
 prediction. Depth submission, mixed/overlay layers, static/protected inputs,
-unsupported formats/layouts, NR off or coverage below 90% preserve the complete
-ordinary NR path. Missing optional DLL or presentation allocation failure
+unsupported formats/layouts, or enabled NR with coverage below 90% preserve the complete ordinary path. NR-off FG supports DirectX 11 and DirectX 12 without initializing NGX or the NR backend. Missing optional DLL or presentation allocation failure
 disables FG for the session and preserves NR. Uncertain GPU ownership stops the
 operation while retaining resources; it is never permission to unload live work.
 
@@ -32,7 +30,7 @@ do not become compositor IDs; the worker owns consecutive native Wait/Begin/End
 cycles. Missed deadlines use real frames and reset history. They do not replay
 synthetic slots at changed fractions.
 
-Real-frame fallback copies retained final NR color before waiting for synthesis.
+Real-frame fallback copies retained final color before waiting for synthesis.
 The worker closes next-frame preprocessing admission until all selected current
 output copies are queued, then reopens it while retaining the context lease
 through the first native handoff. Each prepared role has a distinct SDK image
