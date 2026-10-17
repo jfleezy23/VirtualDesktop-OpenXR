@@ -587,6 +587,7 @@ namespace virtualdesktop_openxr {
                 // A previous processed layer wrote this image but did not submit it.
                 // Commit that same destination without advancing and recopying it.
                 CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, xrSwapchain.resolvedSlices[slice].ovrSwapchain));
+                xrSwapchain.resolvedSlices[slice].hasCommittedImage = true;
                 m_precompositor.pendingSwapchainCommits.erase(tuple);
                 return;
             }
@@ -620,16 +621,20 @@ namespace virtualdesktop_openxr {
             }
             TraceLoggingWrite(
                 g_traceProvider, "ResolveSwapchainImage_SyncImage", TLArg(ovrCommittedIndex, "CommittedIndex"));
-            if (ovrCommittedIndex == lastReleasedIndex) {
+            if (ovrCommittedIndex == lastReleasedIndex &&
+                (xrSwapchain.resolvedSlices[slice].hasCommittedImage || xrSwapchain.ovrSwapchainLength == 1)) {
                 // We still need to commit a static swapchain once!
-                if (xrSwapchain.ovrSwapchainLength == 1 && xrSwapchain.dirty) {
+                if (!xrSwapchain.resolvedSlices[slice].hasCommittedImage ||
+                    (xrSwapchain.ovrSwapchainLength == 1 && xrSwapchain.dirty)) {
                     CHECK_OVRCMD(
                         ovr_CommitTextureSwapChain(m_ovrSession, xrSwapchain.resolvedSlices[slice].ovrSwapchain));
+                    xrSwapchain.resolvedSlices[slice].hasCommittedImage = true;
                 }
                 xrSwapchain.resolvedSlices[slice].lastCommittedIndex = ovrCommittedIndex;
                 break;
             }
             CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, xrSwapchain.resolvedSlices[slice].ovrSwapchain));
+            xrSwapchain.resolvedSlices[slice].hasCommittedImage = true;
         }
 
         if (needCopy) {
@@ -759,6 +764,7 @@ namespace virtualdesktop_openxr {
 
             if (!skipCommit) {
                 CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, xrSwapchain.resolvedSlices[slice].ovrSwapchain));
+                xrSwapchain.resolvedSlices[slice].hasCommittedImage = true;
             }
             xrSwapchain.resolvedSlices[slice].lastCommittedIndex = ovrDestIndex;
         } else if (skipCommit) {

@@ -89,6 +89,17 @@ if(BUILD_TESTING)
         add_test(NAME fg_event_${SCENARIO} COMMAND nr_fg_event_regression "$<TARGET_FILE:vdxr_frame_generation>" ${SCENARIO})
         set_tests_properties(fg_event_${SCENARIO} PROPERTIES TIMEOUT 60 PASS_REGULAR_EXPRESSION "PASS:")
     endforeach()
+    add_executable(nr_fg_ready_regression ../tests/nr_fg_ready_regression.cpp
+        ../virtualdesktop-openxr/frame_generation.cpp ../virtualdesktop-openxr/frame_generation_pacing.cpp)
+    target_include_directories(nr_fg_ready_regression PRIVATE include ../packages/Detours.4.0.1/lib/native/include)
+    target_compile_features(nr_fg_ready_regression PRIVATE cxx_std_17)
+    target_compile_definitions(nr_fg_ready_regression PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(nr_fg_ready_regression PRIVATE d3d11 d3d12 dxgi
+        "${CMAKE_CURRENT_SOURCE_DIR}/../packages/Detours.4.0.1/lib/native/libs/x64/detours.lib")
+    foreach(SCENARIO timeout event-failure stale-wake removed invalid next)
+        add_test(NAME fg_ready_${SCENARIO} COMMAND nr_fg_ready_regression "$<TARGET_FILE:vdxr_frame_generation>" ${SCENARIO})
+        set_tests_properties(fg_ready_${SCENARIO} PROPERTIES TIMEOUT 60 PASS_REGULAR_EXPRESSION "PASS:")
+    endforeach()
     add_executable(nr_fg_presenter_regression ../tests/nr_fg_presenter_regression.cpp
         ../virtualdesktop-openxr/frame_generation_pacing.cpp)
     target_include_directories(nr_fg_presenter_regression PRIVATE ../virtualdesktop-openxr)

@@ -345,6 +345,8 @@ namespace virtualdesktop_openxr {
             std::vector<ComPtr<ID3D11Texture2D>> images;
             std::vector<ComPtr<ID3D12Resource>> dlssnrImages;
             int lastCommittedIndex{-1};
+            // A deferred input index does not prove that the native chain was committed.
+            bool hasCommittedImage{false};
             // Copied pixels are corrected once per region, until the next raw copy/resolve.
             bool hasCopyForPreprocessing{false};
             std::vector<AlphaCorrection> alphaCorrections;
@@ -417,8 +419,8 @@ namespace virtualdesktop_openxr {
 
         struct PrecompositorState {
             std::array<ComPtr<ID3D11Texture2D>, xr::StereoView::Count> finalColour;
-            // NR plus the two final sharpen/upscale outputs. In FG sessions
-            // commit only final chains actually sent down the legacy path.
+            // NR plus the two final sharpen/upscale outputs. Commit only final
+            // chains actually sent down the legacy path.
             std::array<ovrTextureSwapChain, 3> pendingColourCommits{};
             DlssnrSettings dlssnrSettings;
             float sharpenFactor{0.f};
@@ -716,7 +718,8 @@ namespace virtualdesktop_openxr {
         void upliftLayer(const XrSwapchainSubImage** views,
                          const XrSwapchainSubImage** depth,
                          const bool* depthInverted,
-                         ovrLayerEyeFov& layer);
+                         ovrLayerEyeFov& layer,
+                         bool finalColour);
 
         // Instance & OVR state.
         uint32_t m_apiMinor{0};

@@ -425,6 +425,10 @@ namespace virtualdesktop_openxr {
             chain.ovrSwapchainLength = 1;
             chain.appSwapchain.ovrSwapchain = reinterpret_cast<ovrTextureSwapChain>(uintptr_t(0x5000));
             chain.appSwapchain.images.resize(1); // No pixels are accessed by this clean metadata-only chain.
+            // This fake backend handle represents an already committed clean
+            // image. A first real Commit would require an actual GPU chain.
+            chain.appSwapchain.hasCommittedImage = true;
+            chain.appSwapchain.lastCommittedIndex = 0;
             chain.lastReleasedIndex = 0;
             const auto chainHandle = reinterpret_cast<XrSwapchain>(&chain);
             runtime.m_swapchains.insert(chainHandle);
@@ -870,6 +874,9 @@ namespace virtualdesktop_openxr {
             chain.ovrSwapchainLength = 1;
             chain.appSwapchain.ovrSwapchain = reinterpret_cast<ovrTextureSwapChain>(uintptr_t(0x5000));
             chain.appSwapchain.images.resize(1);
+            // Match the already committed metadata-only chain in layerLists.
+            chain.appSwapchain.hasCommittedImage = true;
+            chain.appSwapchain.lastCommittedIndex = 0;
             chain.lastReleasedIndex = 0;
             const auto chainHandle = reinterpret_cast<XrSwapchain>(&chain);
             runtime.m_swapchains.insert(chainHandle);

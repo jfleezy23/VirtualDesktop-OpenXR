@@ -6,8 +6,63 @@
 #define main retainedInteropFixtureMain
 #include "nr_fg_integration_regression.cpp"
 #undef main
+#include <cctype>
 
 namespace {
+    using ReadyEventFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11Fence*, UINT64, HANDLE);
+    ReadyEventFn nativeReadyEvent;
+    decltype(&WaitForSingleObject) nativeReadyWait;
+    std::atomic<DWORD> readyWorkerId{};
+    std::atomic<HANDLE> readyWorkerEvent{};
+    std::atomic<unsigned> readyRegistrations{}, readyWaits{};
+    std::atomic<bool> readyWaitReleased{};
+    std::wstring readyScenario;
+    HRESULT STDMETHODCALLTYPE workerReadyEvent(ID3D11Fence* fence, UINT64 value, HANDLE event) {
+        if (GetCurrentThreadId() == readyWorkerId.load()) {
+            ++readyRegistrations;
+            readyWorkerEvent = event;
+            if (readyScenario == L"ready-event-failure" || readyScenario == L"expired-ready")
+                return E_OUTOFMEMORY;
+        }
+        return nativeReadyEvent(fence, value, event);
+    }
+    DWORD WINAPI workerReadyWait(HANDLE event, DWORD timeout) {
+        if (GetCurrentThreadId() == readyWorkerId.load() && event == readyWorkerEvent.load()) {
+            ++readyWaits;
+            if (readyScenario == L"ready-cancel") {
+                while (!readyWaitReleased)
+                    std::this_thread::sleep_for(1ms);
+            }
+            if (readyScenario == L"ready-wait-failure") {
+                SetLastError(ERROR_INVALID_HANDLE);
+                return WAIT_FAILED;
+            }
+        }
+        return nativeReadyWait(event, timeout);
+    }
+    struct ReadyWorkerHooks {
+        ReadyWorkerHooks(ID3D11Fence* sample, const std::wstring& scenario) {
+            readyScenario = scenario;
+            readyWorkerId = 0;
+            readyWorkerEvent = nullptr;
+            readyRegistrations = readyWaits = 0;
+            readyWaitReleased = false;
+            nativeReadyEvent = reinterpret_cast<ReadyEventFn>((*reinterpret_cast<void***>(sample))[9]);
+            nativeReadyWait = &WaitForSingleObject;
+            require(DetourTransactionBegin() == NO_ERROR && DetourUpdateThread(GetCurrentThread()) == NO_ERROR &&
+                        DetourAttach(reinterpret_cast<PVOID*>(&nativeReadyEvent), workerReadyEvent) == NO_ERROR &&
+                        DetourAttach(reinterpret_cast<PVOID*>(&nativeReadyWait), workerReadyWait) == NO_ERROR &&
+                        DetourTransactionCommit() == NO_ERROR,
+                    "ready worker hooks");
+        }
+        ~ReadyWorkerHooks() {
+            if (DetourTransactionBegin() != NO_ERROR || DetourUpdateThread(GetCurrentThread()) != NO_ERROR ||
+                DetourDetach(reinterpret_cast<PVOID*>(&nativeReadyEvent), workerReadyEvent) != NO_ERROR ||
+                DetourDetach(reinterpret_cast<PVOID*>(&nativeReadyWait), workerReadyWait) != NO_ERROR ||
+                DetourTransactionCommit() != NO_ERROR)
+                std::_Exit(2);
+        }
+    };
     decltype(VDXRFG_ApiV1::Submit) originalDelayedSubmit;
     ID3D12Fence* synthesisGate;
     ID3D12Fence* compositeGate;
@@ -117,6 +172,8 @@ namespace virtualdesktop_openxr {
             const bool futureInput = scenario == L"future-input";
             const bool control = scenario == L"control";
             const bool lateNr = scenario == L"late-nr";
+            const bool readyCase = scenario == L"ready-event-failure" || scenario == L"ready-wait-failure" ||
+                                   scenario == L"ready-cancel" || scenario == L"expired-ready";
             OpenXrRuntime runtime;
             BackendState state;
             BackendHooks hooks(backend, state);
@@ -150,6 +207,9 @@ namespace virtualdesktop_openxr {
             const auto opened = hw.gpu.device->OpenSharedHandle(shared, IID_PPV_ARGS(&futureRelease));
             CloseHandle(shared);
             success(opened, "import future gate");
+            std::unique_ptr<ReadyWorkerHooks> readyHooks;
+            if (readyCase)
+                readyHooks = std::make_unique<ReadyWorkerHooks>(futureGate.Get(), scenario);
             std::array<std::array<ComPtr<ID3D11Texture2D>, 2>, 6> textures;
             for (unsigned bank = 0; bank < 2; ++bank) {
                 for (unsigned role = 0; role < 3; ++role) {
@@ -202,6 +262,7 @@ namespace virtualdesktop_openxr {
             auto cleanup = MakeScopeGuard([&] {
                 // Release every artificial dependency BEFORE joins or readback,
                 // including on assertion failure. A driver stall is not hidden.
+                readyWaitReleased = true;
                 (void)fgGate->Signal(1);
                 (void)futureRelease->Signal(1);
                 RuntimeInputRegression::stop(runtime, state, &producer);
@@ -250,6 +311,11 @@ namespace virtualdesktop_openxr {
             RuntimeInputRegression::start(runtime);
             state.release();
             runtime.waitForAsyncSubmissionIdle();
+            if (readyCase)
+                readyWorkerId = GetThreadId(runtime.m_asyncSubmissionThread.native_handle());
+            if (scenario == L"expired-ready")
+                while (ovr_GetTimeInSeconds() <= runtime.xrTimeToOvrTime(first) + .01)
+                    std::this_thread::sleep_for(1ms);
             {
                 std::lock_guard lock(runtime.m_asyncSubmissionMutex);
                 runtime.m_fgReservationForSubmission = reservation;
@@ -258,6 +324,63 @@ namespace virtualdesktop_openxr {
                 runtime.m_layersForAsyncSubmission[0].Header.Type = ovrLayerType_EyeFov;
                 runtime.m_asyncSubmissionReady = false;
                 runtime.m_asyncSubmissionCondVar.notify_all();
+            }
+            if (readyCase) {
+                if (scenario == L"expired-ready") {
+                    require(state.waitFor([&] { return state.frames.size() == 3; }),
+                            "expired synthesis still presents complete real B fallback");
+                    require(readyRegistrations == 0, "expired output never registers an unnecessary ready event");
+                } else {
+                    const auto limit = std::chrono::steady_clock::now() + 2s;
+                    while ((scenario == L"ready-event-failure" ? readyRegistrations.load() : readyWaits.load()) == 0 &&
+                           std::chrono::steady_clock::now() < limit)
+                        std::this_thread::sleep_for(1ms);
+                    require(readyRegistrations > 0 && (scenario == L"ready-event-failure" || readyWaits > 0),
+                            "fault/stop reached the actual worker ready boundary");
+                    if (scenario == L"ready-cancel") {
+                        {
+                            std::unique_lock lease(runtime.m_fgContextMutex, std::try_to_lock);
+                            require(lease.owns_lock(), "ready wait holds no producer context lease");
+                        }
+                        runtime.m_fgNeedReprime = false;
+                        {
+                            std::unique_lock lock(runtime.m_asyncSubmissionMutex, std::try_to_lock);
+                            require(lock.owns_lock(), "ready wait holds no async submission lock");
+                            runtime.m_terminateAsyncThread = true;
+                            runtime.m_asyncSubmissionCondVar.notify_all();
+                        }
+                        readyWaitReleased = true;
+                        const auto stopLimit = std::chrono::steady_clock::now() + 50ms;
+                        while (!runtime.m_fgNeedReprime && std::chrono::steady_clock::now() < stopLimit)
+                            std::this_thread::sleep_for(1ms);
+                        require(runtime.m_fgNeedReprime && readyFence->GetCompletedValue() < readyValue,
+                                "stop leaves ready phase promptly while synthesis remains GPU-blocked");
+                    } else {
+                        std::unique_lock lock(runtime.m_asyncSubmissionMutex);
+                        require(runtime.m_asyncSubmissionCondVar.wait_for(
+                                    lock, 2s, [&] { return bool(runtime.m_asyncSubmissionError); }),
+                                "worker propagates actual event/wait failure");
+                        try {
+                            std::rethrow_exception(runtime.m_asyncSubmissionError);
+                        } catch (const std::exception& error) {
+                            const auto expected = scenario == L"ready-event-failure" ? "8007000e" : "80070006";
+                            auto message = std::string(error.what());
+                            std::transform(message.begin(), message.end(), message.begin(), [](unsigned char c) {
+                                return static_cast<char>(std::tolower(c));
+                            });
+                            require(message.find(expected) != std::string::npos,
+                                    "worker error must retain the injected HRESULT");
+                        }
+                    }
+                }
+                success(fgGate->Signal(1), "release ready fault GPU work before joining");
+                success(futureRelease->Signal(1), "release ready fault source before joining");
+                RuntimeInputRegression::stop(runtime, state);
+                if (scenario == L"ready-cancel")
+                    require(!runtime.m_asyncSubmissionError, "cancellation must not invent a worker fault");
+                cleanup.Deactivate();
+                hw.gpu.noErrors();
+                return;
             }
             if (futureInput) {
                 producer = std::thread([&] {
@@ -331,7 +454,8 @@ int wmain(int argc, wchar_t** argv) {
         require(argc == 4, "backend, module and scenario required");
         const std::wstring scenario = argv[3];
         require(scenario == L"late-fg" || scenario == L"future-input" || scenario == L"control" ||
-                    scenario == L"late-nr",
+                    scenario == L"late-nr" || scenario == L"ready-event-failure" || scenario == L"ready-wait-failure" ||
+                    scenario == L"ready-cancel" || scenario == L"expired-ready",
                 "unknown delay case");
         virtualdesktop_openxr::RuntimeFrameGenerationRegression::delay(argv[1], argv[2], scenario);
         std::cout << "PASS: real GPU deadline, independent B and queue-order proof\n";

@@ -15,6 +15,12 @@ namespace {
     std::atomic<DWORD> enabled{};
     DWORD coverage = 100;
     DWORD requestedFrameGeneration{}, nrSharpenSetting{}, nrUpscalingSetting{100};
+    DWORD nrDepthSubmissionSetting{1};
+    bool includeDepthInput = true;
+    bool singleDepthInput{}, staticDepthInput{}, startWithNr{}, staticDepthReuse{};
+    unsigned additionalSteadyFrames{};
+    unsigned colourTolerance{};
+    std::array<std::array<unsigned, 4>, 2> observedColour{};
     bool expectDepth[2] = {true, true};
     bool readSubmittedColour = true;
     bool checkOffColourEdges = false;
@@ -22,7 +28,16 @@ namespace {
     std::function<void(const ovrLayerEyeFov&)> observeProjection;
     std::function<void(long long)> observeNativeEnd;
     std::function<void(ovrTextureSwapChain)> observeNativeCommit;
+    std::function<ovrResult(ovrSession, ovrTextureSwapChain)> guardNativeCommit;
+    std::function<void(const ovrLayerHeader* const*, unsigned)> observeNativeLayers;
+    std::function<void(XrFrameEndInfo&, const XrCompositionLayerProjection&)> adjustFrameLayers;
     ovrResult OVR_CDECL captureCommit(ovrSession session, ovrTextureSwapChain chain) {
+        if (guardNativeCommit) {
+            const auto guarded = guardNativeCommit(session, chain);
+            if (OVR_FAILURE(guarded)) {
+                return guarded;
+            }
+        }
         const auto result = hookCommit(session, chain);
         if (OVR_SUCCESS(result) && observeNativeCommit) {
             observeNativeCommit(chain);
@@ -53,7 +68,9 @@ namespace {
         else if (setting == L"quirk_disable_async_submission")
             value = requestedFrameGeneration ? 0 : 1;
         else if (setting == L"quirk_use_depth")
-            value = 1;
+            value = nrDepthSubmissionSetting;
+        else if (setting == L"quirk_allow_static_swapchains_reuse")
+            value = staticDepthReuse;
         else
             return ERROR_FILE_NOT_FOUND;
         if (type)
@@ -116,9 +133,11 @@ namespace {
         auto texture = getCommitted(session, layer.ColorTexture[eye]);
         D3D11_TEXTURE2D_DESC desc{};
         texture->GetDesc(&desc);
+        const bool bgra = desc.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS || desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                          desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
         require(desc.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS || desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
-                    desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
-                "Submitted color readback requires RGBA8");
+                    desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || bgra,
+                "Submitted color readback requires RGBA8 or BGRA8");
         ComPtr<ID3D11Device> device;
         texture->GetDevice(&device);
         ComPtr<ID3D11DeviceContext> context;
@@ -135,7 +154,14 @@ namespace {
         const auto* pixel = static_cast<const uint8_t*>(mapped.pData) +
                             (viewport.Pos.y + viewport.Size.h / 2) * mapped.RowPitch +
                             (viewport.Pos.x + viewport.Size.w / 2) * 4;
-        const std::array<unsigned, 4> actual{pixel[0], pixel[1], pixel[2], pixel[3]};
+        const std::array<unsigned, 4> actual{pixel[bgra ? 2 : 0], pixel[1], pixel[bgra ? 0 : 2], pixel[3]};
+        observedColour[eye] = actual;
+        const auto matchesExpected = [&](const std::array<unsigned, 4>& sample) {
+            for (unsigned component = 0; component < sample.size(); ++component)
+                if (std::abs(int(sample[component]) - int(expectedOffColour[eye][component])) > int(colourTolerance))
+                    return false;
+            return true;
+        };
         bool edgesCorrect = true;
         if (checkOffColourEdges && !enabled.load()) {
             for (const auto& corner : std::array<std::array<int, 2>, 4>{{{0, 0},
@@ -144,7 +170,7 @@ namespace {
                                                                          {viewport.Size.w - 1, viewport.Size.h - 1}}}) {
                 const auto* edge = static_cast<const uint8_t*>(mapped.pData) +
                                    (viewport.Pos.y + corner[1]) * mapped.RowPitch + (viewport.Pos.x + corner[0]) * 4;
-                edgesCorrect &= std::array<unsigned, 4>{edge[0], edge[1], edge[2], edge[3]} == expectedOffColour[eye];
+                edgesCorrect &= matchesExpected({edge[bgra ? 2 : 0], edge[1], edge[bgra ? 0 : 2], edge[3]});
             }
         }
         context->Unmap(staging.Get(), 0);
@@ -153,7 +179,7 @@ namespace {
                   << ',' << actual[2] << ',' << actual[3] << '\n';
         require(actual[3] == 255, "Submitted color alpha is incorrect");
         if (!enabled.load())
-            require(actual == expectedOffColour[eye], "NR-off color pixels changed");
+            require(matchesExpected(actual), "NR-off color pixels changed");
         checkHr(device->GetDeviceRemovedReason());
     }
     ovrResult OVR_CDECL captureEnd(ovrSession session,
@@ -166,6 +192,9 @@ namespace {
             try {
                 if (observeNativeEnd) {
                     observeNativeEnd(frame);
+                }
+                if (observeNativeLayers) {
+                    observeNativeLayers(layers, count);
                 }
                 bool found{};
                 for (unsigned i = 0; i < count; ++i) {
@@ -185,7 +214,6 @@ namespace {
                         observeProjection(*reinterpret_cast<const ovrLayerEyeFov*>(layers[i]));
                     }
                     found = true;
-                    break;
                 }
                 require(found, "No native color/depth projection was submitted");
                 ++captured;
@@ -407,6 +435,15 @@ namespace virtualdesktop_openxr {
                         runtime.m_dlssnrSettings.foveationSize == coverage * .01f,
                     "Synthetic settings were not published through real refreshSettings");
         }
+        static void checkRenderPreset() {
+            auto& runtime = *static_cast<OpenXrRuntime*>(GetInstance());
+            int preset = -1;
+            require(runtime.m_ngxParameters && runtime.m_dlssnrFeature[0] && runtime.m_dlssnrFeature[1],
+                    "Both real NR eye features must be initialized before checking the model preset");
+            require(NVSDK_NGX_SUCCEED(runtime.m_ngxParameters->Get("DLSSNR.Hint.Render.Preset", &preset)) &&
+                        preset == 2,
+                    "NR must explicitly select lightweight render preset B (2), not Auto or appearance Style");
+        }
         static unsigned checkCaches(XrSwapchain handle, const char* kind, const char* phase, bool freshOff) {
             const auto& chain = *reinterpret_cast<OpenXrRuntime::Swapchain*>(handle);
             require(chain.resolvedSlices.size() == 2, "Color/depth fixture must resolve both native eyes");
@@ -440,11 +477,30 @@ namespace virtualdesktop_openxr {
                 result.insert(result.end(), slice.dlssnrImages.begin(), slice.dlssnrImages.end());
             return result;
         }
+        static void checkDirectDepth(XrSwapchain handle, bool submitted) {
+            const auto& chain = *reinterpret_cast<OpenXrRuntime::Swapchain*>(handle);
+            require(chain.appSwapchain.ovrSwapchain &&
+                        chain.resolvedSlices[0].ovrSwapchain == chain.appSwapchain.ovrSwapchain,
+                    "Direct-depth fixture must exercise the native app alias");
+            const auto committed = written.find(chain.appSwapchain.ovrSwapchain);
+            if (submitted) {
+                require(committed != written.end(), "Submitted direct depth requires a native commit");
+                require(committed->second == chain.lastReleasedIndex,
+                        "Direct committed depth must use lastReleasedIndex");
+            }
+        }
+        static void checkStaticRelease(XrSwapchain handle) {
+            const auto& chain = *reinterpret_cast<OpenXrRuntime::Swapchain*>(handle);
+            require(chain.dirty, "Deferred direct static re-release must stay dirty across other resolved slices");
+        }
     };
 } // namespace virtualdesktop_openxr
 
 #ifndef VDXR_NR_HELPERS_ONLY
-int main(int argc, char** argv) {
+#ifndef VDXR_NR_TEST_ENTRYPOINT
+#define VDXR_NR_TEST_ENTRYPOINT main
+#endif
+int VDXR_NR_TEST_ENTRYPOINT(int argc, char** argv) {
     std::cout << std::unitbuf;
     XrInstance instance{};
     try {
@@ -540,9 +596,23 @@ int main(int argc, char** argv) {
             cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
             ComPtr<ID3D11Buffer> cb;
             checkHr(device->CreateBuffer(&cbDesc, nullptr, &cb));
-            const std::vector<uint32_t> rgba(512 * 512, 0xff604020);
+            std::array<std::vector<uint32_t>, 2> rgba;
+            for (unsigned eye = 0; eye < 2; ++eye) {
+                const auto& value = expectedOffColour[eye];
+                rgba[eye].assign(512 * 512, value[0] | value[1] << 8 | value[2] << 16 | value[3] << 24);
+            }
             auto colorA = createImages(session, DXGI_FORMAT_R8G8B8A8_UNORM, 512, 512, false);
-            auto depthA = createImages(session, DXGI_FORMAT_D32_FLOAT, 512, 512, true);
+            const auto newDepth = [&] {
+                return createImages(session,
+                                    DXGI_FORMAT_D32_FLOAT,
+                                    512,
+                                    512,
+                                    true,
+                                    true,
+                                    singleDepthInput ? 1 : 2,
+                                    staticDepthInput ? XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT : 0);
+            };
+            auto depthA = newDepth();
             Images colorB, depthB;
             using Regression = virtualdesktop_openxr::RuntimeInputRegression;
             std::vector<ComPtr<ID3D12Resource>> colorImportsB, depthImportsB;
@@ -559,15 +629,15 @@ int main(int argc, char** argv) {
                                     "depth-right-only",
                                     "depth-left-only",
                                     "depth-restored"};
-            const int frameCount = mode == "toggle" ? 7 : 12;
+            const int frameCount = (mode == "toggle" ? 7 : 12) + additionalSteadyFrames;
             for (int frame = 0; frame < frameCount; ++frame) {
-                const bool nr = frame == 1 || frame == 4 || frame >= 6;
-                if (frame == 7)
+                const bool nr = (startWithNr && frame == 0) || frame == 1 || frame == 4 || frame >= 6;
+                if (frame == 7 && mode != "toggle")
                     observation = std::make_unique<Regression::Observation>(mode == "metadata", mode == "writes");
                 Regression::setEnabled(nr);
                 if (frame == 3) {
                     colorB = createImages(session, DXGI_FORMAT_R8G8B8A8_UNORM, 512, 512, false);
-                    depthB = createImages(session, DXGI_FORMAT_D32_FLOAT, 512, 512, true);
+                    depthB = newDepth();
                 }
                 auto& color = frame < 3 ? colorA : colorB;
                 auto& depth = frame < 3 ? depthA : depthB;
@@ -576,14 +646,18 @@ int main(int argc, char** argv) {
                 XR_CHECK(xrWaitFrame(session, &wait, &state));
                 XrFrameBeginInfo fb{XR_TYPE_FRAME_BEGIN_INFO};
                 XR_CHECK(xrBeginFrame(session, &fb));
-                const auto ci = acquireImage(color), di = acquireImage(depth);
+                const bool writeDepth =
+                    !staticDepthInput || frame == 0 || frame == 3 || (staticDepthReuse && (frame == 1 || frame == 4));
+                const auto ci = acquireImage(color), di = writeDepth ? acquireImage(depth) : 0;
                 for (uint32_t eye = 0; eye < 2; ++eye) {
                     context->UpdateSubresource(color.images[ci].texture,
                                                D3D11CalcSubresource(0, eye, 1),
                                                nullptr,
-                                               rgba.data(),
+                                               rgba[eye].data(),
                                                512 * 4,
                                                512 * 512 * 4);
+                    if (!writeDepth || (singleDepthInput && eye))
+                        continue;
                     D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
                     desc.Format = DXGI_FORMAT_D32_FLOAT;
                     desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
@@ -608,7 +682,8 @@ int main(int argc, char** argv) {
                 }
                 context->OMSetRenderTargets(0, nullptr, nullptr);
                 releaseImage(color);
-                releaseImage(depth);
+                if (writeDepth)
+                    releaseImage(depth);
                 XrCompositionLayerProjectionView views[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
                                                              {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
                 XrCompositionLayerDepthInfoKHR depths[2] = {{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR},
@@ -618,8 +693,9 @@ int main(int argc, char** argv) {
                     views[eye].pose.position = {eye ? .032f : -.032f, 1.6f, 0};
                     views[eye].fov = {-.8f, .8f, .8f, -.8f};
                     views[eye].subImage = {color.chain, {{0, 0}, {512, 512}}, eye};
-                    views[eye].next = &depths[eye];
-                    depths[eye].subImage = {depth.chain, {{0, 0}, {512, 512}}, eye};
+                    views[eye].next = includeDepthInput ? &depths[eye] : nullptr;
+                    expectDepth[eye] = includeDepthInput && nrDepthSubmissionSetting;
+                    depths[eye].subImage = {depth.chain, {{0, 0}, {512, 512}}, singleDepthInput ? 0 : eye};
                     depths[eye].minDepth = 0;
                     depths[eye].maxDepth = 1;
                     depths[eye].nearZ = .1f;
@@ -647,6 +723,9 @@ int main(int argc, char** argv) {
                 end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
                 end.layerCount = 1;
                 end.layers = &header;
+                if (adjustFrameLayers) {
+                    adjustFrameLayers(end, layer);
+                }
                 XR_CHECK(xrEndFrame(session, &end));
                 {
                     std::unique_lock lock(captureMutex);
@@ -657,10 +736,19 @@ int main(int argc, char** argv) {
                     if (!captureFailure.empty())
                         throw std::runtime_error(captureFailure);
                 }
-                failures += Regression::checkCaches(color.chain, "color", phases[frame], frame == 0 || frame == 3);
-                failures += Regression::checkCaches(depth.chain, "depth", phases[frame], frame == 0 || frame == 3);
-                if (nr)
+                const auto phase = frame < std::size(phases) ? phases[frame] : "steady";
+                failures += Regression::checkCaches(color.chain, "color", phase, (frame == 0 || frame == 3) && !nr);
+                if (includeDepthInput && !singleDepthInput) {
+                    failures += Regression::checkCaches(depth.chain, "depth", phase, (frame == 0 || frame == 3) && !nr);
+                }
+                if (singleDepthInput)
+                    Regression::checkDirectDepth(depth.chain, !nr);
+                if (staticDepthReuse && (frame == 1 || frame == 4))
+                    Regression::checkStaticRelease(depth.chain);
+                if (nr) {
                     require(GetModuleHandleW(L"nvngx_dlssnr.dll"), "Real NR vendor module was not loaded");
+                    Regression::checkRenderPreset();
+                }
                 if (frame == 4) {
                     colorImportsB = Regression::imports(colorB.chain);
                     depthImportsB = Regression::imports(depthB.chain);

@@ -38,11 +38,16 @@ namespace virtualdesktop_openxr {
         uint64_t producerValue{}, consumerValue{}, consumedValue{}, previousSerial{};
         bool poisoned{}, hostCompletionUnknown{};
         HANDLE copyCompletionEvent{};
+        HANDLE readyCompletionEvent{};
+        std::array<uint64_t, 2> registeredReadyValues{};
 
         ~State() {
             // FrameGeneration::shutdown has already released context ownership.
             if (copyCompletionEvent) {
                 CloseHandle(copyCompletionEvent);
+            }
+            if (readyCompletionEvent) {
+                CloseHandle(readyCompletionEvent);
             }
             if (module) {
                 FreeLibrary(module);
@@ -128,6 +133,10 @@ namespace virtualdesktop_openxr {
             state->device12 = info.device12;
             state->copyCompletionEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
             if (!state->copyCompletionEvent) {
+                return HRESULT_FROM_WIN32(GetLastError());
+            }
+            state->readyCompletionEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (!state->readyCompletionEvent) {
                 return HRESULT_FROM_WIN32(GetLastError());
             }
             state->module = LoadLibraryExW(
@@ -402,6 +411,44 @@ namespace virtualdesktop_openxr {
         return value != UINT64_MAX && value >= ticket.output_ready_value;
     }
 
+    HRESULT FrameGeneration::prepareOutputReadyWait(const OwnedFrameTransaction& transaction,
+                                                    HANDLE& completionEvent) noexcept {
+        completionEvent = nullptr;
+        if (!m_state || !transaction.ticket.token || transaction.ticket.bank >= 2 ||
+            transaction.ownerGeneration != m_state->generation ||
+            m_state->liveTokens[transaction.ticket.bank] != transaction.ticket.token) {
+            return VDXRFG_E_REJECTED;
+        }
+        auto& state = *m_state;
+        if (state.poisoned) {
+            return VDXRFG_E_POISONED;
+        }
+        const auto& ticket = state.tickets[transaction.ticket.bank];
+        if (!state.ready11 || !ticket.output_ready_fence || !ticket.output_ready_value) {
+            return VDXRFG_E_REJECTED;
+        }
+        const auto completed = state.ready11->GetCompletedValue();
+        if (completed == UINT64_MAX) {
+            state.poisoned = state.hostCompletionUnknown = true;
+            return VDXRFG_E_POISONED;
+        }
+        if (completed >= ticket.output_ready_value) {
+            return S_OK;
+        }
+        auto& registered = state.registeredReadyValues[transaction.ticket.bank];
+        if (registered != ticket.output_ready_value) {
+            const auto hr = state.ready11->SetEventOnCompletion(ticket.output_ready_value, state.readyCompletionEvent);
+            if (FAILED(hr)) {
+                return hr;
+            }
+            registered = ticket.output_ready_value;
+        }
+        // A timeout keeps the kernel registration live. Never reset or close
+        // this event here: an older target may still signal it after a timeout.
+        completionEvent = state.readyCompletionEvent;
+        return VDXRFG_E_BUSY;
+    }
+
     HRESULT FrameGeneration::copyOutput(OwnedFrameTransaction& transaction,
                                         FrameGenerationRole role,
                                         ID3D11Texture2D* destination) noexcept {
@@ -574,6 +621,7 @@ namespace virtualdesktop_openxr {
             m_state->consumerValues[transaction.ticket.bank] = 0;
             m_state->roleConsumerValues[transaction.ticket.bank] = {};
             m_state->registeredCopyValues[transaction.ticket.bank] = {};
+            m_state->registeredReadyValues[transaction.ticket.bank] = 0;
             m_state->tickets[transaction.ticket.bank] = {};
             m_state->retainedDestinations[transaction.ticket.bank] = {};
             m_state->capturedSources[transaction.ticket.bank] = {};

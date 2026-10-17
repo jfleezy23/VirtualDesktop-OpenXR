@@ -62,6 +62,20 @@ Run fixtures in separate bounded child processes. Require successful completion,
 
 ## Upstream contract regressions
 
+The experimental NR/FG integration suite also includes `nr_intermediate_commit_regression.cpp`.
+Build it with the same matching runtime objects as `nr_fg_runtime_regression.cpp` before running
+`run-fg-regressions.py --suite integration` or `--suite all`. Its eight modes enforce a bounded native
+commit queue and final-layer consumption, including depth replacement, static re-release and later
+projection reuse. The strict backend guard is a regression oracle; it does not measure VD's native
+queue capacity or headset latency.
+
+`nr_fg_ready_regression` is built by the FG CMake project. Its six hardware cases park actual GPU
+output and cover cached readiness events, stale notifications, registration failures, removed-device
+sentinels, bank/token ownership and owner-generation reuse. Runtime delay tests additionally exercise
+the actual submission worker's event/wait failures, expiration and cancellation. The public FG
+fixture counts real COM extraction calls (with positive controls), checks final texture identity and
+distinct eye pixels, and covers native NR, sharpening-only and upscaled output at 100% NR coverage.
+
 `build-runtime-redirect-regression.cmd` also builds `runtime_negotiation_regression.exe`. Pass the absolute candidate DLL
 path to run its 23-case interface/API range and malformed-structure matrix. It suppresses redirect reads inside the test
 process, verifies returned dispatch code belongs to that DLL, and never creates a session or writes the registry.

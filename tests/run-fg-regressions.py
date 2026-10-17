@@ -65,6 +65,8 @@ def main():
     if args.suite in {"lifecycle", "all"}:
         for scenario in ("removed", "event-failure", "wait-failure", "stale-wake"):
             module_case("event-" + scenario, "nr_fg_event_regression", module, scenario)
+        for scenario in ("timeout", "event-failure", "stale-wake", "removed", "invalid", "next"):
+            module_case("ready-" + scenario, "nr_fg_ready_regression", module, scenario)
         module_case("initialization", "fg_initialization_regression", module)
         for signal in range(1, 5):
             module_case(f"signal-{signal}", "fg_initialization_regression", module, signal)
@@ -106,8 +108,11 @@ def main():
             cases.append((name, [str(binary), *map(str, arguments)]))
 
         if args.suite in {"integration", "all"}:
-            for scenario in ("native", "upscaled", "discard", "nr-toggle"):
+            for scenario in ("native", "upscaled", "sharpen", "discard", "nr-toggle"):
                 runtime_case("nr-" + scenario, "nr_fg_runtime_regression", backend, output / ("state-" + scenario), scenario)
+            for scenario in ("color", "depth", "ignored", "reuse", "upscaled", "direct", "static", "static-array"):
+                runtime_case("commits-" + scenario, "nr_intermediate_commit_regression", backend,
+                             output / ("state-commits-" + scenario), scenario)
             for scenario in ("nr-off-2", "nr-off-3", "nr-off-upscaled", "nr-off-cropped", "nr-off-packed",
                              "nr-off-reuse", "nr-off-bypass", "nr-off-reuse-bypass",
                              "nr-off-d3d12", "nr-off-d3d12-reuse", "nr-off-d3d12-reuse-bypass"):
@@ -116,7 +121,8 @@ def main():
         if args.suite in {"presenter", "all"}:
             for multiplier, scenario in ((2, "normal"), (3, "normal"), (3, "late"), (3, "capacity")):
                 runtime_case(f"worker-{multiplier}-{scenario}", "nr_fg_worker_regression", backend, module, multiplier, scenario)
-            for scenario in ("control", "late-fg", "future-input", "late-nr"):
+            for scenario in ("control", "late-fg", "future-input", "late-nr", "expired-ready",
+                             "ready-event-failure", "ready-wait-failure", "ready-cancel"):
                 runtime_case("delay-" + scenario, "nr_fg_delay_regression", backend, module, scenario)
         if args.suite in {"lifecycle", "all"}:
             scenarios = ["failed-pending", "stop-before-begin", "cleanup-producer", "bgra", "unequal-eyes", "status-snapshots",

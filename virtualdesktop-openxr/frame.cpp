@@ -587,57 +587,70 @@ namespace virtualdesktop_openxr {
                 }
             }
 
-            // Mark all swapchain images as clean (aka already pre-processed).
-            for (auto resolvedSwapchain : m_precompositor.resolvedSwapchainImages) {
-                resolvedSwapchain.first->dirty = false;
-            }
-
             // Add a dummy layer so we can still call ovr_endFrame() for timing purposes.
             if (layersAllocator.empty()) {
                 layersAllocator.push_back({});
                 layersAllocator.back().Header.Type = ovrLayerType_Disabled;
             }
-            if (m_frameGenerationMode) {
-                const bool captured = prepareFrameGeneration(*frameEndInfo);
-                if (!captured) {
-                    // Raw ordinary inputs were held back for FG just like
-                    // NR/upscale outputs. Commit only chains actually used by
-                    // the complete fallback layers, retaining pending copies.
-                    const auto pending = m_precompositor.pendingSwapchainCommits;
-                    for (const auto& [swapchain, slice] : pending) {
-                        const auto chain = swapchain->resolvedSlices[slice].ovrSwapchain;
-                        const bool submitted =
-                            std::any_of(layersAllocator.begin(), layersAllocator.end(), [&](const auto& layer) {
-                                return (layer.Header.Type == ovrLayerType_EyeFov ||
-                                        layer.Header.Type == ovrLayerType_EyeFovDepth) &&
-                                       (layer.EyeFov.ColorTexture[0] == chain || layer.EyeFov.ColorTexture[1] == chain);
-                            });
-                        if (submitted) {
-                            resolveSwapchainImage(*swapchain, slice, m_precompositor.resolvedSwapchainImages);
+            const bool captured = m_frameGenerationMode && prepareFrameGeneration(*frameEndInfo);
+            if (!captured) {
+                const auto submitted = [&](ovrTextureSwapChain chain) {
+                    return std::any_of(layersAllocator.begin(), layersAllocator.end(), [&](const auto& layer) {
+                        if (layer.Header.Type != ovrLayerType_EyeFov && layer.Header.Type != ovrLayerType_EyeFovDepth) {
+                            return false;
                         }
-                    }
-                    for (auto chain : m_precompositor.pendingColourCommits) {
-                        if (!chain) {
-                            continue;
-                        }
-                        // An internal source must not fill a compositor chain
-                        // that no End references. Fallback still commits every
-                        // final color chain before publishing the full layers.
-                        const bool submitted =
-                            std::any_of(layersAllocator.begin(), layersAllocator.end(), [&](const auto& layer) {
-                                return (layer.Header.Type == ovrLayerType_EyeFov ||
-                                        layer.Header.Type == ovrLayerType_EyeFovDepth) &&
-                                       (layer.EyeFov.ColorTexture[0] == chain || layer.EyeFov.ColorTexture[1] == chain);
-                            });
-                        if (submitted) {
-                            CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, chain));
-                        }
+                        return layer.EyeFov.ColorTexture[0] == chain || layer.EyeFov.ColorTexture[1] == chain ||
+                               (layer.Header.Type == ovrLayerType_EyeFovDepth &&
+                                (layer.EyeFovDepth.DepthTexture[0] == chain ||
+                                 layer.EyeFovDepth.DepthTexture[1] == chain));
+                    });
+                };
+                // Raw ordinary inputs were held back for FG just like
+                // NR/upscale outputs. Commit only chains actually used by
+                // the complete fallback layers, retaining pending copies.
+                const auto pending = m_precompositor.pendingSwapchainCommits;
+                for (const auto& [swapchain, slice] : pending) {
+                    const auto chain = swapchain->resolvedSlices[slice].ovrSwapchain;
+                    if (submitted(chain)) {
+                        resolveSwapchainImage(*swapchain, slice, m_precompositor.resolvedSwapchainImages);
                     }
                 }
+                for (auto chain : m_precompositor.pendingColourCommits) {
+                    if (!chain) {
+                        continue;
+                    }
+                    // An internal source must not fill a compositor chain
+                    // that no End references. Fallback still commits every
+                    // final color chain before publishing the full layers.
+                    if (submitted(chain)) {
+                        CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, chain));
+                    }
+                }
+            }
+            if (m_frameGenerationMode) {
                 // Fallback also reads newly private ordinary source images.
                 // Protect application reuse whether FG accepted this input or
                 // submitted the complete original layers instead.
                 protectFrameGenerationSources();
+            }
+
+            // Dirty belongs to the whole source. A deferred direct static
+            // slice must retain it even when another slice used a private copy.
+            for (auto resolvedSwapchain : m_precompositor.resolvedSwapchainImages) {
+                const auto& source = *resolvedSwapchain.first;
+                if ((source.xrDesc.createFlags & XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) &&
+                    std::any_of(m_precompositor.pendingSwapchainCommits.begin(),
+                                m_precompositor.pendingSwapchainCommits.end(),
+                                [&](const auto& pending) {
+                                    return pending.first == &source &&
+                                           source.resolvedSlices[pending.second].ovrSwapchain ==
+                                               source.appSwapchain.ovrSwapchain;
+                                })) {
+                    // The released static image may be submitted directly in a
+                    // later frame, including after a compatibility re-release.
+                    continue;
+                }
+                resolvedSwapchain.first->dirty = false;
             }
 
             if (IsTraceEnabled() && m_gpuTimerPrecomposition[0]) {
@@ -930,8 +943,10 @@ namespace virtualdesktop_openxr {
                         }
 
                         // Fill out depth buffer information.
-                        resolveSwapchainImage(
-                            xrDepthSwapchain, depth->subImage.imageArrayIndex, m_precompositor.resolvedSwapchainImages);
+                        resolveSwapchainImage(xrDepthSwapchain,
+                                              depth->subImage.imageArrayIndex,
+                                              m_precompositor.resolvedSwapchainImages,
+                                              true);
                         layer.EyeFovDepth.DepthTexture[viewIndex] =
                             xrDepthSwapchain.resolvedSlices[depth->subImage.imageArrayIndex].ovrSwapchain;
 
@@ -970,7 +985,7 @@ namespace virtualdesktop_openxr {
 
         // Run Neural Rendering if needed.
         if (needUplifting) {
-            upliftLayer(subImages, depthSubImages, depthInverted, layer.EyeFov);
+            upliftLayer(subImages, depthSubImages, depthInverted, layer.EyeFov, !needUpscaling);
         }
 
         // Run the upscaler or sharpening if needed.

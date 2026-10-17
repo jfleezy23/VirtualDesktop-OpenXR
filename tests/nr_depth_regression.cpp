@@ -67,6 +67,7 @@ std::map<ovrTextureSwapChain, int> written;
 std::string captureFailure;
 int captured{};
 bool depthPixelsDefined{true};
+bool sameDepthForBothEyes{};
 ovrResult OVR_CDECL hookCommit(ovrSession session, ovrTextureSwapChain chain) {
     int index{};
     const auto query = getIndex(session, chain, &index);
@@ -138,7 +139,8 @@ void checkDepth(ovrSession session, const ovrLayerEyeFovDepth& layer, unsigned e
         const auto x = rect.Pos.x + rect.Size.w * probe[0] / 8, y = rect.Pos.y + rect.Size.h * probe[1] / 8;
         const auto* bytes = static_cast<const uint8_t*>(mapped.pData) + y * mapped.RowPitch + x * stride;
         const float actual = depthAt(bytes, format);
-        const float expected = (eye ? .55f : .15f) + (probe[0] > 4 ? .1f : 0.f) + (probe[1] > 4 ? .2f : 0.f);
+        const float expected =
+            (eye && !sameDepthForBothEyes ? .55f : .15f) + (probe[0] > 4 ? .1f : 0.f) + (probe[1] > 4 ? .2f : 0.f);
         correct &= std::isfinite(actual) && std::abs(actual - expected) < .0001f;
         std::cout << "eye=" << eye << " depth(" << x << ',' << y << ")=" << actual << " expected=" << expected << '\n';
     }
@@ -191,8 +193,14 @@ void enumerateImages(Images& result) {
         if (!image.texture)
             throw std::runtime_error("Image enumeration returned a null texture");
 }
-Images createImages(
-    XrSession session, DXGI_FORMAT format, uint32_t width, uint32_t height, bool depth, bool enumerate = true) {
+Images createImages(XrSession session,
+                    DXGI_FORMAT format,
+                    uint32_t width,
+                    uint32_t height,
+                    bool depth,
+                    bool enumerate = true,
+                    uint32_t arraySize = 2,
+                    XrSwapchainCreateFlags flags = 0) {
     XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     info.usageFlags =
         (depth ? XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) |
@@ -200,7 +208,8 @@ Images createImages(
     info.format = format;
     info.width = width;
     info.height = height;
-    info.arraySize = 2;
+    info.arraySize = arraySize;
+    info.createFlags = flags;
     info.sampleCount = info.faceCount = info.mipCount = 1;
     Images result;
     XR_CHECK(xrCreateSwapchain(session, &info, &result.chain));

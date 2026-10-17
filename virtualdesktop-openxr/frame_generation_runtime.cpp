@@ -415,18 +415,43 @@ namespace virtualdesktop_openxr {
                 }
                 if (generated) {
                     const auto deadline = xrTimeToOvrTime(transaction.slots.targets[0]);
-                    const auto outputReady = [&] {
-                        std::unique_lock contextLease(m_fgContextMutex);
-                        return m_frameGeneration->ready(transaction);
-                    };
-                    while (!outputReady() && ovr_GetTimeInSeconds() < deadline) {
-                        std::unique_lock lock(m_asyncSubmissionMutex);
-                        if (m_asyncSubmissionCondVar.wait_for(lock, 1ms, [&] { return m_terminateAsyncThread; })) {
+                    bool outputReady{};
+                    while (true) {
+                        {
+                            std::unique_lock lock(m_asyncSubmissionMutex);
+                            if (m_terminateAsyncThread) {
+                                break;
+                            }
+                        }
+                        HANDLE completionEvent{};
+                        HRESULT result;
+                        {
+                            std::unique_lock contextLease(m_fgContextMutex);
+                            // An expired group needs its existing real-frame
+                            // fallback, not another fallible kernel registration.
+                            if (ovr_GetTimeInSeconds() >= deadline) {
+                                break;
+                            }
+                            result = m_frameGeneration->prepareOutputReadyWait(transaction, completionEvent);
+                        }
+                        if (result != VDXRFG_E_BUSY) {
+                            CHECK_HRCMD(result);
+                            outputReady = true;
                             break;
                         }
+                        if (ovr_GetTimeInSeconds() >= deadline) {
+                            break;
+                        }
+                        // GPU completion wakes us immediately. Bound timeout
+                        // retries for shutdown; neither context mutex is held.
+                        const auto waited = WaitForSingleObject(completionEvent, 1);
+                        if (waited == WAIT_FAILED) {
+                            CHECK_HRCMD(HRESULT_FROM_WIN32(GetLastError()));
+                        }
+                        CHECK_MSG(waited == WAIT_OBJECT_0 || waited == WAIT_TIMEOUT, "FG ready event wait failed");
                     }
-                    generated = outputReady() && m_frameGenerationCadence.onTime(
-                                                     transaction.slots, ovrTimeToXrTime(ovr_GetTimeInSeconds()));
+                    generated = outputReady && m_frameGenerationCadence.onTime(transaction.slots,
+                                                                               ovrTimeToXrTime(ovr_GetTimeInSeconds()));
                     if (!generated) {
                         m_fgNeedReprime = m_fgTimelineReanchor = true;
                     }

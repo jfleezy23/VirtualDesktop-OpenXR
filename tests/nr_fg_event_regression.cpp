@@ -17,6 +17,7 @@ namespace {
     std::string fault;
     bool armed{}, afterWait{};
     unsigned injected{};
+    unsigned registrations{};
 
     UINT64 STDMETHODCALLTYPE completed(ID3D11Fence* fence) {
         if (armed && fault == "removed" && afterWait && fence == watchedFence && GetCurrentThreadId() == ownerThread) {
@@ -28,6 +29,7 @@ namespace {
     }
     HRESULT STDMETHODCALLTYPE registerEvent(ID3D11Fence* fence, UINT64 value, HANDLE event) {
         if (armed && GetCurrentThreadId() == ownerThread) {
+            ++registrations;
             watchedFence = fence;
             watchedEvent = event;
             if (fault == "event-failure") {
@@ -70,6 +72,7 @@ namespace {
             watchedFence = nullptr;
             watchedEvent = nullptr;
             injected = 0;
+            registrations = 0;
             armed = afterWait = false;
             attach(true);
         }
@@ -94,6 +97,7 @@ namespace {
     };
 } // namespace
 
+#ifndef VDXR_FG_EVENT_HELPERS_ONLY
 int main(int argc, char** argv) {
     try {
         check(argc == 3, "module and removed/event-failure/wait-failure required");
@@ -183,3 +187,4 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
+#endif

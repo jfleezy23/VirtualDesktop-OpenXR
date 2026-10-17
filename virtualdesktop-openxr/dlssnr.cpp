@@ -215,7 +215,8 @@ namespace virtualdesktop_openxr {
     void OpenXrRuntime::upliftLayer(const XrSwapchainSubImage** views,
                                     const XrSwapchainSubImage** depth,
                                     const bool* depthInverted,
-                                    ovrLayerEyeFov& layer) {
+                                    ovrLayerEyeFov& layer,
+                                    bool finalColour) {
         TraceLocalActivity(local);
         TraceLoggingWriteStart(local, "DLSSNR");
         const auto& settings = m_precompositor.dlssnrSettings;
@@ -303,7 +304,8 @@ namespace virtualdesktop_openxr {
             if (!m_dlssnrFeature[eye]) {
                 m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Width, foveatedResolution.w);
                 m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Height, foveatedResolution.h);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Hint_Render_Preset, 0);
+                // Select the lightweight network explicitly; the appearance Style is independent.
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Hint_Render_Preset, 2 /* Preset B */);
                 m_ngxParameters->Set(NVSDK_NGX_Parameter_CreationNodeMask, 1u);
                 m_ngxParameters->Set(NVSDK_NGX_Parameter_VisibilityNodeMask, 1u);
 
@@ -489,23 +491,25 @@ namespace virtualdesktop_openxr {
         // Serialize and commit output.
         const auto fenceValue = m_dlssnrContext->SubmitCommandList(std::move(cmdList));
         CHECK_HRCMD(m_ovrSubmissionContext->Wait(m_dlssnrOutFence.Get(), fenceValue));
-        if (m_frameGenerationMode) {
-            m_precompositor.pendingColourCommits[0] = m_dlssnrOutputSwapchain;
-        } else {
-            CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, m_dlssnrOutputSwapchain));
-        }
+        // Later sharpening/upscaling can replace this intermediate. Commit only
+        // if a final submitted layer still references the NR chain.
+        m_precompositor.pendingColourCommits[0] = m_dlssnrOutputSwapchain;
         m_dlssnrOutputSwapchainLastWrittenIndex = imageIndex;
+
+        // Both eye rectangles reference one packed texture. Later postprocessing
+        // supplies its own final textures, so only extract this one when final.
+        if (m_frameGenerationMode && finalColour) {
+            ComPtr<ID3D11Resource> resource;
+            m_dlssnrOutputSwapchainSrvs[imageIndex]->GetResource(&resource);
+            CHECK_HRCMD(resource.As(&m_precompositor.finalColour[0]));
+            m_precompositor.finalColour[1] = m_precompositor.finalColour[0];
+        }
 
         // Patch the layer.
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
             layer.ColorTexture[eye] = m_dlssnrOutputSwapchain;
             layer.Viewport[eye].Pos = {(int)eye * resolution.w, 0};
             layer.Viewport[eye].Size = {views[eye]->imageRect.extent.width, views[eye]->imageRect.extent.height};
-            if (m_frameGenerationMode) {
-                ComPtr<ID3D11Resource> resource;
-                m_dlssnrOutputSwapchainSrvs[imageIndex]->GetResource(&resource);
-                CHECK_HRCMD(resource.As(&m_precompositor.finalColour[eye]));
-            }
         }
 
         TraceLoggingWriteStop(local, "DLSSNR");

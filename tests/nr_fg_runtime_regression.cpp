@@ -3,6 +3,7 @@
 #define VDXR_NR_HELPERS_ONLY
 #include "nr_input_toggle_regression.cpp"
 #undef VDXR_NR_HELPERS_ONLY
+#include "nr_fg_lookup_probe.h"
 
 namespace {
     struct D3D12Input {
@@ -233,6 +234,34 @@ namespace virtualdesktop_openxr {
             std::unique_lock lock(captureMutex);
             commitsBeforeInput = nrCommits;
         }
+        static void beginLookupProbe(NrLookupProbe& probe) {
+            probe.begin(runtime().m_dlssnrOutputSwapchainSrvs);
+        }
+        static void verifyLookupResult(bool postprocess) {
+            const auto& value = runtime();
+            ComPtr<ID3D11Resource> packed;
+            value.m_dlssnrOutputSwapchainSrvs[value.m_dlssnrOutputSwapchainLastWrittenIndex]->GetResource(&packed);
+            ComPtr<ID3D11Texture2D> texture;
+            checkHr(packed.As(&texture));
+            for (unsigned eye = 0; eye < 2; ++eye) {
+                if (!postprocess) {
+                    require(value.m_precompositor.finalColour[eye] == texture,
+                            "both final eye references own the current packed NR texture");
+                } else {
+                    require(value.m_precompositor.finalColour[eye] != texture,
+                            "postprocessed FG colour replaces the intermediate NR texture");
+                    bool found{};
+                    for (const auto handle : value.m_swapchains) {
+                        const auto& projection =
+                            reinterpret_cast<OpenXrRuntime::Swapchain*>(handle)->stereoProjection[eye];
+                        found |=
+                            projection.lastCommittedIndex >= 0 &&
+                            value.m_precompositor.finalColour[eye] == projection.images[projection.lastCommittedIndex];
+                    }
+                    require(found, "FG captures each eye's current postprocessed texture");
+                }
+            }
+        }
         static void observeCommit(ovrTextureSwapChain chain) {
             std::unique_lock lock(captureMutex);
             ++nrCommits[chain];
@@ -329,22 +358,21 @@ int main(int argc, char** argv) {
             require(nativeRate == 30 || nativeRate == 60 || nativeRate == 120, "explicit supported test clock");
         }
         std::cout << "private backend test clock=" << nativeRate << "Hz\n";
-        require(noNr || discard || toggle || !strcmp(argv[3], "native") || !strcmp(argv[3], "upscaled"),
+        const bool sharpenOnly = !strcmp(argv[3], "sharpen");
+        require(noNr || discard || toggle || sharpenOnly || !strcmp(argv[3], "native") || !strcmp(argv[3], "upscaled"),
                 "known public FG scenario");
         requestedFrameGeneration = !strcmp(argv[3], "nr-off-2") ? 2 : 3;
         coverage = 100;
         const bool upscaled = !strcmp(argv[3], "upscaled") || !strcmp(argv[3], "nr-off-upscaled");
         nrUpscalingSetting = upscaled ? 150 : 100;
-        nrSharpenSetting = upscaled ? 25 : 0;
+        nrSharpenSetting = upscaled || sharpenOnly ? 25 : 0;
         enabled = toggle;
         // Blocking Map readbacks inside each native End would themselves miss
         // 120Hz deadlines. Verify final pixels after draining the actual worker.
         readSubmittedColour = false;
         checkOffColourEdges = cropped;
-        if (noNr) {
-            expectedOffColour[0] = {32, 64, 96, 255};
-            expectedOffColour[1] = {144, 80, 48, 255};
-        }
+        expectedOffColour[0] = {32, 64, 96, 255};
+        expectedOffColour[1] = {144, 80, 48, 255};
         SettingsReadHook settings;
         using Regression = virtualdesktop_openxr::RuntimeFrameGenerationRegression;
         const auto getProc = virtualdesktop_openxr::RuntimeInputRegression::initialize(argv[1], argv[2]);
@@ -456,6 +484,7 @@ int main(int argc, char** argv) {
             }
             const unsigned inputs = reuse ? 4u : ((fallback || toggle) ? 18u : 12u);
             unsigned beforeDiscard{};
+            NrLookupProbe lookupProbe;
             for (unsigned frame = 0; frame < inputs; ++frame) {
                 const bool nr = toggle ? (frame < 3 || frame >= 6) : (!noNr && frame != 0);
                 virtualdesktop_openxr::RuntimeInputRegression::setEnabled(nr);
@@ -551,7 +580,14 @@ int main(int argc, char** argv) {
                         releaseSource.join();
                     }
                 });
+                const bool measureLookups = nr && frame >= 2;
+                if (measureLookups)
+                    Regression::beginLookupProbe(lookupProbe);
                 XR_CHECK(xrEndFrame(session, &end));
+                if (measureLookups)
+                    lookupProbe.finish(upscaled || sharpenOnly);
+                if (measureLookups)
+                    Regression::verifyLookupResult(upscaled || sharpenOnly);
                 if (fallback && frame == 2) {
                     Regression::drainAndVerifyPixels();
                 }
@@ -595,6 +631,10 @@ int main(int argc, char** argv) {
             }
             const auto expectedNr = noNr ? 0u : inputs - (toggle ? 5u : 2u);
             Regression::verifyPixels();
+            unsigned eyeDifference{};
+            for (unsigned component = 0; component < 3; ++component)
+                eyeDifference += std::abs(int(observedColour[0][component]) - int(observedColour[1][component]));
+            require(eyeDifference > 32, "final FG presentation preserves distinct left and right eye pixels");
             require(Regression::nrEvaluations[0] == expectedNr && Regression::nrEvaluations[1] == expectedNr,
                     "exactly one real NR evaluation per eye per input, none on synthesized output");
             const auto statistics = Regression::statistics();

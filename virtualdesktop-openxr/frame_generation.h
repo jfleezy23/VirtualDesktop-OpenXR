@@ -58,6 +58,9 @@ namespace virtualdesktop_openxr {
         HRESULT shutdown() noexcept;
         HRESULT getStatistics(VDXRFG_StatisticsV1& statistics) const noexcept;
         bool ready(const OwnedFrameTransaction& transaction) const noexcept;
+        // Call under the context lease. BUSY borrows a State-owned event;
+        // wait outside the lease, then recheck here. A wake alone proves nothing.
+        HRESULT prepareOutputReadyWait(const OwnedFrameTransaction& transaction, HANDLE& completionEvent) noexcept;
         bool copyReady(const OwnedFrameTransaction& transaction, FrameGenerationRole role) const noexcept;
         HRESULT waitForCopy(const OwnedFrameTransaction& transaction,
                             FrameGenerationRole role,
