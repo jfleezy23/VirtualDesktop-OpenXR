@@ -78,6 +78,17 @@ if(BUILD_TESTING)
         add_test(NAME fg_host_${SCENARIO} COMMAND nr_fg_integration_regression "$<TARGET_FILE:vdxr_frame_generation>" ${SCENARIO})
         set_tests_properties(fg_host_${SCENARIO} PROPERTIES TIMEOUT 60 PASS_REGULAR_EXPRESSION "PASS:")
     endforeach()
+    add_executable(nr_fg_pack_regression ../tests/nr_fg_pack_regression.cpp
+        ../virtualdesktop-openxr/frame_generation.cpp ../virtualdesktop-openxr/frame_generation_pacing.cpp)
+    target_include_directories(nr_fg_pack_regression PRIVATE include ../packages/Detours.4.0.1/lib/native/include)
+    target_compile_features(nr_fg_pack_regression PRIVATE cxx_std_17)
+    target_compile_definitions(nr_fg_pack_regression PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(nr_fg_pack_regression PRIVATE d3d11 d3d12 dxgi
+        "${CMAKE_CURRENT_SOURCE_DIR}/../packages/Detours.4.0.1/lib/native/libs/x64/detours.lib")
+    foreach(SCENARIO packed offset separate gap overlap reverse different-y array-mip invalid-rect invalid-pose wrong-device)
+        add_test(NAME fg_pack_${SCENARIO} COMMAND nr_fg_pack_regression "$<TARGET_FILE:vdxr_frame_generation>" ${SCENARIO})
+        set_tests_properties(fg_pack_${SCENARIO} PROPERTIES TIMEOUT 60 PASS_REGULAR_EXPRESSION "PASS:")
+    endforeach()
     add_executable(nr_fg_event_regression ../tests/nr_fg_event_regression.cpp
         ../virtualdesktop-openxr/frame_generation.cpp ../virtualdesktop-openxr/frame_generation_pacing.cpp)
     target_include_directories(nr_fg_event_regression PRIVATE include ../packages/Detours.4.0.1/lib/native/include)

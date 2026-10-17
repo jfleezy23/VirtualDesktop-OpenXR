@@ -62,6 +62,9 @@ def main():
     if args.suite in {"integration", "lifecycle", "all"}:
         for scenario in ("interop", "invalid-plan", "stale-ticket", "blocked-consumer", "invalid-context", "copy-identity", "copy-alias", "event-stale"):
             module_case("host-" + scenario, "nr_fg_integration_regression", module, scenario)
+        for scenario in ("packed", "offset", "separate", "gap", "overlap", "reverse", "different-y", "array-mip",
+                         "invalid-rect", "invalid-pose", "wrong-device"):
+            module_case("pack-" + scenario, "nr_fg_pack_regression", module, scenario)
     if args.suite in {"lifecycle", "all"}:
         for scenario in ("removed", "event-failure", "wait-failure", "stale-wake"):
             module_case("event-" + scenario, "nr_fg_event_regression", module, scenario)

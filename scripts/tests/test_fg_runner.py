@@ -5,6 +5,26 @@ import tempfile
 
 
 class ResultTests(unittest.TestCase):
+    def test_module_receipt_rejects_changed_packed_input_fixture(self):
+        path = Path(__file__).parents[1] / "fg-build-provenance.py"
+        spec = importlib.util.spec_from_file_location("fg_provenance_pack", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            source = repo / "tests/nr_fg_pack_regression.cpp"
+            source.parent.mkdir()
+            source.write_text("original native pack fixture")
+            artifact = repo / "pack.exe"
+            artifact.write_bytes(b"built fixture")
+            receipt = repo / "receipt.json"
+            before = module.snapshot(repo, "module")
+            module.write_receipt(receipt, repo, "module", before, [artifact])
+            module.verify_receipt(receipt, repo, "module")
+            source.write_text("changed capture readback")
+            with self.assertRaises(ValueError):
+                module.verify_receipt(receipt, repo, "module")
+
     def test_build_receipt_rejects_stale_source_and_artifacts(self):
         path = Path(__file__).parents[1] / "fg-build-provenance.py"
         spec = importlib.util.spec_from_file_location("fg_provenance", path)

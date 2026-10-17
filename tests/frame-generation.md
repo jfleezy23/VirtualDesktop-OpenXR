@@ -37,6 +37,11 @@ through the first native handoff. Each prepared role has a distinct SDK image
 and authoritative copy-completion fence. Host callers must keep captured source
 contents unchanged until the real copy is queued; the runtime admission gate
 enforces that contract. Long module stalls can still delay later retirement.
+When the final NR eyes share one horizontally adjacent packed texture, capture
+and real-frame presentation each use one bounded subresource copy. Separate,
+cropped nonadjacent or differently ordered eyes keep their independent copies.
+Device/description reuse is limited to identical live texture pointers within
+one capture; each eye's bounds, pose and FOV are still validated.
 Destination completion uses one retained GPU event, with bounded waits and an
 authoritative fence recheck after each wake. This avoids timer polling that can
 sleep past a synthetic slot's remaining render lead. An unready or missed group
@@ -81,6 +86,13 @@ prediction quantization, actual post-NR/upscaler capture, native role
 presentation, late output, active/pending capacity, discard recovery,
 metadata discontinuities, shutdown, recoverable startup, later native-slot
 faults, allocation rollback and unsupported-composition bypass.
+Packed-eye checks count native device, description, identity and copy calls with
+positive controls, then independently compare both the captured FG input and
+real presentation pixels. Offset crops, gaps, overlaps, reversed eyes, separate
+textures, differing Y offsets and mip/array backing preserve subresource-zero
+behavior. Invalid second-eye bounds/pose and foreign-device inputs still reject
+before any capture copy. Build receipts include this fixture so stale tests
+cannot validate a later source change.
 GPU-delay checks preserve the original producer dependency while independently
 blocking synthesis, force a later NR-style wait between native submissions,
 check S2/B destination readiness and advancing SDK indices, and verify that an

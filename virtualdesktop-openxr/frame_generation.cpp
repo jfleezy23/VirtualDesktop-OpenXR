@@ -88,8 +88,34 @@ namespace virtualdesktop_openxr {
             ComPtr<ID3D11Device> owner;
             ComPtr<IUnknown> a, b;
             texture->GetDevice(&owner);
+            if (owner.Get() == expected) {
+                return true;
+            }
+            // Different interface pointers may still identify the same COM device.
             return SUCCEEDED(expected->QueryInterface(IID_PPV_ARGS(&a))) && SUCCEEDED(owner.As(&b)) &&
                    a.Get() == b.Get();
+        }
+
+        // Sources and view bounds have already been validated and retained.
+        // Copy only subresource zero, including for array/mip-backed inputs.
+        void copyStereo(ID3D11DeviceContext* context,
+                        ID3D11Texture2D* destination,
+                        uint32_t eyeWidth,
+                        const std::array<ComPtr<ID3D11Texture2D>, 2>& sources,
+                        const std::array<VDXRFG_ViewV1, 2>& views) {
+            const auto& left = views[0].rect;
+            const auto& right = views[1].rect;
+            if (sources[0].Get() == sources[1].Get() && left.width == eyeWidth && right.width == eyeWidth &&
+                left.y == right.y && left.height == right.height && uint64_t(left.x) + left.width == right.x) {
+                const D3D11_BOX box{left.x, left.y, 0, right.x + right.width, left.y + left.height, 1};
+                context->CopySubresourceRegion(destination, 0, 0, 0, 0, sources[0].Get(), 0, &box);
+            } else {
+                for (uint32_t eye = 0; eye < 2; ++eye) {
+                    const auto& rect = views[eye].rect;
+                    const D3D11_BOX box{rect.x, rect.y, 0, rect.x + rect.width, rect.y + rect.height, 1};
+                    context->CopySubresourceRegion(destination, 0, eye * eyeWidth, 0, 0, sources[eye].Get(), 0, &box);
+                }
+            }
         }
     } // namespace
 
@@ -268,14 +294,21 @@ namespace virtualdesktop_openxr {
         submit.serial = input.serial;
         submit.display_time_ns = input.time;
         submit.display_period_ns = input.period;
+        D3D11_TEXTURE2D_DESC description{};
         for (uint32_t eye = 0; eye < 2; ++eye) {
             const auto& view = input.views[eye];
             const auto& rect = view.rect;
-            if (!input.colour[eye] || !sameDevice(state.device11.Get(), input.colour[eye].Get())) {
+            if (!input.colour[eye]) {
                 return VDXRFG_E_REJECTED;
             }
-            D3D11_TEXTURE2D_DESC description{};
-            input.colour[eye]->GetDesc(&description);
+            // Final NR eyes share one packed texture. Its device and immutable
+            // description need checking once, but each view still needs validation.
+            if (eye == 0 || input.colour[eye].Get() != input.colour[0].Get()) {
+                if (!sameDevice(state.device11.Get(), input.colour[eye].Get())) {
+                    return VDXRFG_E_REJECTED;
+                }
+                input.colour[eye]->GetDesc(&description);
+            }
             // Runtime-resolved array slice zero can alias the app array; its
             // selected image is subresource zero. Higher slices are resolved
             // to standalone images before reaching this interface.
@@ -343,12 +376,7 @@ namespace virtualdesktop_openxr {
             }
         }
         state.producerSources = input.colour;
-        for (uint32_t eye = 0; eye < 2; ++eye) {
-            const auto& rect = input.views[eye].rect;
-            const D3D11_BOX box{rect.x, rect.y, 0, rect.x + rect.width, rect.y + rect.height, 1};
-            state.context11->CopySubresourceRegion(
-                state.input11.Get(), 0, eye * state.info.eyeWidth, 0, 0, input.colour[eye].Get(), 0, &box);
-        }
+        copyStereo(state.context11.Get(), state.input11.Get(), state.info.eyeWidth, input.colour, input.views);
         submit.producer_value = ++state.producerValue;
         HRESULT hr = state.context11->Signal(state.producer11.Get(), submit.producer_value);
         if (FAILED(hr)) {
@@ -513,18 +541,11 @@ namespace virtualdesktop_openxr {
             // B is already finalized by NR, sharpening and upscaling. Reading
             // that retained source avoids waiting for synthesis just to fall
             // back to the real frame. It still obeys the producer's NR fence.
-            for (uint32_t eye = 0; eye < 2; ++eye) {
-                const auto& rect = state.capturedViews[transaction.ticket.bank][eye].rect;
-                const D3D11_BOX box{rect.x, rect.y, 0, rect.x + rect.width, rect.y + rect.height, 1};
-                state.context11->CopySubresourceRegion(destination,
-                                                       0,
-                                                       eye * state.info.eyeWidth,
-                                                       0,
-                                                       0,
-                                                       state.capturedSources[transaction.ticket.bank][eye].Get(),
-                                                       0,
-                                                       &box);
-            }
+            copyStereo(state.context11.Get(),
+                       destination,
+                       state.info.eyeWidth,
+                       state.capturedSources[transaction.ticket.bank],
+                       state.capturedViews[transaction.ticket.bank]);
         } else {
             state.context11->CopyResource(destination, state.outputs11[transaction.ticket.bank][index].Get());
         }
