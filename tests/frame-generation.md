@@ -46,20 +46,20 @@ capture/reset in the next producer.
 ## Reproducible builds and bounded checks
 
 Use PowerShell on Windows with Git, CMake, Python and the pinned MSVC/Windows SDK
-installed. v145 selects MSVC14.51.36231 and SDK10.0.26100.0; v143 selects
+installed. The default v145 selects MSVC14.51.36231 and SDK10.0.26100.0; explicit v143 selects
 14.44.35207. The normal runtime remains C++17 with precise floating point;
 the optional synthesis module uses C++20. Use fresh ignored output directories.
 
 ~~~powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-NrFrameGeneration.ps1 -Toolset v145 -OutputDirectory ./bin/fg-ordinary-example
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-NrFrameGeneration.ps1 -Toolset v145 -PrivateRuntime -OutputDirectory ./bin/fg-private-example
-python tests/build-fg-runtime-fixtures.py bin/fg-private-example/runtime nr_fg_worker_regression nr_fg_runtime_regression nr_fg_delay_regression
+python tests/build-fg-runtime-fixtures.py bin/fg-private-example/runtime nr_fg_worker_regression nr_fg_runtime_regression nr_fg_delay_regression nr_intermediate_commit_regression
 python tests/run-fg-regressions.py --suite all --module-directory bin/fg-private-example/module/Release --runtime-cohort bin/fg-private-example/runtime --backend-template C:/path/to/private-backend --output-directory bin/fg-check-example
 ~~~
 
 If Visual Studio is installed elsewhere, supply `-MsBuildPath` with its `MSBuild/Current/Bin/MSBuild.exe` path.
 The linked fixture builder accepts `--installation` with the same installation's root (containing `VC/` and `MSBuild/`).
-The default v143 path is the VS2022 BuildTools installation; the default v145 path is `C:/Tools/VDXR-MSVC145`.
+The runtime helper discovers VS 2026 through `vswhere`. For a custom installation, pass `--installation` to the linked fixture builder.
 
 The private backend template must contain the matched local test
 LibOVRRT64_1.dll and the installed nvngx_dlssnr.dll. The runner copies these

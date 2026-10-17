@@ -19,7 +19,16 @@ assert metadata['exit_code'] == 0, 'Successful runtime build required'
 version = metadata['compiler_version']
 assert version in {'14.44.35207', '14.51.36231'}, 'Unexpected compiler cohort'
 new = version.startswith('14.51.')
-installation = args.installation or Path('C:/Tools/VDXR-MSVC145' if new else 'C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools')
+installation = args.installation
+if installation is None:
+    vswhere = Path(os.environ['ProgramFiles(x86)']) / 'Microsoft Visual Studio/Installer/vswhere.exe'
+    selected = subprocess.run([str(vswhere), '-latest', '-products', '*', '-version',
+                               '[18.0,19.0)' if new else '[17.0,18.0)', '-requires',
+                               'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath'],
+                              capture_output=True, text=True, check=True)
+    if not selected.stdout.strip():
+        parser.error('Matching Visual Studio C++ installation was not found; supply --installation.')
+    installation = Path(selected.stdout.splitlines()[0])
 vcvars = installation / 'VC/Auxiliary/Build/vcvars64.bat'
 if not vcvars.is_file():
     parser.error('Visual Studio compiler environment was not found; supply --installation with its installation root.')

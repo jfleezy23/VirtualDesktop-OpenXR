@@ -4,6 +4,7 @@ param(
     [string]$SourceDirectory = '',
     [string]$OutputDirectory = '',
     [string]$MsBuildPath = '',
+    [ValidateSet('v143', 'v145')][string]$Toolset = 'v145',
     [string]$VCToolsVersion = '',
     [switch]$Analyze
 )
@@ -26,24 +27,31 @@ if (Test-Path -LiteralPath (Join-Path $objects 'commit.h')) {
 New-Item -ItemType Directory -Force -Path $objects | Out-Null
 
 if (!$MsBuildPath) {
-    $command = Get-Command MSBuild.exe -ErrorAction SilentlyContinue
-    if ($command) { $MsBuildPath = $command.Source }
-    else {
-        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-        if (!(Test-Path -LiteralPath $vswhere)) { throw 'MSBuild was not found; install the v143 C++ build tools.' }
-        $found = @(& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'MSBuild\**\Bin\MSBuild.exe')
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+    if (Test-Path -LiteralPath $vswhere) {
+        $versionRange = if ($Toolset -eq 'v145') { '[18.0,19.0)' } else { '[17.0,18.0)' }
+        $found = @(& $vswhere -latest -products '*' -version $versionRange -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'MSBuild\**\Bin\MSBuild.exe')
         if ($LASTEXITCODE -ne 0 -or !$found) { throw 'vswhere could not locate MSBuild with C++ tools.' }
         $MsBuildPath = $found[0]
+    } else {
+        $command = Get-Command MSBuild.exe -ErrorAction SilentlyContinue
+        if (!$command) { throw "MSBuild was not found; install the $Toolset C++ build tools." }
+        $MsBuildPath = $command.Source
     }
 }
 if (!(Test-Path -LiteralPath $MsBuildPath)) { throw 'The selected MSBuild executable does not exist.' }
+if (!$VCToolsVersion -and $Toolset -eq 'v145') { $VCToolsVersion = '14.51.36231' }
 
 $commit = & git -C $source rev-parse --verify HEAD
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[a-f0-9]{40}$') { throw 'Cannot determine the source revision.' }
 [IO.File]::WriteAllText((Join-Path $objects 'commit.h'), "const char* RuntimeCommitHash = `"$commit`";`n", [Text.Encoding]::ASCII)
 $analyzerOption = if ($Analyze) { '/analyze ' } else { '' }
+$compilerImport = if ($Toolset -eq 'v145') {
+    '<Import Project="' + [Security.SecurityElement]::Escape((Join-Path $PSScriptRoot 'Experimental-MSVC145.props')) + '" />'
+} else { '' }
 $properties = @"
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  $compilerImport
   <ItemDefinitionGroup>
     <ClCompile>
       <FloatingPointModel>Precise</FloatingPointModel>
@@ -62,6 +70,7 @@ $objectsProperty = $objects.Replace('\', '/') + '/'
 $arguments = @(
     $project, '/t:Rebuild', '/m', '/nologo', '/v:minimal',
     "/p:Configuration=$Configuration", "/p:Platform=$Platform", "/p:SolutionDir=$sourceProperty",
+    "/p:PlatformToolset=$Toolset", '/p:WindowsTargetPlatformVersion=10.0.26100.0',
     "/p:OutDir=$outputProperty", "/p:IntDir=$objectsProperty", "/p:ForceImportBeforeCppTargets=$propertiesPath",
     '/p:PreBuildEventUseInBuild=false', '/p:PostBuildEventUseInBuild=false',
     '/fl', "/flp:LogFile=$output/build.log;Verbosity=normal;NoSummary"

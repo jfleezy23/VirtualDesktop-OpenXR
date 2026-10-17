@@ -474,6 +474,7 @@ class BuildHelperPathTests(unittest.TestCase):
             '#include <stdio.h>\n#include "commit.h"\n'
             'int main(int argc, char** argv) {\n'
             '    printf("COMMIT:%s\\n", RuntimeCommitHash);\n'
+            '    printf("COMPILER:%d\\n", _MSC_VER);\n'
             '    for (int i = 0; i < argc; ++i) printf("ARGV:%s\\n", argv[i]);\n'
             '    return 0;\n}\n', encoding="utf-8",
         )
@@ -564,6 +565,30 @@ class BuildHelperPathTests(unittest.TestCase):
         self.assertIn(f"COMMIT:{self.commit}", run.stdout)
         self.assertTrue((output / "obj/argument-probe.obj").is_file())
         self.assertTrue((output / "build.log").is_file())
+
+    def test_default_build_uses_msvc_1451(self):
+        output = self.directory / "default compiler output"
+        result = self.invoke_helper(self.msbuild, output)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        run = subprocess.run([str(output / "argument-probe.exe")], capture_output=True, text=True, check=True)
+        self.assertIn("COMPILER:1951", run.stdout)
+
+    def test_fixture_rejects_mismatched_compiler_before_compiling(self):
+        vcvars = Path(self.msbuild).parents[3] / "VC/Auxiliary/Build/vcvars64.bat"
+        objects = self.directory / "empty fixture objects"
+        objects.mkdir()
+        batch = self.directory / "mismatched compiler.cmd"
+        helper = SCRIPT.parent.parent / "tests/vr_input_build.ps1"
+        batch.write_text(
+            f'@echo off\ncall "{vcvars}" -vcvars_ver=14.51.36231 >nul\n'
+            'if errorlevel 1 exit /b %errorlevel%\n'
+            f'"{self.powershell}" -NoProfile -ExecutionPolicy Bypass -File "{helper}" '
+            f'-Toolset v143 -RuntimeObjectDirectory "{objects}"\n'
+            'exit /b %errorlevel%\n', encoding="utf-8",
+        )
+        run = subprocess.run([os.environ["COMSPEC"], "/d", "/c", str(batch)], capture_output=True, text=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("requires MSVC 14.44.35207", run.stdout + run.stderr)
 
 
 if __name__ == "__main__":

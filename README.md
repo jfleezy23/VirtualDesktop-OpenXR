@@ -43,6 +43,7 @@ behavior; it does not establish a measured headset latency, FPS, or image-qualit
 ## Building and testing
 
 Start with [CONTRIBUTING.md](CONTRIBUTING.md) for build prerequisites, source checks, and the supported configurations.
+The experimental branch defaults to Visual Studio 2026 / MSVC **14.51.36231**, including CI and NR/FG builds.
 The [runtime regression guide](tests/README.md) and [input regression guide](tests/vr_input_README.md) describe the fixtures
 and their requirements.
 

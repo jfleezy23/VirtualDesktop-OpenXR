@@ -15,7 +15,7 @@ This is a review gate, not a requirement for a particular review service.
 Use Python 3.13 and clang-format **22.1.1**. The upstream `.clang-format` remains authoritative for first-party C/C++.
 Format complete new first-party C/C++ files and changed hunks in existing files; review any surrounding construct adjusted
 by the formatter. Do not reformat inherited vendor code or whole inherited files to satisfy a changed-line check.
-The tooling regressions also require Windows PowerShell 5.1 and the v143 C++ tools described below, to exercise real native
+The tooling regressions also require Windows PowerShell 5.1 and Visual Studio 2026 with v145 and v143 C++ tools, to exercise real native
 argument handling and a small MSBuild project in paths containing spaces.
 
 ```powershell
@@ -46,8 +46,9 @@ Review `git status`, staged paths, and `git diff --cached --check` before commit
 
 ## Core builds and diagnostics
 
-Install Visual Studio 2022 or its Build Tools with the v143 C++ tools and Windows SDK, plus Git, Python, and NuGet.
-The build helper finds MSBuild through PATH or `vswhere`; it accepts `-MsBuildPath` for an explicit tool.
+`experimental-nr` defaults to Visual Studio 2026, MSVC **14.51.36231** (v145), and Windows SDK **10.0.26100.0**.
+Install those C++ tools plus Git, Python and NuGet. The helper selects VS 2026 through `vswhere`; `-MsBuildPath`
+selects an explicit installation. `-Toolset v143` remains available for deliberate legacy comparisons.
 
 ```powershell
 git submodule update --init --recursive
@@ -61,6 +62,11 @@ folders under `bin/community/`, and `/fp:precise`. It disables inherited pre/pos
 generates `commit.h` in the intermediate folder, and exits nonzero on MSBuild failure. Analyzer builds use `/analyze`
 without whole-program optimization. Do not use a bare solution build as a substitute: the upstream solution also requires
 installer tooling. A core project build does not validate an installer.
+
+The experimental x64 project and NR/FG build helper also default to v145. CI uses the VS 2026 runner and the pinned
+compiler for both candidate and diagnostic baseline; comparisons never mix compiler generations. The runtime remains
+C++17 with `/fp:precise`, and the synthesis module remains C++20. This compiler policy does not enable fast math,
+PGO, new CPU instruction requirements, or change the installed NR model and appearance settings.
 
 For `stable`, check `Release` and `ReleaseBundle` on Win32 and x64. For `experimental-nr`, check both configurations on x64;
 Win32 NR is unsupported until its inherited NGX architecture gap is fixed and verified. Compile and analyze fresh baseline
@@ -79,6 +85,8 @@ pinned to version 1.4.341.0 and verified by SHA256, beside the test executables 
 install a driver or replace a system DLL. For local CPU tests, provide an appropriate Vulkan loader too.
 The watcher fixture uses a temporary key under HKCU and a process-private registry mapping, restores that mapping, and
 removes its owned key after watcher teardown; it does not require an installed Streamer or change production settings.
+The linked CPU fixture helper rejects an inherited developer prompt whose compiler differs from its selected toolset;
+use the matching x64 Native Tools prompt rather than mixing old and new whole-program objects.
 
 ## Hardware tests
 

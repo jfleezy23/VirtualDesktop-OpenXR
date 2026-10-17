@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('v143', 'v145')][string]$Toolset = 'v143',
+    [ValidateSet('v143', 'v145')][string]$Toolset = 'v145',
     [ValidateSet('Release', 'ReleaseBundle')][string]$Configuration = 'ReleaseBundle',
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
     [string]$MsBuildPath = '',
@@ -40,7 +40,12 @@ if (!$FgOnly) {
     # Runtime configuration remains distinct from the C++20 synthesis module.
     $msbuild = if ($MsBuildPath) { $MsBuildPath } elseif ($Toolset -eq 'v143') {
         Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/2022/BuildTools/MSBuild/Current/Bin/MSBuild.exe'
-    } else { 'C:/Tools/VDXR-MSVC145/MSBuild/Current/Bin/MSBuild.exe' }
+    } else {
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+        $found = @(& $vswhere -latest -products '*' -version '[18.0,19.0)' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'MSBuild\**\Bin\MSBuild.exe')
+        if ($LASTEXITCODE -ne 0 -or !$found) { throw 'Visual Studio 2026 C++ tools were not found; supply -MsBuildPath.' }
+        $found[0]
+    }
     if (!(Test-Path -LiteralPath $msbuild)) {
         throw 'MSBuild was not found. Supply -MsBuildPath for your Visual Studio installation.'
     }
@@ -72,7 +77,7 @@ if (!$FgOnly) {
             & $msbuild @arguments
         } else {
             & (Join-Path $PSScriptRoot 'Build-CommunityRuntime.ps1') -Configuration $Configuration -Platform x64 `
-                -SourceDirectory $source -OutputDirectory (Join-Path $output 'runtime') -MsBuildPath $msbuild -VCToolsVersion $compilerVersion
+                -SourceDirectory $source -OutputDirectory (Join-Path $output 'runtime') -MsBuildPath $msbuild -Toolset $Toolset -VCToolsVersion $compilerVersion
         }
         $compilerExit = $LASTEXITCODE
     } finally {

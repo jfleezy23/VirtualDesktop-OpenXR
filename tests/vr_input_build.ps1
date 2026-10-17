@@ -1,6 +1,7 @@
 param(
     [string]$SourceDirectory = '',
     [string]$RuntimeObjectDirectory = '',
+    [ValidateSet('v143', 'v145')][string]$Toolset = 'v145',
     [switch]$RecompileInputSources,
     [string]$TestSource = 'vr_input_regression.cpp',
     [switch]$BaselineWatcher,
@@ -8,6 +9,13 @@ param(
     [switch]$UseExistingInputObjects
 )
 $ErrorActionPreference = 'Stop'
+$requiredCompiler = if ($Toolset -eq 'v145') { '14.51.36231' } else { '14.44.35207' }
+$compiler = Get-Command cl.exe -ErrorAction SilentlyContinue
+$compilerPath = if ($compiler) { $compiler.Source } else { '' }
+$versionPattern = '[\\/]MSVC[\\/]' + [regex]::Escape($requiredCompiler) + '[\\/]bin[\\/]Host[^\\/]+[\\/]x64[\\/]cl\.exe$'
+if ($compilerPath -notmatch $versionPattern) {
+    throw "The $Toolset fixture requires MSVC $requiredCompiler; use its matching x64 Native Tools prompt."
+}
 $repo = Split-Path -Parent $PSScriptRoot
 if (!$SourceDirectory) { $SourceDirectory = Join-Path $repo 'virtualdesktop-openxr' }
 if (!$RuntimeObjectDirectory) { $RuntimeObjectDirectory = Join-Path $repo 'bin/code-analysis/obj' }
@@ -37,6 +45,10 @@ $includeDirectories = @(
 $compileOptions = @('/nologo', '/std:c++17', '/EHsc', '/W3', '/MT', '/O2', '/Gy', '/c',
     '/D', 'RUNTIME_NAMESPACE=virtualdesktop_openxr', '/D', 'NDEBUG', '/D', 'UNICODE',
     '/D', '_UNICODE', '/D', '_CRT_SECURE_NO_WARNINGS', '/D', 'USING_GAMEINPUT')
+if ($Toolset -eq 'v145') {
+    $compileOptions += '/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS'
+    $compileOptions += '/D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR'
+}
 foreach ($directory in $includeDirectories) { $compileOptions += "/I$directory" }
 if ($BaselineWatcher) { $compileOptions += '/DVDXR_WATCHER_BASELINE' }
 if ($PerFeatureProvider) { $compileOptions += '/DVDXR_PER_FEATURE_PROVIDER' }
