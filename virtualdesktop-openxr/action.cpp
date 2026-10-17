@@ -632,7 +632,11 @@ namespace virtualdesktop_openxr {
         }
 
         std::optional<bool> combinedState;
-        const std::string& subActionPath = getXrPath(getInfo->subactionPath);
+        // The validated path map and its string storage stay under this query's
+        // action/space lock. Keep the global getter's owning return unchanged.
+        const std::string emptyPath;
+        const std::string& subActionPath =
+            getInfo->subactionPath == XR_NULL_PATH ? emptyPath : m_strings.at(getInfo->subactionPath);
         const int subActionSide =
             getInfo->subactionPath == XR_NULL_PATH ? xr::Side::Count : std::max(0, getActionSide(subActionPath));
         const bool isActionSetActive =
@@ -749,7 +753,9 @@ namespace virtualdesktop_openxr {
         }
 
         std::optional<float> combinedState;
-        const std::string& subActionPath = getXrPath(getInfo->subactionPath);
+        const std::string emptyPath;
+        const std::string& subActionPath =
+            getInfo->subactionPath == XR_NULL_PATH ? emptyPath : m_strings.at(getInfo->subactionPath);
         const int subActionSide =
             getInfo->subactionPath == XR_NULL_PATH ? xr::Side::Count : std::max(0, getActionSide(subActionPath));
         const bool isActionSetActive =
@@ -871,7 +877,9 @@ namespace virtualdesktop_openxr {
         }
 
         std::optional<XrVector2f> combinedState;
-        const std::string& subActionPath = getXrPath(getInfo->subactionPath);
+        const std::string emptyPath;
+        const std::string& subActionPath =
+            getInfo->subactionPath == XR_NULL_PATH ? emptyPath : m_strings.at(getInfo->subactionPath);
         const int subActionSide =
             getInfo->subactionPath == XR_NULL_PATH ? xr::Side::Count : std::max(0, getActionSide(subActionPath));
         const bool isActionSetActive =
@@ -993,7 +1001,9 @@ namespace virtualdesktop_openxr {
             }
         }
 
-        const std::string& subActionPath = getXrPath(getInfo->subactionPath);
+        const std::string emptyPath;
+        const std::string& subActionPath =
+            getInfo->subactionPath == XR_NULL_PATH ? emptyPath : m_strings.at(getInfo->subactionPath);
         const bool isActionSetActive =
             (std::find(m_activeActionSets.begin(), m_activeActionSets.end(), xrAction.actionSet) !=
              m_activeActionSets.end());
@@ -1948,9 +1958,9 @@ namespace virtualdesktop_openxr {
     }
 
     int OpenXrRuntime::getActionSide(const std::string& fullPath, bool allowExtraPaths) const {
-        if (startsWith(fullPath, "/user/hand/left")) {
+        if (fullPath.compare(0, sizeof("/user/hand/left") - 1, "/user/hand/left") == 0) {
             return xr::Side::Left;
-        } else if (startsWith(fullPath, "/user/hand/right")) {
+        } else if (fullPath.compare(0, sizeof("/user/hand/right") - 1, "/user/hand/right") == 0) {
             return xr::Side::Right;
         } else if (allowExtraPaths &&
                    (startsWith(fullPath, "/user/head") || startsWith(fullPath, "/user/gamepad") ||

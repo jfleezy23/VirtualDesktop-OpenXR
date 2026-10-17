@@ -1,6 +1,7 @@
 // CPU regressions against real action, space and event methods. No registry writes or graphics device.
 #include "pch.h"
 #include "runtime.h"
+#include "heap_allocation_probe.h"
 #include <array>
 #include <cstring>
 #include <future>
@@ -10,57 +11,16 @@ OVR_PUBLIC_FUNCTION(ovrResult)
 ovr_InitializeWithPathOverride(const ovrInitParams*, const wchar_t*);
 
 namespace {
+    using namespace allocation_test;
     bool invalidControllerAngularVelocity = false;
     ovrTrackedDeviceType velocityOverrideDevice = ovrTrackedDevice_HMD;
     std::optional<float> velocityAngularOverride;
     std::optional<float> velocityLinearOverride;
     unsigned inputStateCalls = 0;
-    thread_local bool countHeapAllocations = false;
-    thread_local size_t heapAllocations = 0;
-    using AllocateHeap = void*(NTAPI*)(HANDLE, ULONG, SIZE_T);
-    AllocateHeap originalAllocateHeap = nullptr;
-    void* NTAPI countAllocation(HANDLE heap, ULONG flags, SIZE_T bytes) {
-        if (countHeapAllocations)
-            ++heapAllocations;
-        return originalAllocateHeap(heap, flags, bytes);
-    }
     void require(bool condition, const char* message) {
         if (!condition)
             throw std::runtime_error(message);
     }
-
-    struct AllocationObserver {
-        bool hookAttached = false;
-        AllocationObserver() {
-            originalAllocateHeap =
-                reinterpret_cast<AllocateHeap>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlAllocateHeap"));
-            require(originalAllocateHeap != nullptr, "Allocation observer export missing");
-            require(DetourTransactionBegin() == NO_ERROR, "Allocation detour begin failed");
-            const auto updated = DetourUpdateThread(GetCurrentThread());
-            const auto attached = DetourAttach(reinterpret_cast<PVOID*>(&originalAllocateHeap), countAllocation);
-            if (updated || attached) {
-                DetourTransactionAbort();
-                throw std::runtime_error("Allocation detour attach failed");
-            }
-            require(DetourTransactionCommit() == NO_ERROR, "Allocation detour commit failed");
-            hookAttached = true;
-        }
-        void detach() {
-            countHeapAllocations = false;
-            if (!hookAttached)
-                return;
-            const auto begun = DetourTransactionBegin();
-            const auto updated = DetourUpdateThread(GetCurrentThread());
-            const auto detached = DetourDetach(reinterpret_cast<PVOID*>(&originalAllocateHeap), countAllocation);
-            const auto committed = DetourTransactionCommit();
-            if (begun || updated || detached || committed)
-                std::terminate();
-            hookAttached = false;
-        }
-        ~AllocationObserver() {
-            detach();
-        }
-    };
 
     // Replace only the external pose/origin provider. xrLocateSpace and all runtime math remain real.
     ovrResult OVR_CDECL
@@ -499,9 +459,11 @@ namespace virtualdesktop_openxr {
             observer.releaseRetired();
         }
 
-        static void queryCache() {
-            const XrActionType types[] = {
-                XR_ACTION_TYPE_FLOAT_INPUT, XR_ACTION_TYPE_BOOLEAN_INPUT, XR_ACTION_TYPE_VECTOR2F_INPUT};
+        static void queryCache(bool measureAllocations = false) {
+            const XrActionType types[] = {XR_ACTION_TYPE_FLOAT_INPUT,
+                                          XR_ACTION_TYPE_BOOLEAN_INPUT,
+                                          XR_ACTION_TYPE_VECTOR2F_INPUT,
+                                          XR_ACTION_TYPE_POSE_INPUT};
             for (const auto type : types) {
                 OpenXrRuntime runtime;
                 seed(runtime);
@@ -532,9 +494,11 @@ namespace virtualdesktop_openxr {
                         source.buttonMap = &set.cachedInputState.Buttons;
                         source.buttonType = side ? ovrButton_A : ovrButton_X;
                         source.realPath = hand + (side ? "/input/a/click" : "/input/x/click");
-                    } else {
+                    } else if (type == XR_ACTION_TYPE_VECTOR2F_INPUT) {
                         source.vector2fValue = set.cachedInputState.Thumbstick;
                         source.realPath = hand + "/input/thumbstick";
+                    } else {
+                        source.realPath = hand + "/input/grip/pose";
                     }
                     action.actionSources[source.realPath] = source;
                 }
@@ -568,7 +532,7 @@ namespace virtualdesktop_openxr {
                                 state.lastChangeTime,
                                 float(state.currentState),
                                 0.f};
-                    } else {
+                    } else if (type == XR_ACTION_TYPE_VECTOR2F_INPUT) {
                         XrActionStateVector2f state{XR_TYPE_ACTION_STATE_VECTOR2F};
                         const auto result = runtime.xrGetActionStateVector2f(session(), &info, &state);
                         return {result,
@@ -577,15 +541,23 @@ namespace virtualdesktop_openxr {
                                 state.lastChangeTime,
                                 state.currentState.x,
                                 state.currentState.y};
+                    } else {
+                        XrActionStatePose state{XR_TYPE_ACTION_STATE_POSE};
+                        const auto result = runtime.xrGetActionStatePose(session(), &info, &state);
+                        return {result, state.isActive, XR_FALSE, 0, float(state.isActive), 0.f};
                     }
                 };
-                const char* label = type == XR_ACTION_TYPE_FLOAT_INPUT     ? "float"
-                                    : type == XR_ACTION_TYPE_BOOLEAN_INPUT ? "boolean"
-                                                                           : "vector2f";
+                const char* label = type == XR_ACTION_TYPE_FLOAT_INPUT      ? "float"
+                                    : type == XR_ACTION_TYPE_BOOLEAN_INPUT  ? "boolean"
+                                    : type == XR_ACTION_TYPE_VECTOR2F_INPUT ? "vector2f"
+                                                                            : "pose";
                 const XrPath initialOrder[] = {left, right, XR_NULL_PATH};
                 XrTime priorTimes[3]{};
-                const float leftValue = type == XR_ACTION_TYPE_BOOLEAN_INPUT ? 0.f : 0.2f;
-                const float combinedValue = type == XR_ACTION_TYPE_BOOLEAN_INPUT ? 1.f : 0.9f;
+                const float leftValue = type == XR_ACTION_TYPE_BOOLEAN_INPUT ? 0.f
+                                        : type == XR_ACTION_TYPE_POSE_INPUT  ? 1.f
+                                                                             : 0.2f;
+                const float combinedValue =
+                    type == XR_ACTION_TYPE_BOOLEAN_INPUT || type == XR_ACTION_TYPE_POSE_INPUT ? 1.f : 0.9f;
                 bool initialValues = true;
                 for (unsigned i = 0; i < 3; ++i) {
                     const auto state = query(initialOrder[i]);
@@ -614,6 +586,41 @@ namespace virtualdesktop_openxr {
                         if (!unchanged)
                             ++failures;
                     }
+                }
+                if (measureAllocations) {
+                    const auto unsupported = path(runtime, "/user/head");
+                    require(query(unsupported).result == XR_ERROR_PATH_UNSUPPORTED &&
+                                query(XrPath(UINT64_MAX)).result == XR_ERROR_PATH_INVALID,
+                            "Borrowed query path retains unsupported and invalid path errors");
+                    AllocationObserver observer;
+                    heapAllocations = 0;
+                    countHeapAllocations = true;
+                    auto* control = HeapAlloc(GetProcessHeap(), 0, 256);
+                    countHeapAllocations = false;
+                    require(control != nullptr, "Query allocation positive control failed");
+                    HeapFree(GetProcessHeap(), 0, control);
+                    require(heapAllocations > 0, "Query heap observer must detect real allocation");
+                    heapAllocations = 0;
+                    countHeapAllocations = true;
+                    const auto owningPath = runtime.getXrPath(right);
+                    countHeapAllocations = false;
+                    require(owningPath == "/user/hand/right" && heapAllocations > 0,
+                            "Global owning path getter retains lifetime and allocation semantics");
+                    heapAllocations = 0;
+                    bool unchanged = true;
+                    countHeapAllocations = true;
+                    for (unsigned round = 0; round < 3000; ++round) {
+                        for (unsigned i = 0; i < 3; ++i) {
+                            const auto state = query(nextOrder[i]);
+                            unchanged &= state.result == XR_SUCCESS && state.active == XR_TRUE &&
+                                         state.x == (i == 0 ? leftValue : combinedValue) && state.y == 0.f &&
+                                         state.changed == XR_FALSE && state.time == priorTimes[priorIndex[i]];
+                        }
+                    }
+                    countHeapAllocations = false;
+                    std::cout << "MEASURE: " << label << " warmed queries=9000 allocations=" << heapAllocations << '\n';
+                    expect(unchanged, "Warmed queries retain values and per-hand cache state");
+                    expect(heapAllocations == 0, "Warmed action queries allocate no path strings");
                 }
                 require(runtime.xrDestroySession(session()) == XR_SUCCESS, "Query-cache session cleanup failed");
             }
@@ -1604,6 +1611,8 @@ namespace virtualdesktop_openxr {
                 actionPose();
             else if (mode == L"query-cache")
                 queryCache();
+            else if (mode == L"query-allocations")
+                queryCache(true);
             else if (mode == L"action-set-lifetime") {
                 require(argc == 3, "action-set-lifetime requires the explicit OVRNull directory");
                 actionSetLifetime(argv[2]);

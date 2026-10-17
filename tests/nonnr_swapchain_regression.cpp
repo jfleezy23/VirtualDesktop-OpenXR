@@ -576,7 +576,7 @@ namespace virtualdesktop_openxr {
                 chain.resolvedSlices.resize(2);
                 chain.resolvedSlices[1].ovrSwapchain = token<ovrTextureSwapChain>(0x2000);
                 chain.resolvedSlices[1].images.push_back(destination);
-                std::set<std::pair<OpenXrRuntime::Swapchain*, uint32_t>> resolved;
+                OpenXrRuntime::SwapchainImageList resolved;
                 runtime.resolveSwapchainImage(chain, 1, resolved);
             }
             require(ovrCommitCalls == 1 && !invalidOvrCalls,

@@ -73,7 +73,7 @@ the optional synthesis module uses C++20. Use fresh ignored output directories.
 ~~~powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-NrFrameGeneration.ps1 -Toolset v145 -OutputDirectory ./bin/fg-ordinary-example
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-NrFrameGeneration.ps1 -Toolset v145 -PrivateRuntime -OutputDirectory ./bin/fg-private-example
-python tests/build-fg-runtime-fixtures.py bin/fg-private-example/runtime nr_fg_worker_regression nr_fg_runtime_regression nr_fg_delay_regression nr_intermediate_commit_regression
+python tests/build-fg-runtime-fixtures.py bin/fg-private-example/runtime nr_fg_worker_regression nr_fg_runtime_regression nr_fg_delay_regression nr_intermediate_commit_regression nonnr_input_regression nonnr_copy_preprocess_regression
 python tests/run-fg-regressions.py --suite all --module-directory bin/fg-private-example/module/Release --runtime-cohort bin/fg-private-example/runtime --backend-template C:/path/to/private-backend --output-directory bin/fg-check-example
 ~~~
 

@@ -2,11 +2,13 @@
 // Backend indexing/commit/submission are intercepted; no native compositor or settings writes.
 #include "pch.h"
 #include "runtime.h"
+#include "heap_allocation_probe.h"
 #include <array>
 
 OVR_PUBLIC_FUNCTION(ovrResult) ovr_InitializeWithPathOverride(const ovrInitParams*, const wchar_t*);
 
 namespace {
+    using namespace allocation_test;
     void require(bool value, const char* message) {
         if (!value)
             throw std::runtime_error(message);
@@ -130,7 +132,7 @@ namespace virtualdesktop_openxr {
             const bool gamma = mode == L"gamma" || mode == L"gamma-stress";
             const bool direct = mode == L"direct";
             const bool rotating = mode == L"rotating" || mode == L"fresh-release";
-            const bool pending = mode == L"pending";
+            const bool pending = mode == L"pending" || mode == L"allocations";
             const bool premultiply = !(mode == L"clear" || direct || mode == L"blend");
             chainLength = rotating ? 3 : 1;
             OpenXrRuntime runtime;
@@ -302,6 +304,17 @@ namespace virtualdesktop_openxr {
                 return data;
             };
             unsigned frames = 0;
+            std::unique_ptr<AllocationObserver> allocationObserver;
+            if (mode == L"allocations") {
+                allocationObserver = std::make_unique<AllocationObserver>();
+                heapAllocations = 0;
+                countHeapAllocations = true;
+                auto* control = HeapAlloc(GetProcessHeap(), 0, 256);
+                countHeapAllocations = false;
+                require(control != nullptr, "Resolve allocation control failed");
+                HeapFree(GetProcessHeap(), 0, control);
+                require(heapAllocations > 0, "Resolve heap observer detects real allocations");
+            }
             std::array<uint8_t, 4> raw{153, 102, 51, 128};
             for (unsigned frame = 0; frame < 3; ++frame) {
                 if (mode == L"regions-stress" || mode == L"gamma-stress") {
@@ -343,9 +356,24 @@ namespace virtualdesktop_openxr {
                 if (pending) {
                     runtime.m_precompositor.resolvedSwapchainImages.clear();
                     runtime.m_precompositor.pendingSwapchainCommits.clear();
+                    heapAllocations = 0;
+                    countHeapAllocations = mode == L"allocations" && frame > 0;
                     runtime.resolveSwapchainImage(chain, 1, runtime.m_precompositor.resolvedSwapchainImages, true);
+                    countHeapAllocations = false;
+                    const auto resolveAllocations = heapAllocations;
                     runtime.preprocessSwapchainImage(chain, 1, 1, quads[1].layerFlags, quads[1].subImage.imageRect);
+                    countHeapAllocations = mode == L"allocations" && frame > 0;
                     runtime.resolveSwapchainImage(chain, 1, runtime.m_precompositor.resolvedSwapchainImages);
+                    // Include a repeated resolve: it must deduplicate without
+                    // another node, copy, or commit.
+                    runtime.resolveSwapchainImage(chain, 1, runtime.m_precompositor.resolvedSwapchainImages);
+                    countHeapAllocations = false;
+                    if (mode == L"allocations" && frame > 0) {
+                        std::cout << "MEASURE: warmed resolve frame=" << frame
+                                  << " insert_allocations=" << resolveAllocations
+                                  << " total_allocations=" << heapAllocations << '\n';
+                        require(heapAllocations == 0, "Warmed resolve bookkeeping performs no heap allocations");
+                    }
                     require(runtime.m_precompositor.pendingSwapchainCommits.empty(), "Pending commit not consumed");
                     runtime.preprocessSwapchainImage(chain, 1, 1, quads[1].layerFlags, quads[1].subImage.imageRect);
                     chain.dirty = false;
@@ -433,7 +461,7 @@ int wmain(int argc, wchar_t** argv) {
         require(mode == L"clear" || mode == L"premultiply" || mode == L"gamma" || mode == L"direct" ||
                     mode == L"blend" || mode == L"duplicate" || mode == L"disjoint" || mode == L"overlap" ||
                     mode == L"primary-noop" || mode == L"viewport-changing" || mode == L"flags-changing" ||
-                    mode == L"rotating" || mode == L"fresh-release" || mode == L"pending" ||
+                    mode == L"rotating" || mode == L"fresh-release" || mode == L"pending" || mode == L"allocations" ||
                     mode == L"regions-stress" || mode == L"gamma-stress" || mode == L"correction-retry" ||
                     mode == L"mixed-disjoint" || mode == L"mixed-overlap-coverage",
                 "Unknown regression mode");

@@ -417,6 +417,8 @@ namespace virtualdesktop_openxr {
             float foveationSize{0.66f};
         };
 
+        using SwapchainImageList = std::vector<std::pair<Swapchain*, uint32_t>>;
+
         struct PrecompositorState {
             std::array<ComPtr<ID3D11Texture2D>, xr::StereoView::Count> finalColour;
             // NR plus the two final sharpen/upscale outputs. Commit only final
@@ -425,8 +427,11 @@ namespace virtualdesktop_openxr {
             DlssnrSettings dlssnrSettings;
             float sharpenFactor{0.f};
             // State for the current frame.
-            std::set<std::pair<Swapchain*, uint32_t>> resolvedSwapchainImages;
-            std::set<std::pair<Swapchain*, uint32_t>> pendingSwapchainCommits;
+            // Ordered unique lists retain capacity across frames. The drain
+            // snapshot stays independent while resolve removes pending entries.
+            SwapchainImageList resolvedSwapchainImages;
+            SwapchainImageList pendingSwapchainCommits;
+            SwapchainImageList pendingCommitSnapshot;
             XrTime displayTime{0};
             bool isProj0SRGB{false};
             bool isFirstProjectionLayer{true};
@@ -649,7 +654,7 @@ namespace virtualdesktop_openxr {
         XrResult getSwapchainImagesD3D11(Swapchain& xrSwapchain, XrSwapchainImageD3D11KHR* d3d11Images, uint32_t count);
         void resolveSwapchainImage(Swapchain& xrSwapchain,
                                    uint32_t slice,
-                                   std::set<std::pair<Swapchain*, uint32_t>>& resolved,
+                                   SwapchainImageList& resolved,
                                    bool skipCommit = false);
         void ensureSwapchainSliceResources(Swapchain& xrSwapchain, uint32_t slice) const;
         void ensureSwapchainPrecompositorResources(Swapchain& xrSwapchain, const ovrSizei& resolution);

@@ -511,6 +511,7 @@ namespace virtualdesktop_openxr {
             m_precompositor.isFirstProjectionLayer = true;
             m_precompositor.resolvedSwapchainImages.clear();
             m_precompositor.pendingSwapchainCommits.clear();
+            m_precompositor.pendingCommitSnapshot.clear();
             m_precompositor.finalColour = {};
             m_precompositor.pendingColourCommits = {};
             m_precompositor.sharpenFactor = m_sharpenFactor.load(std::memory_order_relaxed);
@@ -608,7 +609,9 @@ namespace virtualdesktop_openxr {
                 // Raw ordinary inputs were held back for FG just like
                 // NR/upscale outputs. Commit only chains actually used by
                 // the complete fallback layers, retaining pending copies.
-                const auto pending = m_precompositor.pendingSwapchainCommits;
+                auto& pending = m_precompositor.pendingCommitSnapshot;
+                pending.assign(m_precompositor.pendingSwapchainCommits.begin(),
+                               m_precompositor.pendingSwapchainCommits.end());
                 for (const auto& [swapchain, slice] : pending) {
                     const auto chain = swapchain->resolvedSlices[slice].ovrSwapchain;
                     if (submitted(chain)) {

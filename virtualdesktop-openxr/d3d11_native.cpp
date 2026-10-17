@@ -572,15 +572,20 @@ namespace virtualdesktop_openxr {
     // Prepare a swapchain to be used by OVR.
     void OpenXrRuntime::resolveSwapchainImage(Swapchain& xrSwapchain,
                                               uint32_t slice,
-                                              std::set<std::pair<Swapchain*, uint32_t>>& resolved,
+                                              SwapchainImageList& resolved,
                                               bool skipCommit) {
         ensureAppSwapchainImages(xrSwapchain);
         ensureSwapchainSliceResources(xrSwapchain, slice);
 
         const auto tuple = std::make_pair(&xrSwapchain, slice);
+        const auto resolvedPosition = std::lower_bound(resolved.begin(), resolved.end(), tuple);
+        const bool alreadyResolved = resolvedPosition != resolved.end() && *resolvedPosition == tuple;
+        auto& pending = m_precompositor.pendingSwapchainCommits;
+        const auto pendingPosition = std::lower_bound(pending.begin(), pending.end(), tuple);
+        const bool needsCommit = pendingPosition != pending.end() && *pendingPosition == tuple;
         const bool needCopy = xrSwapchain.resolvedSlices[slice].ovrSwapchain != xrSwapchain.appSwapchain.ovrSwapchain;
-        if (resolved.count(tuple)) {
-            if (skipCommit || !m_precompositor.pendingSwapchainCommits.count(tuple)) {
+        if (alreadyResolved) {
+            if (skipCommit || !needsCommit) {
                 return;
             }
             if (needCopy) {
@@ -588,7 +593,7 @@ namespace virtualdesktop_openxr {
                 // Commit that same destination without advancing and recopying it.
                 CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, xrSwapchain.resolvedSlices[slice].ovrSwapchain));
                 xrSwapchain.resolvedSlices[slice].hasCommittedImage = true;
-                m_precompositor.pendingSwapchainCommits.erase(tuple);
+                pending.erase(pendingPosition);
                 return;
             }
             // Direct swapchains still need the existing released-index synchronization.
@@ -771,11 +776,15 @@ namespace virtualdesktop_openxr {
             xrSwapchain.resolvedSlices[slice].lastCommittedIndex = lastReleasedIndex;
         }
 
-        resolved.insert(tuple);
+        if (!alreadyResolved) {
+            resolved.insert(resolvedPosition, tuple);
+        }
         if (skipCommit) {
-            m_precompositor.pendingSwapchainCommits.insert(tuple);
-        } else {
-            m_precompositor.pendingSwapchainCommits.erase(tuple);
+            if (!needsCommit) {
+                pending.insert(pendingPosition, tuple);
+            }
+        } else if (needsCommit) {
+            pending.erase(pendingPosition);
         }
     }
 
