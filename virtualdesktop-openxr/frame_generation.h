@@ -41,6 +41,7 @@ namespace virtualdesktop_openxr {
             std::filesystem::path modulePath;
             uint32_t eyeWidth{}, height{}, multiplier{};
             DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
+            bool enableGpuTiming{false};
         };
 
         FrameGeneration();

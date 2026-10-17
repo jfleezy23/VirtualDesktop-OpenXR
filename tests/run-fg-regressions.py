@@ -53,6 +53,7 @@ def main():
     if args.suite in {"gpu", "all"}:
         module_case("c-abi", "fg_c_abi_regression", module)
         module_case("cpp-abi", "fg_abi_regression", module)
+        module_case("v2-timing-and-real", "fg_v2_regression", module)
         for multiplier in (2, 3):
             module_case(f"gpu-{multiplier}x", "fg_gpu_regression", module, multiplier)
         for scenario in ("gamma-alpha", "cropped-eyes"):
@@ -60,8 +61,11 @@ def main():
         for scenario in ("stationary", "motion"):
             module_case("stereo-" + scenario, "fg_gpu_regression", module, 3, scenario)
     if args.suite in {"integration", "lifecycle", "all"}:
-        for scenario in ("interop", "invalid-plan", "stale-ticket", "blocked-consumer", "invalid-context", "copy-identity", "copy-alias", "event-stale"):
+        for scenario in ("interop", "invalid-plan", "stale-ticket", "blocked-consumer", "invalid-context", "copy-identity", "copy-alias", "event-stale", "source-overwrite"):
             module_case("host-" + scenario, "nr_fg_integration_regression", module, scenario)
+        for mode in range(8):
+            module_case(f"v2-host-{mode}", "fg_v2_host_regression", module_directory / "fg_v2_host_test_module.dll", mode)
+        module_case("v2-host-diagnostics", "fg_v2_host_regression", module_directory / "fg_v2_host_test_module.dll", 5, "diagnostics")
         for scenario in ("packed", "offset", "separate", "gap", "overlap", "reverse", "different-y", "array-mip",
                          "invalid-rect", "invalid-pose", "wrong-device"):
             module_case("pack-" + scenario, "nr_fg_pack_regression", module, scenario)

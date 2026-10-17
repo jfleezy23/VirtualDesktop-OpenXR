@@ -170,6 +170,13 @@ int main(int argc, char** argv) {
         }
         const bool retained = hr == VDXRFG_E_POISONED && context && unsafeUnregister == 0;
         if (context) {
+            VDXRFG_StatisticsV1 statistics{};
+            statistics.struct_size = sizeof(statistics);
+            statistics.api_version = VDXRFG_API_VERSION;
+            success(api.GetStatistics(context, &statistics), "statistics tolerate incomplete initialization");
+            check(statistics.poisoned && !statistics.captures && !statistics.pairs && !statistics.live_tickets &&
+                      !statistics.last_gpu_us,
+                  "incomplete initialization exposes poison without reading unavailable GPU timing");
             check(api.Destroy(context) == VDXRFG_E_POISONED, "pending initialization cannot be destroyed");
         }
         releaseRegistration();

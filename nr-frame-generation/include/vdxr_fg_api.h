@@ -85,6 +85,36 @@ typedef struct VDXRFG_ApiV1 {
 
 typedef HRESULT(WINAPI* VDXRFG_GetApiV1Fn)(VDXRFG_ApiV1*) VDXRFG_NOEXCEPT;
 
+/* Additive creation negotiation. V1 remains unchanged, including GPU timing.
+ * All lifecycle payloads below still use their V1 size/version envelopes.
+ * A successful V2 Create accepts every requested flag. Timing fields are
+ * unavailable (zero), not measured zero, when GPU_TIMING is not requested. */
+#define VDXRFG_API_VERSION_2 2u
+#define VDXRFG_CREATE_GPU_TIMING 1u
+/* Keep B allocations, but leave them untouched and omit bit 4. The host
+ * presents its independently protected real source. Prime still owns work
+ * and fences with mask 0; 2X/3X pairs publish masks 1/3 respectively. */
+#define VDXRFG_CREATE_HOST_OWNS_REAL 2u
+
+typedef struct VDXRFG_CreateInfoV2 {
+    uint32_t struct_size, api_version;
+    VDXRFG_CreateInfoV1 base;
+    uint32_t flags, reserved;
+} VDXRFG_CreateInfoV2;
+
+typedef struct VDXRFG_ApiV2 {
+    uint32_t struct_size, api_version;
+    uint32_t supported_create_flags, reserved;
+    HRESULT(WINAPI* Create)(const VDXRFG_CreateInfoV2*, void**) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Submit)(void*, const VDXRFG_SubmitInfoV1*, VDXRFG_TicketV1*) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Retire)(void*, uint64_t) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Reset)(void*, uint32_t) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* GetStatistics)(void*, VDXRFG_StatisticsV1*) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Destroy)(void*) VDXRFG_NOEXCEPT;
+} VDXRFG_ApiV2;
+
+typedef HRESULT(WINAPI* VDXRFG_GetApiV2Fn)(VDXRFG_ApiV2*) VDXRFG_NOEXCEPT;
+
 #ifdef __cplusplus
 }
 #endif

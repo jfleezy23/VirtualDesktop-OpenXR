@@ -150,6 +150,19 @@ void run(const char* path, const std::string& scenario) {
     hw.await(fg, prime);
     check(fg.shutdown() == VDXRFG_E_BUSY && fg.reset(0) == VDXRFG_E_BUSY, "live interop ticket retains graph");
     auto output = hw.texture();
+    if (scenario == "source-overwrite") {
+        success(fg.copyOutput(prime, FrameGenerationRole::real, output.Get()), "protect real pixels before reuse");
+        hw.context->UpdateSubresource(input.colour[0].Get(), 0, nullptr, b.data(), width * 4, 0);
+        check(hw.read(input.colour[0].Get()) == b, "overwrite control changes the same source object");
+        check(hw.read(output.Get()) == a, "prepared real image preserves original pixels after source overwrite");
+        success(fg.copyOutput(prime, FrameGenerationRole::real, output.Get()), "late fallback reuses protected real");
+        check(hw.read(output.Get()) == a, "late fallback cannot recopy overwritten source pixels");
+        hw.retire(fg, prime);
+        success(fg.reset(0), "settled source reuse resets safely");
+        success(fg.shutdown(), "settled source overwrite host");
+        hw.gpu.noErrors();
+        return;
+    }
     if (scenario == "event-stale") {
         ComPtr<ID3D11Fence> gate;
         success(hw.device->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&gate)), "stale event gate");

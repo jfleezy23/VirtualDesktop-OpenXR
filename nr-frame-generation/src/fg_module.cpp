@@ -36,6 +36,7 @@ namespace {
         uint32_t multiplier{};
         bool poisoned{};
         bool initializationPoisoned{};
+        bool hostOwnsReal{};
     };
 
     template <typename T>
@@ -51,7 +52,7 @@ namespace {
                left.Get() == right.Get();
     }
 
-    HRESULT WINAPI create(const VDXRFG_CreateInfoV1* info, void** result) noexcept {
+    HRESULT createImpl(const VDXRFG_CreateInfoV1* info, void** result, uint32_t flags) noexcept {
         if (!result) {
             return E_POINTER;
         }
@@ -67,6 +68,7 @@ namespace {
             context->queue = static_cast<ID3D12CommandQueue*>(info->queue);
             context->input = static_cast<ID3D12Resource*>(info->input);
             context->multiplier = info->multiplier;
+            context->hostOwnsReal = (flags & VDXRFG_CREATE_HOST_OWNS_REAL) != 0;
             auto device = context->device.Get();
             if (!sameDevice(device, context->queue.Get()) || !sameDevice(device, context->input.Get()) ||
                 context->queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) {
@@ -190,7 +192,7 @@ namespace {
                                                  D3D12_RESOURCE_STATE_COMMON,
                                                  xrfg::D3D12OpticalFlowBackend::nvidia,
                                                  {},
-                                                 true);
+                                                 (flags & VDXRFG_CREATE_GPU_TIMING) != 0);
             if (FAILED(hr)) {
                 if (hr == HRESULT_FROM_WIN32(ERROR_IO_INCOMPLETE)) {
                     context->initializationPoisoned = context->poisoned = true;
@@ -212,6 +214,22 @@ namespace {
         } catch (...) {
             return E_OUTOFMEMORY;
         }
+    }
+
+    HRESULT WINAPI create(const VDXRFG_CreateInfoV1* info, void** result) noexcept {
+        return createImpl(info, result, VDXRFG_CREATE_GPU_TIMING);
+    }
+
+    HRESULT WINAPI createV2(const VDXRFG_CreateInfoV2* info, void** result) noexcept {
+        if (!result) {
+            return E_POINTER;
+        }
+        *result = nullptr;
+        if (!info || info->struct_size < sizeof(*info) || info->api_version != VDXRFG_API_VERSION_2 || info->reserved ||
+            (info->flags & ~(VDXRFG_CREATE_GPU_TIMING | VDXRFG_CREATE_HOST_OWNS_REAL))) {
+            return VDXRFG_E_REJECTED;
+        }
+        return createImpl(&info->base, result, info->flags);
     }
 
     bool viewsValid(const Context& context, const VDXRFG_SubmitInfoV1& info) {
@@ -437,6 +455,9 @@ namespace {
                 return poison();
             }
             for (uint32_t role = 0; role < 3; ++role) {
+                if (role == 2 && context->hostOwnsReal) {
+                    continue;
+                }
                 if (role != 2 && (lease->ticket.prime || (role == 1 && context->multiplier == 2))) {
                     continue;
                 }
@@ -457,7 +478,9 @@ namespace {
             }
             lease->ticket.output_ready_fence = context->ready.Get();
             lease->ticket.output_ready_value = lease->ticket.token;
-            lease->ticket.role_mask = lease->ticket.prime ? 4 : (context->multiplier == 3 ? 7 : 5);
+            lease->ticket.role_mask = (context->hostOwnsReal ? 0u : 4u) | (lease->ticket.prime        ? 0u
+                                                                           : context->multiplier == 3 ? 3u
+                                                                                                      : 1u);
             context->previousSerial = info->serial;
             context->previousTime = info->display_time_ns;
             ++context->statistics.captures;
@@ -583,6 +606,24 @@ extern "C" __declspec(dllexport) HRESULT WINAPI VDXRFG_GetApiV1(VDXRFG_ApiV1* ou
     }
     const VDXRFG_ApiV1 api{
         sizeof(VDXRFG_ApiV1), VDXRFG_API_VERSION, create, submit, retire, reset, statistics, destroy};
+    *output = api;
+    return S_OK;
+}
+
+extern "C" __declspec(dllexport) HRESULT WINAPI VDXRFG_GetApiV2(VDXRFG_ApiV2* output) noexcept {
+    if (!output || output->struct_size < sizeof(*output) || output->api_version != VDXRFG_API_VERSION_2) {
+        return VDXRFG_E_REJECTED;
+    }
+    const VDXRFG_ApiV2 api{sizeof(VDXRFG_ApiV2),
+                           VDXRFG_API_VERSION_2,
+                           VDXRFG_CREATE_GPU_TIMING | VDXRFG_CREATE_HOST_OWNS_REAL,
+                           0,
+                           createV2,
+                           submit,
+                           retire,
+                           reset,
+                           statistics,
+                           destroy};
     *output = api;
     return S_OK;
 }

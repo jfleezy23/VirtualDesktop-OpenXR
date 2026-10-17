@@ -50,6 +50,21 @@ capture/reset in the next producer.
 
 ## Reproducible builds and bounded checks
 
+GPU timing is off by default with the optional V2 module interface. For a
+development capture, start the runtime ETW trace before launching the game:
+FG samples trace enablement when creating its backend. Restart the game to
+change that instrumentation choice. Diagnostic fixtures explicitly request
+timing; ordinary gameplay does not submit timestamp markers or their resolve.
+Zero timing fields in V2 without timing enabled mean unavailable measurements.
+V1-only modules retain their previous timing behavior.
+
+V2 also negotiates host-owned real frames. The host already protects and copies
+the real stereo image, so the module omits its unused outer real-image repack.
+Synthetic pixels, input-consumption/output-readiness fences, retained banks and
+retirement remain unchanged. A prime ticket may advertise no packed roles while
+still owning GPU work and requiring retirement. The new host accepts older
+V1-only modules; a present but invalid V2 export fails closed.
+
 Use PowerShell on Windows with Git, CMake, Python and the pinned MSVC/Windows SDK
 installed. The default v145 selects MSVC14.51.36231 and SDK10.0.26100.0; explicit v143 selects
 14.44.35207. The normal runtime remains C++17 with precise floating point;

@@ -129,6 +129,9 @@ namespace virtualdesktop_openxr {
                                            static_cast<uint32_t>(size.h),
                                            m_frameGenerationMode,
                                            format};
+            // Start the ETW capture before launching the game. Avoid changing
+            // instrumentation or recreating the GPU backend during gameplay.
+            init.enableGpuTiming = IsTraceEnabled();
             const auto result = m_frameGeneration->initialize(init);
             if (FAILED(result)) {
                 if (result == VDXRFG_E_POISONED) {
