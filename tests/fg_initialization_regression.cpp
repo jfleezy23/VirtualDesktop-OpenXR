@@ -85,7 +85,10 @@ namespace {
 
 int main(int argc, char** argv) {
     try {
-        check(argc == 2 || argc == 3, "absolute module path and optional signal-failure index required");
+        check(argc == 2 || argc == 3 || argc == 5,
+              "module path, optional signal index, and optional host multiplier required");
+        const bool hostOwned = argc == 5;
+        check(!hostOwned || std::string(argv[3]) == "host", "host-owned fault mode");
         Gpu gpu;
         success(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)), "initialization gate");
         HMODULE driver = LoadLibraryExW(L"nvofapi64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -118,19 +121,38 @@ int main(int argc, char** argv) {
         info.width = width;
         info.height = height;
         info.format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        info.multiplier = 3;
+        info.multiplier = hostOwned ? static_cast<uint32_t>(std::stoul(argv[4])) : 3;
+        check(info.multiplier == 2 || info.multiplier == 3, "supported fault-test multiplier");
         for (UINT bank = 0; bank < 2; ++bank) {
             for (UINT role = 0; role < 3; ++role) {
+                if (role == 1 && info.multiplier == 2)
+                    continue;
                 outputs[bank][role] = gpu.texture();
                 info.outputs[bank][role] = outputs[bank][role].Get();
             }
         }
-        const bool signalTest = argc == 3;
+        const bool signalTest = argc >= 3;
         if (!signalTest) {
             attach(true);
         }
         void* context{};
-        const HRESULT hr = api.Create(&info, &context);
+        HRESULT hr;
+        if (hostOwned) {
+            auto get2 = reinterpret_cast<VDXRFG_GetApiV2Fn>(GetProcAddress(module, "VDXRFG_GetApiV2"));
+            check(get2 != nullptr, "optional creation API for host-owned prime fault");
+            VDXRFG_ApiV2 api2{};
+            api2.struct_size = sizeof(api2);
+            api2.api_version = VDXRFG_API_VERSION_2;
+            success(get2(&api2), "negotiate host-owned fault creation");
+            VDXRFG_CreateInfoV2 create{};
+            create.struct_size = sizeof(create);
+            create.api_version = VDXRFG_API_VERSION_2;
+            create.base = info;
+            create.flags = VDXRFG_CREATE_HOST_OWNS_REAL;
+            hr = api2.Create(&create, &context);
+        } else {
+            hr = api.Create(&info, &context);
+        }
         if (signalTest) {
             success(hr, "initialize before signal fault");
             const auto pixels = scene(0);
@@ -165,7 +187,10 @@ int main(int argc, char** argv) {
             gpu.noErrors();
             // Intentionally retain module/context until process exit: production
             // has no authority to infer completion from our private fixture fence.
-            std::printf("PASS: signal fault %u retains unpublished recovery transaction\n", failedSignal);
+            std::printf("PASS: signal fault %u retains unpublished recovery transaction (%uX host-owned=%u)\n",
+                        failedSignal,
+                        info.multiplier,
+                        hostOwned);
             return 0;
         }
         const bool retained = hr == VDXRFG_E_POISONED && context && unsafeUnregister == 0;

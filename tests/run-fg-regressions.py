@@ -77,6 +77,9 @@ def main():
         module_case("initialization", "fg_initialization_regression", module)
         for signal in range(1, 5):
             module_case(f"signal-{signal}", "fg_initialization_regression", module, signal)
+            for multiplier in (2, 3):
+                module_case(f"signal-host-{multiplier}x-{signal}", "fg_initialization_regression",
+                            module, signal, "host", multiplier)
     if args.suite in {"presenter", "all"}:
         module_case("cadence", "nr_fg_presenter_regression")
 

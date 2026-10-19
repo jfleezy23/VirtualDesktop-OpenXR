@@ -1,5 +1,10 @@
 #include "fg_gpu_helpers.h"
 #include "fg_operation_probe.h"
+#include <cstdlib>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 static_assert(sizeof(VDXRFG_CreateInfoV1) == 112);
 static_assert(sizeof(VDXRFG_ApiV1) == 56);
@@ -10,6 +15,46 @@ struct Images {
     std::array<std::vector<uint8_t>, 3> pixels;
     VDXRFG_StatisticsV1 statistics{};
     FgOperationCounts operations{};
+    FgOperationCounts primeOperations{};
+    FgOperationCounts resetPrimeOperations{};
+};
+
+// A CPU-wait regression must fail without stranding the fixture's GPU queue.
+class ProducerWatchdog {
+    ID3D12Fence* fence;
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool released{};
+    bool timedOut{};
+    std::thread worker;
+
+  public:
+    explicit ProducerWatchdog(ID3D12Fence* gate)
+        : fence(gate), worker([this] {
+              std::unique_lock lock(mutex);
+              if (!condition.wait_for(lock, std::chrono::seconds(2), [this] { return released; })) {
+                  timedOut = true;
+                  fence->Signal(1);
+              }
+          }) {
+    }
+    HRESULT release() {
+        const auto hr = fence->Signal(1);
+        {
+            std::lock_guard lock(mutex);
+            released = true;
+        }
+        condition.notify_one();
+        worker.join();
+        return hr;
+    }
+    bool expired() const {
+        return timedOut;
+    }
+    ~ProducerWatchdog() {
+        if (worker.joinable())
+            release();
+    }
 };
 
 Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flags) {
@@ -72,8 +117,15 @@ Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flag
     }
     const auto a = scene(0), b = scene(24);
     gpu.transfer(input.Get(), &a);
+    std::array<ID3D12Resource*, 7> watched{input.Get()};
+    for (UINT bank = 0; bank < 2; ++bank)
+        for (UINT role = 0; role < 3; ++role)
+            watched[1 + bank * 3 + role] = outputs[bank][role].Get();
+    FgOperationProbe observer(gpu, watched);
     VDXRFG_TicketV1 prime{};
+    observer.begin();
     success(api.Submit(context, &info, &prime), "prime history");
+    const auto primeOperations = observer.end(prime);
     gpu.wait(static_cast<ID3D12Fence*>(prime.output_ready_fence), prime.output_ready_value);
     check(prime.prime == 1 && prime.role_mask == (hostOwned ? 0u : 4u) && prime.token,
           "prime retains ownership even without a module real output");
@@ -89,16 +141,16 @@ Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flag
         info.fractions[i] = float(i + 1) / multiplier;
     }
     VDXRFG_TicketV1 pair{};
-    FgOperationProbe observer(gpu);
     observer.begin();
     success(api.Submit(context, &info, &pair), "synthesize fixed temporal pair");
-    const auto operations = observer.end();
+    const auto operations = observer.end(pair);
     gpu.wait(static_cast<ID3D12Fence*>(pair.output_ready_fence), pair.output_ready_value);
     check(!pair.prime && pair.role_mask == ((multiplier == 3 ? 3u : 1u) | (hostOwned ? 0u : 4u)) &&
               pair.bank != prime.bank,
           "pair role mask and distinct bank");
     Images result;
     result.operations = operations;
+    result.primeOperations = primeOperations;
     for (UINT role = 0; role < 3; ++role) {
         if (role == 1 && multiplier == 2)
             continue;
@@ -107,6 +159,16 @@ Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flag
     check(result.pixels[2] == (hostOwned ? sentinel : b), "pair B exact or deliberately untouched");
     check(gpu.transfer(outputs[prime.bank][2].Get(), nullptr) == (hostOwned ? sentinel : a),
           "held prime survives pair");
+    if (const auto directory = std::getenv("VDXR_FG_V2_OUTPUT")) {
+        for (UINT role = 0; role < 3; ++role) {
+            const auto path =
+                std::filesystem::path(directory) / (std::to_string(multiplier) + "-" + std::to_string(legacy) + "-" +
+                                                    std::to_string(flags) + "-" + std::to_string(role) + ".rgba");
+            std::ofstream stream(path, std::ios::binary);
+            stream.write(reinterpret_cast<const char*>(result.pixels[role].data()), result.pixels[role].size());
+            check(stream.good(), "write independent baseline/candidate pixel evidence");
+        }
+    }
     success(api.Retire(context, prime.token), "retire prime");
     success(api.Retire(context, pair.token), "retire pair");
     result.statistics.struct_size = sizeof(result.statistics);
@@ -116,9 +178,118 @@ Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flag
               result.statistics.synthetic_frames == multiplier - 1 && !result.statistics.live_tickets,
           "counters independent of timing selection");
     success(api.Reset(context, 0), "reset drained context");
+    // Exercise a skipped prime on a fresh pack list, and again after this same
+    // bank has recorded a pair. The producer gate proves ready is still ordered
+    // after actual GPU work even when no outer output roles are published.
+    for (UINT cycle = 0; cycle < 2; ++cycle) {
+        gpu.transfer(input.Get(), &a);
+        ComPtr<ID3D12Fence> gate;
+        success(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)), "reset prime producer gate");
+        info.serial = 3 + cycle * 2;
+        info.display_time_ns = 2000000000 + cycle * 1000000000;
+        info.producer_fence = gate.Get();
+        info.producer_value = 1;
+        VDXRFG_TicketV1 resetPrime{};
+        ProducerWatchdog watchdog(gate.Get());
+        observer.begin();
+        const auto submitted = api.Submit(context, &info, &resetPrime);
+        // Unpark before any assertion can throw; no failed fixture may strand a queue.
+        const bool pending = SUCCEEDED(submitted) && resetPrime.input_consumed_fence && resetPrime.output_ready_fence &&
+                             resetPrime.input_consumed_value && resetPrime.output_ready_value &&
+                             static_cast<ID3D12Fence*>(resetPrime.input_consumed_fence)->GetCompletedValue() <
+                                 resetPrime.input_consumed_value &&
+                             static_cast<ID3D12Fence*>(resetPrime.output_ready_fence)->GetCompletedValue() <
+                                 resetPrime.output_ready_value;
+        const bool busy = api.Retire(context, resetPrime.token) == VDXRFG_E_BUSY &&
+                          api.Reset(context, 0) == VDXRFG_E_BUSY && api.Destroy(context) == VDXRFG_E_BUSY;
+        success(watchdog.release(), "unpark reset prime producer");
+        const auto resetOperations = observer.end(resetPrime);
+        check(!watchdog.expired(), "prime submit and busy lifecycle checks return without waiting for the GPU");
+        success(submitted, "prime after reset without a CPU GPU wait");
+        check(pending && busy, "unpublished prime retains pending consume/ready fences and exclusive ownership");
+        check(resetPrime.prime && resetPrime.role_mask == (hostOwned ? 0u : 4u) && resetPrime.bank == 0 &&
+                  resetPrime.token > pair.token && resetPrime.generation > pair.generation,
+              "reset prime retains fresh generation and nonreused ownership identity");
+        result.resetPrimeOperations = resetOperations;
+        gpu.wait(static_cast<ID3D12Fence*>(resetPrime.output_ready_fence), resetPrime.output_ready_value);
+        success(api.Retire(context, resetPrime.token), "retire reset prime before reusing same allocator bank");
+        gpu.transfer(input.Get(), &b);
+        info.producer_fence = nullptr;
+        info.producer_value = 0;
+        ++info.serial;
+        const auto previousTime = info.display_time_ns;
+        info.display_time_ns += multiplier * info.display_period_ns;
+        for (UINT i = 0; i < multiplier - 1; ++i)
+            info.target_time_ns[i] = previousTime + (i + 1) * info.display_period_ns;
+        VDXRFG_TicketV1 reused{};
+        success(api.Submit(context, &info, &reused), "record pair after skipped prime on same bank");
+        gpu.wait(static_cast<ID3D12Fence*>(reused.output_ready_fence), reused.output_ready_value);
+        check(!reused.prime && reused.bank == resetPrime.bank, "pair reuses retired prime bank safely");
+        for (UINT role = 0; role < multiplier - 1; ++role)
+            check(gpu.transfer(outputs[reused.bank][role].Get(), nullptr) == result.pixels[role],
+                  "same-bank reuse and reset preserve exact synthetic pixels");
+        success(api.Retire(context, reused.token), "retire same-bank pair");
+        success(api.Reset(context, 0), "reset context after reused pair");
+    }
     success(api.Destroy(context), "destroy drained context");
     gpu.noErrors();
     return result;
+}
+
+void barrierBatching(HMODULE module) {
+    for (uint32_t multiplier : {2u, 3u}) {
+        for (UINT mode = 0; mode < 5; ++mode) {
+            const bool legacy = mode == 0;
+            const uint32_t flags = mode > 2
+                                       ? VDXRFG_CREATE_HOST_OWNS_REAL | ((mode == 4) ? VDXRFG_CREATE_GPU_TIMING : 0)
+                                       : (mode == 2 ? VDXRFG_CREATE_GPU_TIMING : 0);
+            const bool hostOwned = (flags & VDXRFG_CREATE_HOST_OWNS_REAL) != 0;
+            const auto result = generated(module, multiplier, legacy, flags);
+            std::printf("%uX mode%u pair outer barrier calls=%u descriptors=%u copies=%u\n",
+                        multiplier,
+                        mode,
+                        result.operations.outerBarrierCalls,
+                        result.operations.outerTransitions,
+                        result.operations.outerCopies);
+            check(result.operations.outerBarrierCalls == 4 &&
+                      result.operations.outerTransitions == (multiplier + (hostOwned ? 0u : 1u)) * 4 &&
+                      result.operations.outerCopies == (multiplier + (hostOwned ? 0u : 1u)) * 2,
+                  "pair batches barrier calls without losing any transitions or eye copies");
+            for (const auto& prime : {result.primeOperations, result.resetPrimeOperations})
+                check(prime.outerBarrierCalls == (hostOwned ? 2u : 4u) &&
+                          prime.outerTransitions == (hostOwned ? 4u : 8u) && prime.outerCopies == (hostOwned ? 2u : 4u),
+                      "initial and reset prime preserve all transitions and required eye copies");
+        }
+    }
+}
+
+void emptyPrimeSubmission(HMODULE module) {
+    for (uint32_t multiplier : {2u, 3u}) {
+        const auto ordinary = generated(module, multiplier, false, 0);
+        const auto owned = generated(module, multiplier, false, VDXRFG_CREATE_HOST_OWNS_REAL);
+        const auto timedOwned =
+            generated(module, multiplier, false, VDXRFG_CREATE_HOST_OWNS_REAL | VDXRFG_CREATE_GPU_TIMING);
+        const auto legacy = generated(module, multiplier, true, 0);
+        for (const auto& result : {owned, timedOwned}) {
+            for (const auto& prime : {result.primeOperations, result.resetPrimeOperations}) {
+                std::printf("%uX host-owned prime submissions=%u resets=%u closes=%u\n",
+                            multiplier,
+                            prime.submits,
+                            prime.listResets,
+                            prime.listCloses);
+                check(prime.submits == 4 && prime.listResets + 1 == ordinary.primeOperations.listResets &&
+                          prime.listCloses + 1 == ordinary.primeOperations.listCloses,
+                      "empty outer prime removes exactly one submission/reset/close and retains backend work");
+            }
+            check(result.pixels[0] == ordinary.pixels[0] && result.pixels[1] == ordinary.pixels[1],
+                  "empty prime elision leaves following generated images exact");
+        }
+        check(ordinary.primeOperations.submits == 5 && legacy.primeOperations.submits == 5 &&
+                  ordinary.resetPrimeOperations.submits == 5 && legacy.resetPrimeOperations.submits == 5,
+              "V1 and ordinary V2 primes retain actual real-image pack submissions");
+        check(ordinary.operations.submits == owned.operations.submits,
+              "nonprime submission count is unchanged by empty prime elision");
+    }
 }
 
 void hostRealComparison(HMODULE module) {
@@ -227,15 +398,23 @@ void rejectEnvelopes(VDXRFG_GetApiV2Fn get) {
 
 int main(int argc, char** argv) {
     try {
-        check(argc == 2, "module path required");
+        check(argc == 2 || argc == 3, "module path and optional barriers/prime/capture mode required");
         HMODULE module =
             LoadLibraryExA(argv[1], nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
         check(module != nullptr, "load real module");
         auto get = reinterpret_cast<VDXRFG_GetApiV2Fn>(GetProcAddress(module, "VDXRFG_GetApiV2"));
         check(get != nullptr, "module publishes optional creation and diagnostic negotiation");
         rejectEnvelopes(get);
-        timingComparison(module);
-        hostRealComparison(module);
+        const std::string mode = argc == 3 ? argv[2] : "all";
+        check(mode == "all" || mode == "barriers" || mode == "prime" || mode == "capture", "recognized test mode");
+        if (mode == "all" || mode == "capture") {
+            timingComparison(module);
+            hostRealComparison(module);
+        }
+        if (mode == "all" || mode == "barriers")
+            barrierBatching(module);
+        if (mode == "all" || mode == "prime")
+            emptyPrimeSubmission(module);
         FreeLibrary(module);
         std::puts("PASS: optional creation negotiation");
         return 0;

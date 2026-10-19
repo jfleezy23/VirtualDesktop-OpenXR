@@ -271,27 +271,18 @@ namespace {
         return a.x + a.width <= b.x || b.x + b.width <= a.x || a.y + a.height <= b.y || b.y + b.height <= a.y;
     }
 
-    void transition(ID3D12GraphicsCommandList* list,
-                    ID3D12Resource* resource,
-                    D3D12_RESOURCE_STATES before,
-                    D3D12_RESOURCE_STATES after) {
+    D3D12_RESOURCE_BARRIER transition(ID3D12Resource* resource,
+                                      D3D12_RESOURCE_STATES before,
+                                      D3D12_RESOURCE_STATES after) {
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrier.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after};
-        list->ResourceBarrier(1, &barrier);
+        return barrier;
     }
 
     void copyStereo(ID3D12GraphicsCommandList* list, ID3D12Resource* atlas, ID3D12Resource* isolated, bool unpack) {
         const uint32_t eyeWidth = static_cast<uint32_t>(atlas->GetDesc().Width / 2);
         const uint32_t height = atlas->GetDesc().Height;
-        transition(list,
-                   atlas,
-                   D3D12_RESOURCE_STATE_COMMON,
-                   unpack ? D3D12_RESOURCE_STATE_COPY_SOURCE : D3D12_RESOURCE_STATE_COPY_DEST);
-        transition(list,
-                   isolated,
-                   D3D12_RESOURCE_STATE_COMMON,
-                   unpack ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_COPY_SOURCE);
         for (uint32_t eye = 0; eye < 2; ++eye) {
             D3D12_TEXTURE_COPY_LOCATION wide{};
             wide.pResource = atlas;
@@ -305,14 +296,6 @@ namespace {
             list->CopyTextureRegion(
                 unpack ? &mono : &wide, unpack ? 0 : eye * eyeWidth, 0, 0, unpack ? &wide : &mono, &source);
         }
-        transition(list,
-                   atlas,
-                   unpack ? D3D12_RESOURCE_STATE_COPY_SOURCE : D3D12_RESOURCE_STATE_COPY_DEST,
-                   D3D12_RESOURCE_STATE_COMMON);
-        transition(list,
-                   isolated,
-                   unpack ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_COPY_SOURCE,
-                   D3D12_RESOURCE_STATE_COMMON);
     }
 
     HRESULT WINAPI submit(void* handle, const VDXRFG_SubmitInfoV1* info, VDXRFG_TicketV1* output) noexcept {
@@ -398,7 +381,16 @@ namespace {
             if (FAILED(hr)) {
                 return poison();
             }
+            std::array unpackBarriers{
+                transition(context->input.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                transition(context->normalized.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST)};
+            context->unpackLists[bank]->ResourceBarrier(static_cast<UINT>(unpackBarriers.size()),
+                                                        unpackBarriers.data());
             copyStereo(context->unpackLists[bank].Get(), context->input.Get(), context->normalized.Get(), true);
+            for (auto& barrier : unpackBarriers)
+                std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+            context->unpackLists[bank]->ResourceBarrier(static_cast<UINT>(unpackBarriers.size()),
+                                                        unpackBarriers.data());
             hr = context->unpackLists[bank]->Close();
             if (FAILED(hr)) {
                 return poison();
@@ -450,10 +442,8 @@ namespace {
             if (FAILED(hr)) {
                 return poison();
             }
-            hr = context->packLists[bank]->Reset(context->copyAllocators[bank].Get(), nullptr);
-            if (FAILED(hr)) {
-                return poison();
-            }
+            std::array<D3D12_RESOURCE_BARRIER, 6> packBarriers{};
+            UINT packBarrierCount = 0;
             for (uint32_t role = 0; role < 3; ++role) {
                 if (role == 2 && context->hostOwnsReal) {
                     continue;
@@ -461,17 +451,37 @@ namespace {
                 if (role != 2 && (lease->ticket.prime || (role == 1 && context->multiplier == 2))) {
                     continue;
                 }
-                copyStereo(context->packLists[bank].Get(),
-                           context->outputs[bank][role].Get(),
-                           context->isolatedOutputs[bank][role].Get(),
-                           false);
+                packBarriers[packBarrierCount++] = transition(
+                    context->outputs[bank][role].Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+                packBarriers[packBarrierCount++] = transition(context->isolatedOutputs[bank][role].Get(),
+                                                              D3D12_RESOURCE_STATE_COMMON,
+                                                              D3D12_RESOURCE_STATE_COPY_SOURCE);
             }
-            hr = context->packLists[bank]->Close();
-            if (FAILED(hr)) {
-                return poison();
+            if (packBarrierCount) {
+                hr = context->packLists[bank]->Reset(context->copyAllocators[bank].Get(), nullptr);
+                if (FAILED(hr)) {
+                    return poison();
+                }
+                context->packLists[bank]->ResourceBarrier(packBarrierCount, packBarriers.data());
+                // Each selected role has distinct outer and isolated resources.
+                // Keep all transitions while batching their driver calls.
+                for (UINT i = 0; i < packBarrierCount; i += 2)
+                    copyStereo(context->packLists[bank].Get(),
+                               packBarriers[i].Transition.pResource,
+                               packBarriers[i + 1].Transition.pResource,
+                               false);
+                for (UINT i = 0; i < packBarrierCount; ++i)
+                    std::swap(packBarriers[i].Transition.StateBefore, packBarriers[i].Transition.StateAfter);
+                context->packLists[bank]->ResourceBarrier(packBarrierCount, packBarriers.data());
+                hr = context->packLists[bank]->Close();
+                if (FAILED(hr)) {
+                    return poison();
+                }
+                ID3D12CommandList* pack[] = {context->packLists[bank].Get()};
+                context->queue->ExecuteCommandLists(1, pack);
             }
-            ID3D12CommandList* pack[] = {context->packLists[bank].Get()};
-            context->queue->ExecuteCommandLists(1, pack);
+            // A host-owned prime has no outer output to pack. Its backend
+            // priming work still precedes this ready signal on the same queue.
             hr = context->queue->Signal(context->ready.Get(), lease->ticket.token);
             if (FAILED(hr)) {
                 return poison();
