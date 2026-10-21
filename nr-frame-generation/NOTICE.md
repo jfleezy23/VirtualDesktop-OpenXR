@@ -8,7 +8,7 @@ The OFXR-derived module contains **LGPL-3.0** code. Its license is retained in [
 with the companion full [GPL-3.0 text](vendor/LICENSE.GPL-3.0.txt). The runtime's top-level MIT license does not replace
 these module terms. The optional module can be replaced separately from the runtime.
 
-Builds apply the initialization/lifetime ownership derivative in `scripts/prepare-fg-vendor.py`; the script generates its
+Builds apply the initialization/lifetime ownership and diagnostic timing fixes in `scripts/prepare-fg-vendor.py`; the script generates its
 corresponding patch and modified source. The unmodified source and upstream/retained hashes are recorded in
 [vendor/ofxr/manifest.json](vendor/ofxr/manifest.json).
 

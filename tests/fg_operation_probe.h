@@ -5,7 +5,7 @@
 
 // Observe real driver entry points, only on this fixture's calling thread.
 struct FgOperationCounts {
-    unsigned submits{}, waits{}, copies{}, queries{}, resolves{};
+    unsigned submits{}, waits{}, copies{}, queries{}, resolves{}, maps{}, failedMaps{}, uninitializedResolves{};
     unsigned listResets{}, listCloses{}, outerBarrierCalls{}, outerTransitions{}, outerCopies{};
 };
 
@@ -28,6 +28,7 @@ class FgOperationProbe {
     using Query = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12QueryHeap*, D3D12_QUERY_TYPE, UINT);
     using Resolve = void(STDMETHODCALLTYPE*)(
         ID3D12GraphicsCommandList*, ID3D12QueryHeap*, D3D12_QUERY_TYPE, UINT, UINT, ID3D12Resource*, UINT64);
+    using Map = HRESULT(STDMETHODCALLTYPE*)(ID3D12Resource*, UINT, const D3D12_RANGE*, void**);
     inline static FgOperationProbe* active{};
     const DWORD thread = GetCurrentThreadId();
     ID3D12CommandQueue* queue{};
@@ -40,6 +41,11 @@ class FgOperationProbe {
     Copy copy{};
     Query query{};
     Resolve resolve{};
+    Map map{};
+    bool guardQueryRanges{};
+    unsigned mapFailureCountdown{};
+    std::array<std::pair<ID3D12QueryHeap*, UINT>, 256> writtenQueries{};
+    size_t writtenQueryCount{};
     bool armed{};
     FgOperationCounts counts{};
     struct Event {
@@ -157,8 +163,13 @@ class FgOperationProbe {
                                           ID3D12QueryHeap* heap,
                                           D3D12_QUERY_TYPE type,
                                           UINT index) {
-        if (active->watches() && type == D3D12_QUERY_TYPE_TIMESTAMP)
+        if (active->watches() && type == D3D12_QUERY_TYPE_TIMESTAMP) {
             ++active->counts.queries;
+            if (active->writtenQueryCount < active->writtenQueries.size())
+                active->writtenQueries[active->writtenQueryCount++] = {heap, index};
+            else
+                active->overflow = true;
+        }
         active->query(list, heap, type, index);
     }
     static void STDMETHODCALLTYPE onResolve(ID3D12GraphicsCommandList* list,
@@ -168,9 +179,40 @@ class FgOperationProbe {
                                             UINT n,
                                             ID3D12Resource* dst,
                                             UINT64 offset) {
-        if (active->watches() && type == D3D12_QUERY_TYPE_TIMESTAMP)
+        if (active->watches() && type == D3D12_QUERY_TYPE_TIMESTAMP) {
             ++active->counts.resolves;
+            if (active->guardQueryRanges) {
+                bool missing = !n || first > UINT_MAX - n;
+                for (UINT i = 0; !missing && i < n; ++i) {
+                    bool found = false;
+                    for (size_t j = 0; j < active->writtenQueryCount; ++j)
+                        found |= active->writtenQueries[j] == std::pair{heap, first + i};
+                    missing |= !found;
+                }
+                if (missing) {
+                    ++active->counts.uninitializedResolves;
+                    // A negative control must fail without asking the driver
+                    // to execute an undefined timestamp resolve.
+                    return;
+                }
+            }
+        }
         active->resolve(list, heap, type, first, n, dst, offset);
+    }
+    static HRESULT STDMETHODCALLTYPE onMap(ID3D12Resource* resource,
+                                           UINT index,
+                                           const D3D12_RANGE* range,
+                                           void** data) {
+        if (active->watches()) {
+            ++active->counts.maps;
+            if (active->mapFailureCountdown && !--active->mapFailureCountdown) {
+                ++active->counts.failedMaps;
+                if (data)
+                    *data = nullptr;
+                return E_FAIL;
+            }
+        }
+        return active->map(resource, index, range, data);
     }
     void attach(bool enable) {
         auto operation = enable ? DetourAttach : DetourDetach;
@@ -197,6 +239,8 @@ class FgOperationProbe {
         if (!hr)
             hr = operation(reinterpret_cast<PVOID*>(&resolve), onResolve);
         if (!hr)
+            hr = operation(reinterpret_cast<PVOID*>(&map), onMap);
+        if (!hr)
             hr = DetourTransactionCommit();
         else if (started)
             DetourTransactionAbort();
@@ -204,8 +248,8 @@ class FgOperationProbe {
     }
 
   public:
-    explicit FgOperationProbe(Gpu& gpu, std::array<ID3D12Resource*, 7> watchedAtlases)
-        : queue(gpu.queue.Get()), atlases(watchedAtlases) {
+    explicit FgOperationProbe(Gpu& gpu, std::array<ID3D12Resource*, 7> watchedAtlases, bool guardQueries = false)
+        : queue(gpu.queue.Get()), guardQueryRanges(guardQueries), atlases(watchedAtlases) {
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> list;
         success(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)),
@@ -225,6 +269,8 @@ class FgOperationProbe {
         copy = reinterpret_cast<Copy>(l[16]);
         query = reinterpret_cast<Query>(l[53]);
         resolve = reinterpret_cast<Resolve>(l[54]);
+        auto sample = gpu.texture();
+        map = reinterpret_cast<Map>((*reinterpret_cast<void***>(sample.Get()))[8]);
         check(!active, "one native operation observer");
         active = this;
         try {
@@ -249,8 +295,17 @@ class FgOperationProbe {
         overflow = false;
         outerLists = {};
         signalCount = executedCount = 0;
+        writtenQueryCount = 0;
         queueOrder = firstExecuteOrder = lastExecuteOrder = 0;
         armed = true;
+    }
+    FgOperationCounts countersOnly() {
+        armed = false;
+        check(!overflow, "bounded native operation counters did not overflow");
+        return counts;
+    }
+    void failMapAfter(unsigned number) {
+        mapFailureCountdown = number;
     }
     FgOperationCounts end(const VDXRFG_TicketV1& ticket) {
         armed = false;

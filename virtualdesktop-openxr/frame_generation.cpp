@@ -200,6 +200,12 @@ namespace virtualdesktop_openxr {
                 state->api.GetStatistics = api2.GetStatistics;
                 state->api.Destroy = api2.Destroy;
             }
+            // Backend choice is required, unlike optional diagnostics/real
+            // ownership. An old module must not silently substitute NVIDIA.
+            if (info.useFidelityFxFull &&
+                (!getApi2 || !(api2.supported_create_flags & VDXRFG_CREATE_FIDELITYFX_FULL))) {
+                return VDXRFG_E_REJECTED;
+            }
             D3D12_COMMAND_QUEUE_DESC queue{};
             hr = info.device12->CreateCommandQueue(&queue, IID_PPV_ARGS(&state->queue));
             if (FAILED(hr)) {
@@ -273,6 +279,8 @@ namespace virtualdesktop_openxr {
                 const uint32_t requested =
                     VDXRFG_CREATE_HOST_OWNS_REAL | (info.enableGpuTiming ? VDXRFG_CREATE_GPU_TIMING : 0u);
                 options.flags = api2.supported_create_flags & requested;
+                if (info.useFidelityFxFull)
+                    options.flags |= VDXRFG_CREATE_FIDELITYFX_FULL;
                 state->hostOwnsReal = (options.flags & VDXRFG_CREATE_HOST_OWNS_REAL) != 0;
                 // V2 gameplay defaults to no GPU timing; diagnostic callers opt
                 // in before creation. V1-only modules retain their defaults.

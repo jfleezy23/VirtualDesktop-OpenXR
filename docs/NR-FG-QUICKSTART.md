@@ -39,6 +39,14 @@ You can create a desktop shortcut to the same command. Opening the panel only re
 3. Select **Off**, **OFXR 2×** or **OFXR 3×** under PC frame generation. The selection saves immediately.
 4. Close and relaunch the game after changing FG mode. NR strength/detail controls can be adjusted during play.
 
+The **PC frame-generation backend** selector offers **NVIDIA (default)** and experimental
+**FidelityFX (full resolution)**. It saves immediately; restart the game after changing it.
+NVIDIA retains its existing Medium/50% optical-flow settings. FidelityFX uses the full per-eye image
+for motion estimation. This setting does not change game resolution, NR coverage, or NR detail controls.
+Keep NR coverage at 100%. Compare hair, faces and head motion before choosing a backend for regular play.
+An explicit FidelityFX request requires a matching module; an older or unsupported module leaves FG
+unavailable for that session and retains real frames, with the cause recorded in the runtime log.
+
 Off disables OFXR and retains the selected ordinary or NR processing path. OFXR 2× adds one synthetic frame between real frames; 3× adds two when the runtime's eligibility
 and deadline checks pass. These are PC-generated frames; VD's separate headset-side SSW should remain off for this test.
 The selector shows the saved request, not proof that FG is active in the current game.

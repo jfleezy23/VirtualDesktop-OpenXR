@@ -1,9 +1,10 @@
-// Public OpenXR path, real vendor NR, real NVOF and private OVRNull.
+// Public OpenXR path, real vendor NR, selected real flow backend and private OVRNull.
 // Settings are read-only synthetic registry responses, never real writes.
 #define VDXR_NR_HELPERS_ONLY
 #include "nr_input_toggle_regression.cpp"
 #undef VDXR_NR_HELPERS_ONLY
 #include "nr_fg_lookup_probe.h"
+#include <fstream>
 
 namespace {
     struct D3D12Input {
@@ -147,6 +148,7 @@ namespace virtualdesktop_openxr {
             return *static_cast<OpenXrRuntime*>(GetInstance());
         }
         static unsigned nrEvaluations[2];
+        static unsigned invalidNrParameters;
         static std::atomic<unsigned> syntheticPresentations;
         static std::map<ovrTextureSwapChain, unsigned> nrCommits;
         static std::map<ovrTextureSwapChain, unsigned> commitsBeforeInput;
@@ -159,6 +161,24 @@ namespace virtualdesktop_openxr {
                                                     const NVSDK_NGX_Parameter* parameters,
                                                     PFN_NVSDK_NGX_ProgressCallback callback) {
             ++nrEvaluations[eye];
+            const auto hasInt = [&](const char* name, int expected) {
+                int actual{};
+                return NVSDK_NGX_SUCCEED(parameters->Get(name, &actual)) && actual == expected;
+            };
+            const auto hasFloat = [&](const char* name, float expected) {
+                float actual{};
+                return NVSDK_NGX_SUCCEED(parameters->Get(name, &actual)) && std::abs(actual - expected) < .0001f;
+            };
+            if (!hasInt("DLSSNR.Style", 2) || !hasInt("DLSSNR.Hint.Render.Preset", 2) ||
+                !hasFloat("DLSSNR.Intensity", .91f) || !hasFloat("DLSSNR.LocalToneStrength", 1.f) ||
+                !hasFloat("DLSSNR.LocalStructureStrength", 1.f) || !hasFloat("DLSSNR.SkinStructureStrength", 1.f) ||
+                !hasInt("DLSSNR.ColorSubrectWidth", 512) || !hasInt("DLSSNR.ColorSubrectHeight", 512) ||
+                !hasInt("DLSSNR.OutputSubrectWidth", 512) || !hasInt("DLSSNR.OutputSubrectHeight", 512) ||
+                !hasInt("DLSSNR.ColorSubrectBaseX", 0) || !hasInt("DLSSNR.ColorSubrectBaseY", 0) ||
+                !hasInt("DLSSNR.OutputSubrectBaseX", eye * 512) || !hasInt("DLSSNR.OutputSubrectBaseY", 0))
+                ++invalidNrParameters;
+            // Always forward to actual Ada inference; diagnostics must not
+            // substitute success or throw through the callback boundary.
             return originalEvaluate[eye](commands, feature, parameters, callback);
         }
         static void observe() {
@@ -287,6 +307,73 @@ namespace virtualdesktop_openxr {
                 readColor(value.m_ovrSession, lastProjection, eye);
             }
         }
+        static std::vector<uint8_t> viewportPixels(ID3D11Texture2D* image, const ovrRecti& rect) {
+            D3D11_TEXTURE2D_DESC desc{};
+            image->GetDesc(&desc);
+            require(rect.Pos.x >= 0 && rect.Pos.y >= 0 && rect.Size.w > 0 && rect.Size.h > 0 &&
+                        unsigned(rect.Pos.x + rect.Size.w) <= desc.Width &&
+                        unsigned(rect.Pos.y + rect.Size.h) <= desc.Height && desc.ArraySize == 1 && desc.MipLevels == 1,
+                    "bounded complete real-frame viewport");
+            const bool bgra = desc.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS ||
+                              desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                              desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+            require(bgra || desc.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS || desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
+                        desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                    "known real-frame RGBA layout");
+            ComPtr<ID3D11Device> device;
+            ComPtr<ID3D11DeviceContext> context;
+            image->GetDevice(&device);
+            device->GetImmediateContext(&context);
+            desc.BindFlags = desc.MiscFlags = 0;
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            ComPtr<ID3D11Texture2D> staging;
+            checkHr(device->CreateTexture2D(&desc, nullptr, &staging));
+            context->CopyResource(staging.Get(), image);
+            std::vector<uint8_t> pixels(size_t(rect.Size.w) * rect.Size.h * 4);
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            checkHr(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped));
+            for (int y = 0; y < rect.Size.h; ++y) {
+                const auto* row =
+                    static_cast<const uint8_t*>(mapped.pData) + (rect.Pos.y + y) * mapped.RowPitch + rect.Pos.x * 4;
+                auto* output = pixels.data() + size_t(y) * rect.Size.w * 4;
+                memcpy(output, row, size_t(rect.Size.w) * 4);
+                if (bgra)
+                    for (int x = 0; x < rect.Size.w; ++x)
+                        std::swap(output[x * 4], output[x * 4 + 2]);
+            }
+            context->Unmap(staging.Get(), 0);
+            return pixels;
+        }
+        static void verifyRealPixels(const std::filesystem::path& directory) {
+            std::filesystem::create_directories(directory);
+            auto& value = runtime();
+            value.waitForAsyncSubmissionIdle();
+            std::unique_lock contextLease(value.m_fgContextMutex);
+            std::unique_lock captureLock(captureMutex);
+            bool realBank = false;
+            for (const auto& bank : value.m_fgPresentationBanks)
+                realBank |= bank[2].ovrSwapchain && bank[2].ovrSwapchain == lastProjection.ColorTexture[0] &&
+                            bank[2].ovrSwapchain == lastProjection.ColorTexture[1];
+            require(realBank, "final NR presentation is the module real-B role");
+            // The worker consumes the source layer list. These fixed NR scenarios
+            // retain either one packed NR texture or separate postprocessed eyes.
+            const bool packed = value.m_precompositor.finalColour[0] == value.m_precompositor.finalColour[1];
+            for (unsigned eye = 0; eye < 2; ++eye) {
+                const ovrRecti source{{packed ? static_cast<int>(eye) * value.m_fgEyeResolution.w : 0, 0},
+                                      value.m_fgEyeResolution};
+                require(lastProjection.Viewport[eye].Size.w == source.Size.w &&
+                            lastProjection.Viewport[eye].Size.h == source.Size.h,
+                        "real NR presentation retains both eye viewport dimensions");
+                auto presented = getCommitted(value.m_ovrSession, lastProjection.ColorTexture[eye]);
+                const auto pixels = viewportPixels(value.m_precompositor.finalColour[eye].Get(), source);
+                require(pixels == viewportPixels(presented.Get(), lastProjection.Viewport[eye]),
+                        "all real NR RGBA pixels survive frame-generation presentation exactly");
+                std::ofstream output(directory / ("final-real-eye" + std::to_string(eye) + ".rgba"), std::ios::binary);
+                output.write(reinterpret_cast<const char*>(pixels.data()), pixels.size());
+                require(output.good(), "save complete final real NR pixels for cross-backend comparison");
+            }
+        }
         static void observeId(long long id) {
             require(id == static_cast<long long>(presentedIds.size()),
                     "public Wait/Begin/End retains consecutive independent native IDs");
@@ -310,6 +397,13 @@ namespace virtualdesktop_openxr {
                       << " captures=" << statistics.captures << " reprime=" << value.m_fgNeedReprime.load()
                       << " now=" << value.ovrTimeToXrTime(ovr_GetTimeInSeconds()) << '\n';
             require(value.m_precompositor.dlssnrSettings.foveationSize == 1.f, "NR coverage stays100%");
+            require(value.m_frameGenerationBackend == requestedFrameGenerationBackend,
+                    "selected backend reaches the real session configuration");
+            const auto& appearance = value.m_precompositor.dlssnrSettings;
+            require(appearance.style == 2 && std::abs(appearance.intensity - .91f) < .0001f &&
+                        appearance.localToneStrength == 1.f && appearance.localStructureStrength == 1.f &&
+                        appearance.skinStructureStrength == 1.f,
+                    "NR appearance settings preserve the current hair/face treatment");
             if (!nr) {
                 require(value.m_frameGeneration && value.m_frameGeneration->initialized(),
                         "NR-off public frame must initialize the independent FG host");
@@ -328,6 +422,7 @@ namespace virtualdesktop_openxr {
         }
     };
     unsigned RuntimeFrameGenerationRegression::nrEvaluations[2]{};
+    unsigned RuntimeFrameGenerationRegression::invalidNrParameters{};
     std::atomic<unsigned> RuntimeFrameGenerationRegression::syntheticPresentations{};
     std::map<ovrTextureSwapChain, unsigned> RuntimeFrameGenerationRegression::nrCommits;
     std::map<ovrTextureSwapChain, unsigned> RuntimeFrameGenerationRegression::commitsBeforeInput;
@@ -362,6 +457,11 @@ int main(int argc, char** argv) {
         require(noNr || discard || toggle || sharpenOnly || !strcmp(argv[3], "native") || !strcmp(argv[3], "upscaled"),
                 "known public FG scenario");
         requestedFrameGeneration = !strcmp(argv[3], "nr-off-2") ? 2 : 3;
+        if (const auto backend = std::getenv("VDXR_FG_TEST_BACKEND")) {
+            require(!strcmp(backend, "nvidia") || !strcmp(backend, "fidelityfx-full"), "known test backend");
+            requestedFrameGenerationBackend = !strcmp(backend, "fidelityfx-full") ? 1 : 0;
+        }
+        preserveNrAppearance = true;
         coverage = 100;
         const bool upscaled = !strcmp(argv[3], "upscaled") || !strcmp(argv[3], "nr-off-upscaled");
         nrUpscalingSetting = upscaled ? 150 : 100;
@@ -631,12 +731,16 @@ int main(int argc, char** argv) {
             }
             const auto expectedNr = noNr ? 0u : inputs - (toggle ? 5u : 2u);
             Regression::verifyPixels();
+            if (!noNr)
+                Regression::verifyRealPixels(argv[2]);
             unsigned eyeDifference{};
             for (unsigned component = 0; component < 3; ++component)
                 eyeDifference += std::abs(int(observedColour[0][component]) - int(observedColour[1][component]));
             require(eyeDifference > 32, "final FG presentation preserves distinct left and right eye pixels");
             require(Regression::nrEvaluations[0] == expectedNr && Regression::nrEvaluations[1] == expectedNr,
                     "exactly one real NR evaluation per eye per input, none on synthesized output");
+            require(!Regression::invalidNrParameters,
+                    "actual forwarded Ada evaluations preserve full NR rectangles, preset B and hair/face controls");
             const auto statistics = Regression::statistics();
             const auto minimumSynthetic = 4u * (requestedFrameGeneration - 1);
             if (reuse) {

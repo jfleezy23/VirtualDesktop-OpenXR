@@ -137,6 +137,56 @@ class FrameGenerationControlsTests(unittest.TestCase):
         self.assertEqual(app.frame_generation.get(), "OFXR 3×")
         self.assertNotIn("FrameGenerationMode", [name for name, _, _ in self.registry.writes])
 
+    def test_backend_defaults_to_nvidia_without_writing(self):
+        app = self.app()
+        self.assertEqual(app.frame_generation_backend.get(), "NVIDIA (default)")
+        self.assertEqual(self.registry.writes, [])
+
+    def test_backend_selection_preserves_nr_and_fg_settings(self):
+        self.registry.values["FrameGenerationMode"] = (3, 4)
+        app = self.app()
+        app.frame_generation_backend.set("FidelityFX (full resolution)")
+        app.on_frame_generation_backend_changed()
+        self.assertEqual(self.registry.values["FrameGenerationBackend"], (1, 4))
+        self.assertEqual(self.registry.values["FrameGenerationMode"], (3, 4))
+        self.assertEqual(self.registry.values["FoveationSize"], (100, 4))
+        self.assertEqual(self.registry.values["DLSSNR_Enabled"], (1, 4))
+        self.assertIn("restart", app.status.get().lower())
+        self.assertEqual([name for name, _, _ in self.registry.writes], ["FrameGenerationBackend"])
+
+    def test_backend_permission_error_restores_saved_choice(self):
+        app = self.app()
+        self.registry.denied = True
+        app.frame_generation_backend.set("FidelityFX (full resolution)")
+        app.on_frame_generation_backend_changed()
+        self.assertEqual(app.frame_generation_backend.get(), "NVIDIA (default)")
+        self.assertIn("administrator", app.status.get().lower())
+
+    def test_backend_readback_failure_is_not_reported_saved(self):
+        app = self.app()
+        with mock.patch.object(self.registry, "SetValueEx", side_effect=lambda *_: None):
+            app.frame_generation_backend.set("FidelityFX (full resolution)")
+            app.on_frame_generation_backend_changed()
+        self.assertEqual(app.frame_generation_backend.get(), "NVIDIA (default)")
+        self.assertIn("error", app.status.get().lower())
+
+    def test_invalid_saved_backend_is_reported_without_writing(self):
+        for value in [(2, 4), ("1", 1)]:
+            self.registry.values["FrameGenerationBackend"] = value
+            with self.assertRaises(ValueError):
+                gui.read_frame_generation_backend()
+        app = self.app()
+        self.assertIn("invalid", app.status.get().lower())
+        self.assertEqual(self.registry.writes, [])
+
+    def test_nr_reset_leaves_backend_selected(self):
+        self.registry.values["FrameGenerationBackend"] = (1, 4)
+        app = self.app()
+        app.reset_defaults()
+        self.assertEqual(self.registry.values["FrameGenerationBackend"], (1, 4))
+        self.assertEqual(app.frame_generation_backend.get(), "FidelityFX (full resolution)")
+        self.assertNotIn("FrameGenerationBackend", [name for name, _, _ in self.registry.writes])
+
 
 if __name__ == "__main__":
     unittest.main()

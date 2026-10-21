@@ -132,6 +132,7 @@ namespace virtualdesktop_openxr {
             // Start the ETW capture before launching the game. Avoid changing
             // instrumentation or recreating the GPU backend during gameplay.
             init.enableGpuTiming = IsTraceEnabled();
+            init.useFidelityFxFull = m_frameGenerationBackend == 1;
             const auto result = m_frameGeneration->initialize(init);
             if (FAILED(result)) {
                 if (result == VDXRFG_E_POISONED) {
@@ -139,7 +140,8 @@ namespace virtualdesktop_openxr {
                     CHECK_HRCMD(result);
                 }
                 m_frameGenerationUnavailable = true;
-                ErrorLog("Frame generation unavailable (0x%08x); preserving the NR path.\n",
+                ErrorLog("Frame generation unavailable (backend %s, 0x%08x); preserving the real-frame path.\n",
+                         init.useFidelityFxFull ? "FidelityFX full" : "NVIDIA",
                          static_cast<unsigned>(result));
                 return bypass();
             }

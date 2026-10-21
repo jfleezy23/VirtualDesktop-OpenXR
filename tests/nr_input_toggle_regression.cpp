@@ -15,6 +15,8 @@ namespace {
     std::atomic<DWORD> enabled{};
     DWORD coverage = 100;
     DWORD requestedFrameGeneration{}, nrSharpenSetting{}, nrUpscalingSetting{100};
+    DWORD requestedFrameGenerationBackend{};
+    bool preserveNrAppearance{};
     DWORD nrDepthSubmissionSetting{1};
     bool includeDepthInput = true;
     bool singleDepthInput{}, staticDepthInput{}, startWithNr{}, staticDepthReuse{};
@@ -63,6 +65,16 @@ namespace {
             value = nrUpscalingSetting;
         else if (setting == L"FrameGenerationMode")
             value = requestedFrameGeneration;
+        else if (setting == L"FrameGenerationBackend")
+            value = requestedFrameGenerationBackend;
+        else if (preserveNrAppearance && setting == L"DLSSNR_Style")
+            value = 2;
+        else if (preserveNrAppearance && setting == L"DLSSNR_Intensity")
+            value = 91;
+        else if (preserveNrAppearance &&
+                 (setting == L"DLSSNR_LocalToneStrength" || setting == L"DLSSNR_LocalStructureStrength" ||
+                  setting == L"DLSSNR_SkinStructureStrength"))
+            value = 100;
         else if (setting == L"sharpen")
             value = nrSharpenSetting;
         else if (setting == L"quirk_disable_async_submission")

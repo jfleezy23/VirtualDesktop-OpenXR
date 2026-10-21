@@ -21,6 +21,34 @@ VALUE_MAXIMUMS = (2, 100, 100, 100, 100, 100)
 VALUE_DEFAULTS = (0, 100, 20, 70, 50, 66)
 FRAME_GENERATION_VALUE_NAME = "FrameGenerationMode"
 FRAME_GENERATION_MODES = {"Off": 0, "OFXR 2×": 2, "OFXR 3×": 3}
+FRAME_GENERATION_BACKEND_NAME = "FrameGenerationBackend"
+FRAME_GENERATION_BACKENDS = {"NVIDIA (default)": 0, "FidelityFX (full resolution)": 1}
+
+
+def read_frame_generation_backend():
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, 0,
+            winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
+        ) as key:
+            value, kind = winreg.QueryValueEx(key, FRAME_GENERATION_BACKEND_NAME)
+    except FileNotFoundError:
+        return 0
+    if kind != winreg.REG_DWORD or value not in FRAME_GENERATION_BACKENDS.values():
+        raise ValueError("Invalid saved frame-generation backend; select NVIDIA or FidelityFX.")
+    return value
+
+
+def write_frame_generation_backend(value):
+    if value not in FRAME_GENERATION_BACKENDS.values():
+        raise ValueError("Unsupported frame-generation backend")
+    with winreg.CreateKeyEx(
+        winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, 0,
+        winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY,
+    ) as key:
+        winreg.SetValueEx(key, FRAME_GENERATION_BACKEND_NAME, 0, winreg.REG_DWORD, value)
+    if read_frame_generation_backend() != value:
+        raise OSError("Frame-generation backend readback did not match the selection")
 
 
 def read_frame_generation_mode():
@@ -167,20 +195,52 @@ class VDXRRegistryApp:
         )
         selector.grid(row=9, column=1, columnspan=2, sticky="ew", pady=(12, 4))
         selector.bind("<<ComboboxSelected>>", self.on_frame_generation_changed)
-        ttk.Label(frame, text="OFXR works with NR on or off; restart after changing FG.").grid(
-            row=10, column=0, columnspan=3, sticky="w",
+        try:
+            backend = read_frame_generation_backend()
+        except (ValueError, OSError) as error:
+            backend, fg_error = 0, str(error)
+        self.saved_frame_generation_backend = next(
+            label for label, value in FRAME_GENERATION_BACKENDS.items() if value == backend
         )
-        ttk.Label(frame, text="Turn SSW off in Virtual Desktop when testing OFXR.").grid(
+        self.frame_generation_backend = tk.StringVar(value=self.saved_frame_generation_backend)
+        ttk.Label(frame, text="PC frame-generation backend").grid(row=10, column=0, sticky="w", pady=4)
+        backend_selector = ttk.Combobox(
+            frame, textvariable=self.frame_generation_backend, values=tuple(FRAME_GENERATION_BACKENDS),
+            state="readonly", width=30,
+        )
+        backend_selector.grid(row=10, column=1, columnspan=2, sticky="ew", pady=4)
+        backend_selector.bind("<<ComboboxSelected>>", self.on_frame_generation_backend_changed)
+        ttk.Label(frame, text="OFXR works with NR on or off; restart after changing FG.").grid(
             row=11, column=0, columnspan=3, sticky="w",
         )
-        ttk.Label(frame, text="With NR enabled, use at least 90% coverage (100% recommended).").grid(
+        ttk.Label(frame, text="Turn SSW off in Virtual Desktop when testing OFXR.").grid(
             row=12, column=0, columnspan=3, sticky="w",
+        )
+        ttk.Label(frame, text="With NR enabled, use at least 90% coverage (100% recommended).").grid(
+            row=13, column=0, columnspan=3, sticky="w",
+        )
+        ttk.Label(frame, text="FidelityFX is experimental; restart after changing the backend.").grid(
+            row=14, column=0, columnspan=3, sticky="w",
         )
         self.status = tk.StringVar(value=fg_error or REGISTRY_PATH)
         ttk.Label(frame, textvariable=self.status).grid(
-            row=13, column=0, columnspan=3, sticky="w", pady=(12, 0)
+            row=15, column=0, columnspan=3, sticky="w", pady=(12, 0)
         )
         self.set_slider_state()
+
+    def on_frame_generation_backend_changed(self, _event=None):
+        selection = self.frame_generation_backend.get()
+        try:
+            write_frame_generation_backend(FRAME_GENERATION_BACKENDS[selection])
+        except PermissionError:
+            self.frame_generation_backend.set(self.saved_frame_generation_backend)
+            self.status.set("Administrator access is required to save the frame-generation backend.")
+        except (OSError, ValueError, KeyError) as error:
+            self.frame_generation_backend.set(self.saved_frame_generation_backend)
+            self.status.set(f"Frame-generation backend error: {error}")
+        else:
+            self.saved_frame_generation_backend = selection
+            self.status.set(f"Saved {selection}; restart the game.")
 
     def on_frame_generation_changed(self, _event=None):
         selection = self.frame_generation.get()

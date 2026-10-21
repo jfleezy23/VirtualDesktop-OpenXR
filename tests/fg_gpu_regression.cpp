@@ -1,4 +1,5 @@
 #include "fg_gpu_helpers.h"
+#include <cstdlib>
 
 void run(const char* modulePath, uint32_t multiplier, const std::string& scenario = "motion") {
     const bool stationary = scenario == "stationary";
@@ -34,7 +35,26 @@ void run(const char* modulePath, uint32_t multiplier, const std::string& scenari
         }
     }
     void* context{};
-    success(api.Create(&create, &context), "initialize NVIDIA GPU synthesis");
+    const auto selectedBackend = std::getenv("VDXR_FG_TEST_BACKEND");
+    const bool fidelityFx = selectedBackend && std::string(selectedBackend) == "fidelityfx-full";
+    check(!selectedBackend || fidelityFx || std::string(selectedBackend) == "nvidia", "known GPU fixture backend");
+    if (fidelityFx) {
+        auto get2 = reinterpret_cast<VDXRFG_GetApiV2Fn>(GetProcAddress(module, "VDXRFG_GetApiV2"));
+        check(get2 != nullptr, "optional backend creation export");
+        VDXRFG_ApiV2 api2{};
+        api2.struct_size = sizeof(api2);
+        api2.api_version = VDXRFG_API_VERSION_2;
+        success(get2(&api2), "negotiate FidelityFX GPU fixture");
+        check(api2.supported_create_flags & VDXRFG_CREATE_FIDELITYFX_FULL, "explicit full-resolution capability");
+        VDXRFG_CreateInfoV2 options{};
+        options.struct_size = sizeof(options);
+        options.api_version = VDXRFG_API_VERSION_2;
+        options.base = create;
+        options.flags = VDXRFG_CREATE_FIDELITYFX_FULL | VDXRFG_CREATE_GPU_TIMING;
+        success(api2.Create(&options, &context), "initialize FidelityFX full GPU synthesis");
+    } else {
+        success(api.Create(&create, &context), "initialize NVIDIA GPU synthesis");
+    }
     VDXRFG_SubmitInfoV1 info{};
     info.struct_size = sizeof(info);
     info.api_version = 1;
@@ -190,7 +210,9 @@ void run(const char* modulePath, uint32_t multiplier, const std::string& scenari
     success(api.Destroy(context), "drained destroy");
     gpu.noErrors();
     FreeLibrary(module);
-    std::printf("PASS: NVIDIA %uX pixels, distinct frames, two banks and retirement\n", multiplier);
+    std::printf("PASS: %s %uX pixels, distinct frames, two banks and retirement\n",
+                fidelityFx ? "FidelityFX full" : "NVIDIA",
+                multiplier);
 }
 
 int main(int argc, char** argv) {

@@ -183,6 +183,10 @@ namespace {
             if (FAILED(hr)) {
                 return hr;
             }
+            const bool fidelityFxFull = (flags & VDXRFG_CREATE_FIDELITYFX_FULL) != 0;
+            xrfg::D3D12NvidiaOpticalFlowOptions opticalFlowOptions{};
+            if (fidelityFxFull)
+                opticalFlowOptions.input_scale = xrfg::D3D12OpticalFlowInputScale::full;
             hr = context->synthesizer.initialize(device,
                                                  context->queue.Get(),
                                                  context->history,
@@ -190,8 +194,9 @@ namespace {
                                                  std::span<ID3D12Resource* const>(synthetic.data(), syntheticCount),
                                                  static_cast<DXGI_FORMAT>(info->format),
                                                  D3D12_RESOURCE_STATE_COMMON,
-                                                 xrfg::D3D12OpticalFlowBackend::nvidia,
-                                                 {},
+                                                 fidelityFxFull ? xrfg::D3D12OpticalFlowBackend::fidelity_fx
+                                                                : xrfg::D3D12OpticalFlowBackend::nvidia,
+                                                 opticalFlowOptions,
                                                  (flags & VDXRFG_CREATE_GPU_TIMING) != 0);
             if (FAILED(hr)) {
                 if (hr == HRESULT_FROM_WIN32(ERROR_IO_INCOMPLETE)) {
@@ -226,7 +231,8 @@ namespace {
         }
         *result = nullptr;
         if (!info || info->struct_size < sizeof(*info) || info->api_version != VDXRFG_API_VERSION_2 || info->reserved ||
-            (info->flags & ~(VDXRFG_CREATE_GPU_TIMING | VDXRFG_CREATE_HOST_OWNS_REAL))) {
+            (info->flags &
+             ~(VDXRFG_CREATE_GPU_TIMING | VDXRFG_CREATE_HOST_OWNS_REAL | VDXRFG_CREATE_FIDELITYFX_FULL))) {
             return VDXRFG_E_REJECTED;
         }
         return createImpl(&info->base, result, info->flags);
@@ -554,12 +560,16 @@ namespace {
         ++context->generation;
         // Consume old-generation timing before capture serials restart.
         xrfg::D3D12NvidiaGpuTiming discarded{};
-        for (uint32_t i = 0; i < xrfg::D3D12SwapchainHistory::kSlotCount; ++i) {
-            if (context->synthesizer.consume_nvidia_gpu_timing(&discarded) != S_OK) {
+        // Every work slot can hold one cached and one pending sample. A
+        // failed sample is discarded by the core; keep draining the others.
+        for (uint32_t i = 0; i < 2 * xrfg::D3D12SwapchainHistory::kSlotCount; ++i) {
+            if (context->synthesizer.consume_nvidia_gpu_timing(&discarded) == S_FALSE) {
                 break;
             }
         }
         context->lastTimingSerial = 0;
+        context->statistics.last_gpu_us = context->statistics.pack_gpu_us = context->statistics.flow_gpu_us =
+            context->statistics.composition_gpu_us = 0;
         context->previousSerial = 0;
         context->previousTime = 0;
         return S_OK;
@@ -571,9 +581,12 @@ namespace {
             return VDXRFG_E_REJECTED;
         }
         xrfg::D3D12NvidiaGpuTiming timing{};
-        for (uint32_t i = 0; i < xrfg::D3D12SwapchainHistory::kSlotCount &&
-                             context->synthesizer.consume_nvidia_gpu_timing(&timing) == S_OK;
-             ++i) {
+        for (uint32_t i = 0; i < 2 * xrfg::D3D12SwapchainHistory::kSlotCount; ++i) {
+            const auto result = context->synthesizer.consume_nvidia_gpu_timing(&timing);
+            if (result == S_FALSE)
+                break;
+            if (result != S_OK)
+                continue;
             if (timing.previous_serial && timing.current_serial > context->lastTimingSerial) {
                 context->lastTimingSerial = timing.current_serial;
                 context->statistics.last_gpu_us = timing.total_microseconds;
@@ -626,7 +639,7 @@ extern "C" __declspec(dllexport) HRESULT WINAPI VDXRFG_GetApiV2(VDXRFG_ApiV2* ou
     }
     const VDXRFG_ApiV2 api{sizeof(VDXRFG_ApiV2),
                            VDXRFG_API_VERSION_2,
-                           VDXRFG_CREATE_GPU_TIMING | VDXRFG_CREATE_HOST_OWNS_REAL,
+                           VDXRFG_CREATE_GPU_TIMING | VDXRFG_CREATE_HOST_OWNS_REAL | VDXRFG_CREATE_FIDELITYFX_FULL,
                            0,
                            createV2,
                            submit,

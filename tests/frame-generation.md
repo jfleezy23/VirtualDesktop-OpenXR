@@ -13,6 +13,15 @@ game to apply a different FG mode. The selector shows the saved request, not a
 claim that generation is currently active. Changing FG does not reset NR
 settings. Installing the package does not enable FG or change the registry.
 
+The backend selector independently saves `FrameGenerationBackend` in the same
+64-bit registry view: 0 (or absent) is NVIDIA Medium/half, 1 requests FidelityFX
+at full optical-flow input resolution. Both require a game restart. V2 advertises
+the required `VDXRFG_CREATE_FIDELITYFX_FULL` capability without changing any ABI
+layout. A host requesting it rejects V1-only or older V2 modules before GPU
+allocation rather than masking the required flag or retrying NVIDIA. Unsupported
+or malformed saved values disable FG for the session; the real/NR path remains.
+This is an existing color-only backend option, not OFXR's newer DLSS hybrid path.
+
 Turn Virtual Desktop's headset-side SSW off for OFXR tests. Keep any external
 OFXR generation layer off for these comparisons. SSW is a separate 2X mechanism;
 this package adds PC-side 2X and 3X rather than stacking generators.
@@ -57,6 +66,15 @@ change that instrumentation choice. Diagnostic fixtures explicitly request
 timing; ordinary gameplay does not submit timestamp markers or their resolve.
 Zero timing fields in V2 without timing enabled mean unavailable measurements.
 V1-only modules retain their previous timing behavior.
+
+With diagnostic timing enabled, FidelityFX publishes the completed whole
+synthesis span; NVIDIA-only pack/flow/composition subdivisions remain unavailable
+(zero). Only initialized span queries are resolved/read for FidelityFX. Prime and
+other paths without a complete timing resolve never publish pending samples.
+Reset discards both cached and pending samples and clears published timing fields
+until a new pair completes. Polling drains up to six samples (cached plus pending
+for each of three slots), discards failed samples, and retains the newest valid
+completed timing across repeated polls.
 
 V2 also negotiates host-owned real frames. The host already protects and copies
 the real stereo image, so the module omits its unused outer real-image repack.

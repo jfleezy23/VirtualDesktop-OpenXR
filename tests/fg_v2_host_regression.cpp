@@ -24,8 +24,27 @@ int main(int argc, char** argv) {
                                        height,
                                        3,
                                        DXGI_FORMAT_R8G8B8A8_UNORM};
-        info.enableGpuTiming = argc == 4;
+        const std::string option = argc == 4 ? argv[3] : "";
+        info.enableGpuTiming = option == "diagnostics" || option == "ffx-diagnostics";
+        info.useFidelityFxFull = option == "ffx" || option == "ffx-diagnostics" || option == "v1-ffx";
+        const bool legacyOnly = option == "v1" || option == "v1-ffx";
         const auto result = fg.initialize(info);
+        if (legacyOnly || info.useFidelityFxFull) {
+            const bool unsupported = info.useFidelityFxFull && (legacyOnly || mode != 8);
+            check(result == (unsupported ? VDXRFG_E_REJECTED : E_NOTIMPL) && !fg.initialized(),
+                  "explicit backend fails closed or reaches the negotiated Create");
+            check(count(0) == (!unsupported && legacyOnly ? 1u : 0u) &&
+                      count(1) == (!unsupported && !legacyOnly ? 1u : 0u),
+                  "unsupported backend never calls either Create or retries another backend");
+            if (!unsupported && !legacyOnly)
+                check(count(3) == (VDXRFG_CREATE_FIDELITYFX_FULL | VDXRFG_CREATE_HOST_OWNS_REAL |
+                                   (info.enableGpuTiming ? VDXRFG_CREATE_GPU_TIMING : 0u)),
+                      "required full-resolution FidelityFX flag survives optional capability negotiation");
+            success(fg.shutdown(), "shutdown rejected backend request");
+            FreeLibrary(module);
+            std::puts("PASS: explicit backend negotiation and legacy compatibility");
+            return 0;
+        }
         const HRESULT expected = mode == 5 ? E_NOTIMPL : mode == 6 ? VDXRFG_E_POISONED : VDXRFG_E_REJECTED;
         check(result == expected && !fg.initialized(), "bad V2 fails closed without a legacy downgrade");
         check(count(0) == 0 && count(1) == (mode >= 5 ? 1u : 0u), "only accepted V2 invokes modern creation");

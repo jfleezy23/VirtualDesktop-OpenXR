@@ -57,7 +57,12 @@ class ProducerWatchdog {
     }
 };
 
-Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flags) {
+Images generated(HMODULE module,
+                 uint32_t multiplier,
+                 bool legacy,
+                 uint32_t flags,
+                 bool auditPrimeTiming = false,
+                 bool guardFfxQueries = false) {
     const bool hostOwned = !legacy && (flags & VDXRFG_CREATE_HOST_OWNS_REAL);
     Gpu gpu;
     VDXRFG_ApiV1 api{};
@@ -121,7 +126,9 @@ Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flag
     for (UINT bank = 0; bank < 2; ++bank)
         for (UINT role = 0; role < 3; ++role)
             watched[1 + bank * 3 + role] = outputs[bank][role].Get();
-    FgOperationProbe observer(gpu, watched);
+    // NVIDIA may record a marker after recording its resolve, but executes
+    // that marker first. This recording-order guard is FFX-only.
+    FgOperationProbe observer(gpu, watched, guardFfxQueries || (flags & 4u));
     VDXRFG_TicketV1 prime{};
     observer.begin();
     success(api.Submit(context, &info, &prime), "prime history");
@@ -133,6 +140,15 @@ Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flag
           "prime writes B only when the module publishes it");
     check(api.Reset(context, 0) == VDXRFG_E_BUSY && api.Destroy(context) == VDXRFG_E_BUSY,
           "prime remains owned until retire");
+    if (auditPrimeTiming) {
+        VDXRFG_StatisticsV1 stats{};
+        stats.struct_size = sizeof(stats);
+        stats.api_version = 1;
+        observer.begin();
+        success(api.GetStatistics(context, &stats), "prime timing is unavailable");
+        const auto counters = observer.countersOnly();
+        check(!counters.maps && !stats.last_gpu_us, "prime never harvests an unresolved timing sample");
+    }
     gpu.transfer(input.Get(), &b);
     info.serial = 2;
     info.display_time_ns += multiplier * info.display_period_ns;
@@ -145,6 +161,7 @@ Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flag
     success(api.Submit(context, &info, &pair), "synthesize fixed temporal pair");
     const auto operations = observer.end(pair);
     gpu.wait(static_cast<ID3D12Fence*>(pair.output_ready_fence), pair.output_ready_value);
+    check(!operations.uninitializedResolves, "every resolved timestamp was written by the current transaction");
     check(!pair.prime && pair.role_mask == ((multiplier == 3 ? 3u : 1u) | (hostOwned ? 0u : 4u)) &&
               pair.bank != prime.bank,
           "pair role mask and distinct bank");
@@ -212,6 +229,17 @@ Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flag
               "reset prime retains fresh generation and nonreused ownership identity");
         result.resetPrimeOperations = resetOperations;
         gpu.wait(static_cast<ID3D12Fence*>(resetPrime.output_ready_fence), resetPrime.output_ready_value);
+        if (auditPrimeTiming) {
+            VDXRFG_StatisticsV1 stats{};
+            stats.struct_size = sizeof(stats);
+            stats.api_version = 1;
+            observer.begin();
+            success(api.GetStatistics(context, &stats), "reset prime has no complete timing sample");
+            const auto counters = observer.countersOnly();
+            check(!counters.maps && !stats.last_gpu_us && !stats.pack_gpu_us && !stats.flow_gpu_us &&
+                      !stats.composition_gpu_us,
+                  "reset prime never republishes timing from a prior use of its work slot");
+        }
         success(api.Retire(context, resetPrime.token), "retire reset prime before reusing same allocator bank");
         gpu.transfer(input.Get(), &b);
         info.producer_fence = nullptr;
@@ -230,6 +258,63 @@ Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flag
                   "same-bank reuse and reset preserve exact synthetic pixels");
         success(api.Retire(context, reused.token), "retire same-bank pair");
         success(api.Reset(context, 0), "reset context after reused pair");
+    }
+    if (auditPrimeTiming) {
+        for (unsigned cycle = 0; cycle < 4; ++cycle) {
+            // Three work slots can each retain one cached and one pending
+            // sample. Do not poll while building this backlog.
+            for (unsigned frame = 0; frame < 9; ++frame) {
+                gpu.transfer(input.Get(), frame % 2 ? &b : &a);
+                ++info.serial;
+                const auto before = info.display_time_ns;
+                info.display_time_ns += multiplier * info.display_period_ns;
+                for (UINT i = 0; i < multiplier - 1; ++i)
+                    info.target_time_ns[i] = before + (i + 1) * info.display_period_ns;
+                VDXRFG_TicketV1 backlog{};
+                observer.begin();
+                success(api.Submit(context, &info, &backlog), "build unpolled timing backlog");
+                const auto recorded = observer.end(backlog);
+                gpu.wait(static_cast<ID3D12Fence*>(backlog.output_ready_fence), backlog.output_ready_value);
+                check(!recorded.uninitializedResolves, "backlog resolves only initialized timestamps");
+                success(api.Retire(context, backlog.token), "retire unpolled pair");
+            }
+            if (cycle == 0 || cycle == 3) {
+                VDXRFG_StatisticsV1 latest{};
+                latest.struct_size = sizeof(latest);
+                latest.api_version = 1;
+                observer.begin();
+                if (cycle == 3)
+                    observer.failMapAfter(1);
+                success(api.GetStatistics(context, &latest), "poll cached and pending backlog together");
+                const auto firstPoll = observer.countersOnly();
+                check(firstPoll.maps == 3 && firstPoll.failedMaps == (cycle == 3 ? 1u : 0u) && latest.last_gpu_us > 0,
+                      "one poll harvests all three pending samples beyond the three cached samples");
+                auto repeated = latest;
+                observer.begin();
+                success(api.GetStatistics(context, &repeated), "repeat completed timing poll");
+                const auto secondPoll = observer.countersOnly();
+                check(!secondPoll.maps && repeated.last_gpu_us == latest.last_gpu_us &&
+                          repeated.pack_gpu_us == latest.pack_gpu_us && repeated.flow_gpu_us == latest.flow_gpu_us &&
+                          repeated.composition_gpu_us == latest.composition_gpu_us,
+                      "latest completed timing persists without another pending readback");
+            }
+            observer.begin();
+            if (cycle == 2)
+                observer.failMapAfter(1);
+            success(api.Reset(context, 0), "discard cached and pending timing, including a failed readback");
+            const auto drained = observer.countersOnly();
+            check(drained.failedMaps == (cycle == 2 ? 1u : 0u),
+                  "requested reset readback fault was actually exercised");
+            VDXRFG_StatisticsV1 fresh{};
+            fresh.struct_size = sizeof(fresh);
+            fresh.api_version = 1;
+            observer.begin();
+            success(api.GetStatistics(context, &fresh), "poll timing after backlog reset");
+            const auto polled = observer.countersOnly();
+            check(!polled.maps && !fresh.last_gpu_us && !fresh.pack_gpu_us && !fresh.flow_gpu_us &&
+                      !fresh.composition_gpu_us,
+                  "reset drains all old-generation timing and clears published intervals");
+        }
     }
     success(api.Destroy(context), "destroy drained context");
     gpu.noErrors();

@@ -403,6 +403,24 @@ namespace virtualdesktop_openxr {
         m_frameGenerationMode = m_useAsyncSubmission && (requestedFrameGeneration == 2 || requestedFrameGeneration == 3)
                                     ? static_cast<uint32_t>(requestedFrameGeneration)
                                     : 0;
+        // Missing means NVIDIA. A malformed value/read error disables FG;
+        // never silently choose another backend after an explicit request.
+        DWORD backend{}, backendSize = sizeof(backend);
+        const auto backendStatus = RegGetValueW(HKEY_LOCAL_MACHINE,
+                                                xr::utf8_to_wide(RegPrefix).c_str(),
+                                                L"FrameGenerationBackend",
+                                                RRF_SUBKEY_WOW6464KEY | RRF_RT_REG_DWORD,
+                                                nullptr,
+                                                &backend,
+                                                &backendSize);
+        const bool missingBackend = backendStatus == ERROR_FILE_NOT_FOUND || backendStatus == ERROR_PATH_NOT_FOUND;
+        m_frameGenerationBackend = missingBackend ? 0 : backend;
+        if ((!missingBackend && backendStatus != ERROR_SUCCESS) || m_frameGenerationBackend > 1) {
+            ErrorLog("Invalid frame-generation backend setting (status %u, value %u); disabling FG.\n",
+                     static_cast<unsigned>(backendStatus),
+                     static_cast<unsigned>(backend));
+            m_frameGenerationMode = 0;
+        }
 #ifndef _WIN64
         m_frameGenerationMode = 0;
 #endif
