@@ -47,6 +47,11 @@ int main(int argc, char** argv) {
         FreeLibrary(module);
         return 1;
     }
+    if (!(api2.supported_create_flags & VDXRFG_CREATE_FIDELITYFX_FULL)) {
+        fprintf(stderr, "FAIL: optional full-resolution FidelityFX capability missing\n");
+        FreeLibrary(module);
+        return 1;
+    }
     FreeLibrary(module);
     puts("PASS: C11 x64 ABI sizes, offsets and real DLL calling convention");
     return 0;

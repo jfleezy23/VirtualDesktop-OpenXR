@@ -42,6 +42,7 @@ namespace virtualdesktop_openxr {
             uint32_t eyeWidth{}, height{}, multiplier{};
             DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
             bool enableGpuTiming{false};
+            bool useFidelityFxFull{false};
         };
 
         FrameGeneration();

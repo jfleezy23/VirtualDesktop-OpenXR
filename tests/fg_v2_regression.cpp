@@ -17,6 +17,7 @@ struct Images {
     FgOperationCounts operations{};
     FgOperationCounts primeOperations{};
     FgOperationCounts resetPrimeOperations{};
+    std::array<FgOperationCounts, 2> resetCaptureOperations{};
 };
 
 // A CPU-wait regression must fail without stranding the fixture's GPU queue.
@@ -57,9 +58,16 @@ class ProducerWatchdog {
     }
 };
 
-Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flags) {
+Images generated(HMODULE module,
+                 uint32_t multiplier,
+                 bool legacy,
+                 uint32_t flags,
+                 bool auditPrimeTiming = false,
+                 bool guardFfxQueries = false) {
     const bool hostOwned = !legacy && (flags & VDXRFG_CREATE_HOST_OWNS_REAL);
-    Gpu gpu;
+    // Count module calls without debug-layer command-list aliases. Resource
+    // states are checked separately by the mandatory GBV state regression.
+    Gpu gpu(false);
     VDXRFG_ApiV1 api{};
     api.struct_size = sizeof(api);
     api.api_version = 1;
@@ -121,7 +129,9 @@ Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flag
     for (UINT bank = 0; bank < 2; ++bank)
         for (UINT role = 0; role < 3; ++role)
             watched[1 + bank * 3 + role] = outputs[bank][role].Get();
-    FgOperationProbe observer(gpu, watched);
+    // NVIDIA may record a marker after recording its resolve, but executes
+    // that marker first. This recording-order guard is FFX-only.
+    FgOperationProbe observer(gpu, watched, guardFfxQueries || (flags & 4u));
     VDXRFG_TicketV1 prime{};
     observer.begin();
     success(api.Submit(context, &info, &prime), "prime history");
@@ -133,6 +143,15 @@ Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flag
           "prime writes B only when the module publishes it");
     check(api.Reset(context, 0) == VDXRFG_E_BUSY && api.Destroy(context) == VDXRFG_E_BUSY,
           "prime remains owned until retire");
+    if (auditPrimeTiming) {
+        VDXRFG_StatisticsV1 stats{};
+        stats.struct_size = sizeof(stats);
+        stats.api_version = 1;
+        observer.begin();
+        success(api.GetStatistics(context, &stats), "prime timing is unavailable");
+        const auto counters = observer.countersOnly();
+        check(!counters.maps && !stats.last_gpu_us, "prime never harvests an unresolved timing sample");
+    }
     gpu.transfer(input.Get(), &b);
     info.serial = 2;
     info.display_time_ns += multiplier * info.display_period_ns;
@@ -145,6 +164,7 @@ Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flag
     success(api.Submit(context, &info, &pair), "synthesize fixed temporal pair");
     const auto operations = observer.end(pair);
     gpu.wait(static_cast<ID3D12Fence*>(pair.output_ready_fence), pair.output_ready_value);
+    check(!operations.uninitializedResolves, "every resolved timestamp was written by the current transaction");
     check(!pair.prime && pair.role_mask == ((multiplier == 3 ? 3u : 1u) | (hostOwned ? 0u : 4u)) &&
               pair.bank != prime.bank,
           "pair role mask and distinct bank");
@@ -211,7 +231,19 @@ Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flag
                   resetPrime.token > pair.token && resetPrime.generation > pair.generation,
               "reset prime retains fresh generation and nonreused ownership identity");
         result.resetPrimeOperations = resetOperations;
+        result.resetCaptureOperations[cycle] = resetOperations;
         gpu.wait(static_cast<ID3D12Fence*>(resetPrime.output_ready_fence), resetPrime.output_ready_value);
+        if (auditPrimeTiming) {
+            VDXRFG_StatisticsV1 stats{};
+            stats.struct_size = sizeof(stats);
+            stats.api_version = 1;
+            observer.begin();
+            success(api.GetStatistics(context, &stats), "reset prime has no complete timing sample");
+            const auto counters = observer.countersOnly();
+            check(!counters.maps && !stats.last_gpu_us && !stats.pack_gpu_us && !stats.flow_gpu_us &&
+                      !stats.composition_gpu_us,
+                  "reset prime never republishes timing from a prior use of its work slot");
+        }
         success(api.Retire(context, resetPrime.token), "retire reset prime before reusing same allocator bank");
         gpu.transfer(input.Get(), &b);
         info.producer_fence = nullptr;
@@ -230,6 +262,63 @@ Images generated(HMODULE module, uint32_t multiplier, bool legacy, uint32_t flag
                   "same-bank reuse and reset preserve exact synthetic pixels");
         success(api.Retire(context, reused.token), "retire same-bank pair");
         success(api.Reset(context, 0), "reset context after reused pair");
+    }
+    if (auditPrimeTiming) {
+        for (unsigned cycle = 0; cycle < 4; ++cycle) {
+            // Three work slots can each retain one cached and one pending
+            // sample. Do not poll while building this backlog.
+            for (unsigned frame = 0; frame < 9; ++frame) {
+                gpu.transfer(input.Get(), frame % 2 ? &b : &a);
+                ++info.serial;
+                const auto before = info.display_time_ns;
+                info.display_time_ns += multiplier * info.display_period_ns;
+                for (UINT i = 0; i < multiplier - 1; ++i)
+                    info.target_time_ns[i] = before + (i + 1) * info.display_period_ns;
+                VDXRFG_TicketV1 backlog{};
+                observer.begin();
+                success(api.Submit(context, &info, &backlog), "build unpolled timing backlog");
+                const auto recorded = observer.end(backlog);
+                gpu.wait(static_cast<ID3D12Fence*>(backlog.output_ready_fence), backlog.output_ready_value);
+                check(!recorded.uninitializedResolves, "backlog resolves only initialized timestamps");
+                success(api.Retire(context, backlog.token), "retire unpolled pair");
+            }
+            if (cycle == 0 || cycle == 3) {
+                VDXRFG_StatisticsV1 latest{};
+                latest.struct_size = sizeof(latest);
+                latest.api_version = 1;
+                observer.begin();
+                if (cycle == 3)
+                    observer.failMapAfter(1);
+                success(api.GetStatistics(context, &latest), "poll cached and pending backlog together");
+                const auto firstPoll = observer.countersOnly();
+                check(firstPoll.maps == 3 && firstPoll.failedMaps == (cycle == 3 ? 1u : 0u) && latest.last_gpu_us > 0,
+                      "one poll harvests all three pending samples beyond the three cached samples");
+                auto repeated = latest;
+                observer.begin();
+                success(api.GetStatistics(context, &repeated), "repeat completed timing poll");
+                const auto secondPoll = observer.countersOnly();
+                check(!secondPoll.maps && repeated.last_gpu_us == latest.last_gpu_us &&
+                          repeated.pack_gpu_us == latest.pack_gpu_us && repeated.flow_gpu_us == latest.flow_gpu_us &&
+                          repeated.composition_gpu_us == latest.composition_gpu_us,
+                      "latest completed timing persists without another pending readback");
+            }
+            observer.begin();
+            if (cycle == 2)
+                observer.failMapAfter(1);
+            success(api.Reset(context, 0), "discard cached and pending timing, including a failed readback");
+            const auto drained = observer.countersOnly();
+            check(drained.failedMaps == (cycle == 2 ? 1u : 0u),
+                  "requested reset readback fault was actually exercised");
+            VDXRFG_StatisticsV1 fresh{};
+            fresh.struct_size = sizeof(fresh);
+            fresh.api_version = 1;
+            observer.begin();
+            success(api.GetStatistics(context, &fresh), "poll timing after backlog reset");
+            const auto polled = observer.countersOnly();
+            check(!polled.maps && !fresh.last_gpu_us && !fresh.pack_gpu_us && !fresh.flow_gpu_us &&
+                      !fresh.composition_gpu_us,
+                  "reset drains all old-generation timing and clears published intervals");
+        }
     }
     success(api.Destroy(context), "destroy drained context");
     gpu.noErrors();
@@ -277,19 +366,68 @@ void emptyPrimeSubmission(HMODULE module) {
                             prime.submits,
                             prime.listResets,
                             prime.listCloses);
-                check(prime.submits == 4 && prime.listResets + 1 == ordinary.primeOperations.listResets &&
+                check(prime.submits == 3 && prime.listResets + 1 == ordinary.primeOperations.listResets &&
                           prime.listCloses + 1 == ordinary.primeOperations.listCloses,
                       "empty outer prime removes exactly one submission/reset/close and retains backend work");
             }
             check(result.pixels[0] == ordinary.pixels[0] && result.pixels[1] == ordinary.pixels[1],
                   "empty prime elision leaves following generated images exact");
         }
-        check(ordinary.primeOperations.submits == 5 && legacy.primeOperations.submits == 5 &&
-                  ordinary.resetPrimeOperations.submits == 5 && legacy.resetPrimeOperations.submits == 5,
+        check(ordinary.primeOperations.submits == 4 && legacy.primeOperations.submits == 4 &&
+                  ordinary.resetPrimeOperations.submits == 4 && legacy.resetPrimeOperations.submits == 4,
               "V1 and ordinary V2 primes retain actual real-image pack submissions");
         check(ordinary.operations.submits == owned.operations.submits,
               "nonprime submission count is unchanged by empty prime elision");
     }
+}
+
+void directHistoryCapture(HMODULE module) {
+    bool reduced = true;
+    for (uint32_t multiplier : {2u, 3u}) {
+        for (const bool fidelityFx : {false, true}) {
+            for (UINT mode = fidelityFx ? 1u : 0u; mode < 5; ++mode) {
+                const bool legacy = mode == 0;
+                const bool hostOwned = mode >= 3;
+                const bool timed = legacy || mode == 2 || mode == 4;
+                const uint32_t flags = (fidelityFx ? VDXRFG_CREATE_FIDELITYFX_FULL : 0u) |
+                                       (hostOwned ? VDXRFG_CREATE_HOST_OWNS_REAL : 0u) |
+                                       (timed && !legacy ? VDXRFG_CREATE_GPU_TIMING : 0u);
+                const auto result = generated(module, multiplier, legacy, flags);
+                const auto verify = [&](const FgOperationCounts& operations, bool prime, const char* phase) {
+                    std::printf("history %s %uX mode%u %s submits=%u resets=%u closes=%u textureCopies=%u "
+                                "resourceCopies=%u captureCopies=%u\n",
+                                fidelityFx ? "ffx" : "nvidia",
+                                multiplier,
+                                mode,
+                                phase,
+                                operations.submits,
+                                operations.listResets,
+                                operations.listCloses,
+                                operations.copies,
+                                operations.resourceCopies,
+                                operations.captureRegionCopies);
+                    // Removing the normalization list and the following
+                    // whole-resource history copy leaves one owned capture.
+                    // These are literal driver-call budgets, not counters
+                    // supplied by the module under test.
+                    const unsigned submits = prime ? (hostOwned ? 3u : 4u) : (fidelityFx ? 4u : timed ? 6u : 5u);
+                    const unsigned resets =
+                        prime ? (fidelityFx ? (hostOwned ? 3u : 4u) : (hostOwned ? 4u : 5u)) : submits;
+                    const unsigned copies = prime ? (hostOwned ? 2u : 4u) : (multiplier + (hostOwned ? 0u : 1u)) * 2u;
+                    reduced &= operations.submits == submits && operations.listResets == resets &&
+                               operations.listCloses == resets && operations.copies == copies &&
+                               operations.resourceCopies == 1 && operations.captureRegionCopies == 2;
+                };
+                verify(result.primeOperations, true, "prime");
+                verify(result.operations, false, "pair");
+                verify(result.resetCaptureOperations[0], true, "fresh-reset-prime");
+                verify(result.resetCaptureOperations[1], true, "reused-reset-prime");
+            }
+        }
+    }
+    check(reduced,
+          "direct owned history capture removes exactly one full copy and one submission/reset/close, preserving "
+          "both eye-region copies on initial, paired and reset captures");
 }
 
 void hostRealComparison(HMODULE module) {
@@ -398,7 +536,7 @@ void rejectEnvelopes(VDXRFG_GetApiV2Fn get) {
 
 int main(int argc, char** argv) {
     try {
-        check(argc == 2 || argc == 3, "module path and optional barriers/prime/capture mode required");
+        check(argc == 2 || argc == 3, "module path and optional barriers/prime/capture/history mode required");
         HMODULE module =
             LoadLibraryExA(argv[1], nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
         check(module != nullptr, "load real module");
@@ -406,7 +544,8 @@ int main(int argc, char** argv) {
         check(get != nullptr, "module publishes optional creation and diagnostic negotiation");
         rejectEnvelopes(get);
         const std::string mode = argc == 3 ? argv[2] : "all";
-        check(mode == "all" || mode == "barriers" || mode == "prime" || mode == "capture", "recognized test mode");
+        check(mode == "all" || mode == "barriers" || mode == "prime" || mode == "capture" || mode == "history",
+              "recognized test mode");
         if (mode == "all" || mode == "capture") {
             timingComparison(module);
             hostRealComparison(module);
@@ -415,6 +554,8 @@ int main(int argc, char** argv) {
             barrierBatching(module);
         if (mode == "all" || mode == "prime")
             emptyPrimeSubmission(module);
+        if (mode == "all" || mode == "history")
+            directHistoryCapture(module);
         FreeLibrary(module);
         std::puts("PASS: optional creation negotiation");
         return 0;

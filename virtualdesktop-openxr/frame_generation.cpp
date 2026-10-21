@@ -1,4 +1,5 @@
 #include "frame_generation.h"
+#include "FrameGenerationCopyCS.h"
 
 #include <dxgi1_2.h>
 
@@ -9,6 +10,28 @@
 
 namespace virtualdesktop_openxr {
     using Microsoft::WRL::ComPtr;
+
+    namespace {
+        struct BgraCopy {
+            ComPtr<ID3D11Texture2D> source, output;
+            ComPtr<ID3D11ShaderResourceView> srv;
+            ComPtr<ID3D11UnorderedAccessView> uav;
+            ComPtr<ID3D11ComputeShader> shader;
+            ComPtr<ID3DDeviceContextState> contextState;
+            HRESULT initialize(const FrameGeneration::InitInfo& info) noexcept;
+            void copy(ID3D11DeviceContext4* context,
+                      ID3D11Texture2D* destination,
+                      uint32_t eyeWidth,
+                      uint32_t bgraMask,
+                      const std::array<ComPtr<ID3D11Texture2D>, 2>& sources,
+                      const std::array<VDXRFG_ViewV1, 2>& views) const;
+        };
+
+        bool isBgra(DXGI_FORMAT format) {
+            return format == DXGI_FORMAT_B8G8R8A8_TYPELESS || format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                   format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+        }
+    } // namespace
 
     struct FrameGeneration::State {
         HMODULE module{};
@@ -33,6 +56,8 @@ namespace virtualdesktop_openxr {
         std::array<std::array<ComPtr<ID3D11Texture2D>, 3>, 2> retainedDestinations;
         std::array<std::array<ComPtr<ID3D11Texture2D>, 2>, 2> capturedSources;
         std::array<std::array<VDXRFG_ViewV1, 2>, 2> capturedViews{};
+        std::array<uint32_t, 2> capturedBgraMask{};
+        BgraCopy bgra;
         std::array<ComPtr<ID3D11Texture2D>, 2> producerSources;
         uint64_t generation{};
         uint64_t producerValue{}, consumerValue{}, consumedValue{}, previousSerial{};
@@ -118,6 +143,87 @@ namespace virtualdesktop_openxr {
                 }
             }
         }
+
+        HRESULT BgraCopy::initialize(const FrameGeneration::InitInfo& info) noexcept {
+            if (shader) {
+                return S_OK;
+            }
+            BgraCopy candidate;
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = info.eyeWidth;
+            desc.Height = info.height;
+            desc.ArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+            desc.Format = DXGI_FORMAT_B8G8R8A8_TYPELESS;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            HRESULT hr = info.device11->CreateTexture2D(&desc, nullptr, &candidate.source);
+            if (FAILED(hr))
+                return hr;
+            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            srvDesc.Texture2D.MipLevels = 1;
+            hr = info.device11->CreateShaderResourceView(candidate.source.Get(), &srvDesc, &candidate.srv);
+            if (FAILED(hr))
+                return hr;
+            desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+            hr = info.device11->CreateTexture2D(&desc, nullptr, &candidate.output);
+            if (FAILED(hr))
+                return hr;
+            hr = info.device11->CreateUnorderedAccessView(candidate.output.Get(), nullptr, &candidate.uav);
+            if (FAILED(hr))
+                return hr;
+            hr = info.device11->CreateComputeShader(
+                g_FrameGenerationCopyCS, sizeof(g_FrameGenerationCopyCS), nullptr, &candidate.shader);
+            if (FAILED(hr))
+                return hr;
+            const auto level = info.device11->GetFeatureLevel();
+            const auto flags = (info.device11->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED)
+                                   ? D3D11_1_CREATE_DEVICE_CONTEXT_STATE_SINGLETHREADED
+                                   : 0u;
+            hr = info.device11->CreateDeviceContextState(
+                flags, &level, 1, D3D11_SDK_VERSION, __uuidof(ID3D11Device), nullptr, &candidate.contextState);
+            if (FAILED(hr))
+                return hr;
+            *this = std::move(candidate);
+            return S_OK;
+        }
+
+        void BgraCopy::copy(ID3D11DeviceContext4* context,
+                            ID3D11Texture2D* destination,
+                            uint32_t eyeWidth,
+                            uint32_t bgraMask,
+                            const std::array<ComPtr<ID3D11Texture2D>, 2>& sources,
+                            const std::array<VDXRFG_ViewV1, 2>& views) const {
+            // One eye-sized cache also supports different source families in
+            // the two eyes, with no per-frame views, constants or CPU waits.
+            struct Restore {
+                ID3D11DeviceContext4* context;
+                ComPtr<ID3DDeviceContextState> saved;
+                ~Restore() {
+                    context->SwapDeviceContextState(saved.Get(), nullptr);
+                }
+            } restore{context};
+            context->SwapDeviceContextState(contextState.Get(), &restore.saved);
+            for (uint32_t eye = 0; eye < 2; ++eye) {
+                const auto& rect = views[eye].rect;
+                const D3D11_BOX box{rect.x, rect.y, 0, rect.x + rect.width, rect.y + rect.height, 1};
+                if (!(bgraMask & (1u << eye))) {
+                    context->CopySubresourceRegion(destination, 0, eye * eyeWidth, 0, 0, sources[eye].Get(), 0, &box);
+                    continue;
+                }
+                context->CopySubresourceRegion(source.Get(), 0, 0, 0, 0, sources[eye].Get(), 0, &box);
+                context->CSSetShader(shader.Get(), nullptr, 0);
+                context->CSSetShaderResources(0, 1, srv.GetAddressOf());
+                context->CSSetUnorderedAccessViews(0, 1, uav.GetAddressOf(), nullptr);
+                context->Dispatch((eyeWidth + 15) / 16, (rect.height + 15) / 16, 1);
+                ID3D11ShaderResourceView* nullSrv{};
+                ID3D11UnorderedAccessView* nullUav{};
+                context->CSSetShaderResources(0, 1, &nullSrv);
+                context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+                context->CopySubresourceRegion(destination, 0, eye * eyeWidth, 0, 0, output.Get(), 0, nullptr);
+            }
+        }
     } // namespace
 
     FrameGeneration::FrameGeneration() = default;
@@ -200,6 +306,12 @@ namespace virtualdesktop_openxr {
                 state->api.GetStatistics = api2.GetStatistics;
                 state->api.Destroy = api2.Destroy;
             }
+            // Backend choice is required, unlike optional diagnostics/real
+            // ownership. An old module must not silently substitute NVIDIA.
+            if (info.useFidelityFxFull &&
+                (!getApi2 || !(api2.supported_create_flags & VDXRFG_CREATE_FIDELITYFX_FULL))) {
+                return VDXRFG_E_REJECTED;
+            }
             D3D12_COMMAND_QUEUE_DESC queue{};
             hr = info.device12->CreateCommandQueue(&queue, IID_PPV_ARGS(&state->queue));
             if (FAILED(hr)) {
@@ -273,6 +385,8 @@ namespace virtualdesktop_openxr {
                 const uint32_t requested =
                     VDXRFG_CREATE_HOST_OWNS_REAL | (info.enableGpuTiming ? VDXRFG_CREATE_GPU_TIMING : 0u);
                 options.flags = api2.supported_create_flags & requested;
+                if (info.useFidelityFxFull)
+                    options.flags |= VDXRFG_CREATE_FIDELITYFX_FULL;
                 state->hostOwnsReal = (options.flags & VDXRFG_CREATE_HOST_OWNS_REAL) != 0;
                 // V2 gameplay defaults to no GPU timing; diagnostic callers opt
                 // in before creation. V1-only modules retain their defaults.
@@ -327,6 +441,7 @@ namespace virtualdesktop_openxr {
         submit.display_time_ns = input.time;
         submit.display_period_ns = input.period;
         D3D11_TEXTURE2D_DESC description{};
+        uint32_t bgraMask{};
         for (uint32_t eye = 0; eye < 2; ++eye) {
             const auto& view = input.views[eye];
             const auto& rect = view.rect;
@@ -344,14 +459,17 @@ namespace virtualdesktop_openxr {
             // Runtime-resolved array slice zero can alias the app array; its
             // selected image is subresource zero. Higher slices are resolved
             // to standalone images before reaching this interface.
+            const bool eyeBgra = isBgra(description.Format);
             if (description.SampleDesc.Count != 1 || !description.ArraySize || !rect.width || !rect.height ||
                 rect.width != state.info.eyeWidth || rect.height != state.info.height ||
                 uint64_t(rect.x) + rect.width > description.Width ||
                 uint64_t(rect.y) + rect.height > description.Height ||
-                (description.Format != DXGI_FORMAT_R8G8B8A8_TYPELESS && description.Format != state.info.format &&
-                 description.Format != DXGI_FORMAT_R8G8B8A8_UNORM)) {
+                (!eyeBgra && description.Format != DXGI_FORMAT_R8G8B8A8_TYPELESS &&
+                 description.Format != state.info.format && description.Format != DXGI_FORMAT_R8G8B8A8_UNORM)) {
                 return VDXRFG_E_REJECTED;
             }
+            if (eyeBgra)
+                bgraMask |= 1u << eye;
             submit.views[eye] = view;
             submit.views[eye].rect.x = eye * state.info.eyeWidth;
             submit.views[eye].rect.y = 0;
@@ -391,6 +509,13 @@ namespace virtualdesktop_openxr {
                 submit.fractions[slot] = input.slots.fractions[slot];
             }
         }
+        if (bgraMask) {
+            const auto result = state.bgra.initialize(state.info);
+            // No GPU work or history change occurred. Optional conversion
+            // allocation failure must preserve the complete real-frame path.
+            if (FAILED(result))
+                return VDXRFG_E_REJECTED;
+        }
         if (input.slots.count == 1 && state.previousSerial) {
             const auto resetResult = state.api.Reset(state.context, 0);
             if (FAILED(resetResult)) {
@@ -408,7 +533,12 @@ namespace virtualdesktop_openxr {
             }
         }
         state.producerSources = input.colour;
-        copyStereo(state.context11.Get(), state.input11.Get(), state.info.eyeWidth, input.colour, input.views);
+        if (bgraMask) {
+            state.bgra.copy(
+                state.context11.Get(), state.input11.Get(), state.info.eyeWidth, bgraMask, input.colour, input.views);
+        } else {
+            copyStereo(state.context11.Get(), state.input11.Get(), state.info.eyeWidth, input.colour, input.views);
+        }
         submit.producer_value = ++state.producerValue;
         HRESULT hr = state.context11->Signal(state.producer11.Get(), submit.producer_value);
         if (FAILED(hr)) {
@@ -428,6 +558,7 @@ namespace virtualdesktop_openxr {
             state.tickets[transaction.ticket.bank] = transaction.ticket;
             state.capturedSources[transaction.ticket.bank] = input.colour;
             state.capturedViews[transaction.ticket.bank] = input.views;
+            state.capturedBgraMask[transaction.ticket.bank] = bgraMask;
         }
         if (FAILED(hr)) {
             state.poisoned = hr == VDXRFG_E_POISONED;
@@ -574,7 +705,10 @@ namespace virtualdesktop_openxr {
             }
         }
         HRESULT hr = S_OK;
-        if (role != FrameGenerationRole::real) {
+        if (role != FrameGenerationRole::real && !state.roleConsumerValues[ticket.bank][0] &&
+            !state.roleConsumerValues[ticket.bank][1]) {
+            // One queued wait orders both synthetic copies on this context.
+            // Only this live ticket's prepared synthetic roles prove it exists.
             hr = state.context11->Wait(state.ready11.Get(), ticket.output_ready_value);
             if (FAILED(hr)) {
                 state.poisoned = state.hostCompletionUnknown = true;
@@ -587,11 +721,20 @@ namespace virtualdesktop_openxr {
             // B is already finalized by NR, sharpening and upscaling. Reading
             // that retained source avoids waiting for synthesis just to fall
             // back to the real frame. It still obeys the producer's NR fence.
-            copyStereo(state.context11.Get(),
-                       destination,
-                       state.info.eyeWidth,
-                       state.capturedSources[transaction.ticket.bank],
-                       state.capturedViews[transaction.ticket.bank]);
+            if (state.capturedBgraMask[transaction.ticket.bank]) {
+                state.bgra.copy(state.context11.Get(),
+                                destination,
+                                state.info.eyeWidth,
+                                state.capturedBgraMask[transaction.ticket.bank],
+                                state.capturedSources[transaction.ticket.bank],
+                                state.capturedViews[transaction.ticket.bank]);
+            } else {
+                copyStereo(state.context11.Get(),
+                           destination,
+                           state.info.eyeWidth,
+                           state.capturedSources[transaction.ticket.bank],
+                           state.capturedViews[transaction.ticket.bank]);
+            }
         } else {
             state.context11->CopyResource(destination, state.outputs11[transaction.ticket.bank][index].Get());
         }

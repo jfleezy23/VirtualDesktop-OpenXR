@@ -95,6 +95,10 @@ typedef HRESULT(WINAPI* VDXRFG_GetApiV1Fn)(VDXRFG_ApiV1*) VDXRFG_NOEXCEPT;
  * presents its independently protected real source. Prime still owns work
  * and fences with mask 0; 2X/3X pairs publish masks 1/3 respectively. */
 #define VDXRFG_CREATE_HOST_OWNS_REAL 2u
+/* Explicit alternative: FidelityFX optical flow at full per-eye input
+ * resolution. Absence keeps NVIDIA Medium/50%. Hosts must require this
+ * capability when selected; never silently mask it away or retry NVIDIA. */
+#define VDXRFG_CREATE_FIDELITYFX_FULL 4u
 
 typedef struct VDXRFG_CreateInfoV2 {
     uint32_t struct_size, api_version;

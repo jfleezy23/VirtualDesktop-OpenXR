@@ -37,28 +37,31 @@ namespace virtualdesktop_openxr {
             return result;
         }
         const int64_t interval = reservation.currentTarget - previousTime;
-        // Pinned GPU core clamps fractions outside (0.05,0.95). A discontinuity
-        // is a real-frame bypass; never silently accept its clamped fraction.
-        // OVR seconds and the physical period are independently quantized to
-        // nanoseconds. At 120Hz, 3P truncates to 24,999,999ns while the real
-        // endpoint interval is 25,000,000ns. Accept only that rounding budget;
-        // fractions below still come from the actual reserved endpoints.
-        const auto difference = interval - reservation.multiplier * reservation.period;
-        const auto roundingBudget = static_cast<int64_t>(reservation.multiplier) + 1;
-        if (difference < -roundingBudget || difference > roundingBudget) {
-            return result;
-        }
-        result.count = reservation.multiplier;
-        for (uint32_t slot = 0; slot < result.count; ++slot) {
-            result.targets[slot] = reservation.firstTarget + slot * reservation.period;
-            result.roles[slot] = slot == result.count - 1
-                                     ? FrameGenerationRole::real
-                                     : (slot == 0 ? FrameGenerationRole::synthetic1 : FrameGenerationRole::synthetic2);
-            if (slot < result.count - 1) {
-                result.fractions[slot] = static_cast<float>(result.targets[slot] - previousTime) / interval;
+        // SDK predictions and real game frames need not be an exact multiple
+        // of the native period. Preserve the reserved slots and interpolate
+        // from their actual source endpoints, within the pinned core's range.
+        // Validate a separate candidate so rejection preserves only real B.
+        auto candidate = result;
+        for (uint32_t slot = 0; slot < reservation.multiplier; ++slot) {
+            candidate.targets[slot] = reservation.firstTarget + slot * reservation.period;
+            candidate.roles[slot] = slot == reservation.multiplier - 1 ? FrameGenerationRole::real
+                                                                       : (slot == 0 ? FrameGenerationRole::synthetic1
+                                                                                    : FrameGenerationRole::synthetic2);
+            if (slot < reservation.multiplier - 1) {
+                const auto target = candidate.targets[slot];
+                if (target <= previousTime || target >= reservation.currentTarget ||
+                    (slot && target <= candidate.targets[slot - 1])) {
+                    return result;
+                }
+                const float fraction = static_cast<float>(target - previousTime) / interval;
+                if (fraction <= .05f || fraction >= .95f) {
+                    return result;
+                }
+                candidate.fractions[slot] = fraction;
             }
         }
-        return result;
+        candidate.count = reservation.multiplier;
+        return candidate;
     }
 
     bool FrameGenerationCadence::onTime(const FrameGenerationSlotPlan& plan, int64_t now) const noexcept {

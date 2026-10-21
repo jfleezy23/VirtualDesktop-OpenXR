@@ -40,9 +40,9 @@ struct Gpu {
     uint64_t nextFence{1};
     bool debugEnabled{};
 
-    Gpu() {
+    explicit Gpu(bool enableValidation = true) {
         ComPtr<ID3D12Debug> debug;
-        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
+        if (enableValidation && SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
             debug->EnableDebugLayer();
             debugEnabled = true;
         }

@@ -44,6 +44,7 @@ extern "C" __declspec(dllexport) HRESULT WINAPI VDXRFG_GetApiV1(VDXRFG_ApiV1* ou
     *output = {sizeof(*output), 1, legacy, submit, retire, reset, stats, destroy};
     return S_OK;
 }
+#ifndef VDXRFG_TEST_V1_ONLY
 extern "C" __declspec(dllexport) HRESULT WINAPI VDXRFG_GetApiV2(VDXRFG_ApiV2* output) noexcept {
     *output = {sizeof(*output), 2, VDXRFG_CREATE_GPU_TIMING, 0, modern, submit, retire, reset, stats, destroy};
     switch (mode) {
@@ -61,6 +62,10 @@ extern "C" __declspec(dllexport) HRESULT WINAPI VDXRFG_GetApiV2(VDXRFG_ApiV2* ou
     case 4:
         output->Submit = nullptr;
         break;
+    case 8:
+        output->supported_create_flags |= VDXRFG_CREATE_FIDELITYFX_FULL | VDXRFG_CREATE_HOST_OWNS_REAL;
+        break;
     }
     return S_OK;
 }
+#endif

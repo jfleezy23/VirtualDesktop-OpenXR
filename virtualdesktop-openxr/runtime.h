@@ -894,6 +894,7 @@ namespace virtualdesktop_openxr {
         std::chrono::high_resolution_clock::time_point m_lastWaitToBeginFrameTime{};
 
         uint32_t m_frameGenerationMode{};
+        uint32_t m_frameGenerationBackend{};
         ComPtr<ID3D12Device> m_fgDevice;
         ComPtr<ID3D11Fence> m_fgSourceFence11;
         ComPtr<ID3D12Fence> m_fgSourceFence12;

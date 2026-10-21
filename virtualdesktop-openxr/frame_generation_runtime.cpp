@@ -7,8 +7,9 @@ namespace virtualdesktop_openxr {
 
     bool OpenXrRuntime::prepareFrameGeneration(const XrFrameEndInfo& info) {
         const auto& settings = m_precompositor.dlssnrSettings;
-        const auto bypass = [&] {
-            m_fgDesiredMultiplier = 1;
+        const auto bypass = [&](bool temporary = false) {
+            // Live history pressure must not shorten the next recovery prime.
+            m_fgDesiredMultiplier = temporary ? m_frameGenerationMode : 1;
             m_fgPreviousCapturedTime = 0;
             m_frameGenerationCadence.reset();
             if (m_frameGeneration && m_frameGeneration->initialized()) {
@@ -60,7 +61,8 @@ namespace virtualdesktop_openxr {
         m_precompositor.finalColour[0]->GetDesc(&texture);
         DXGI_FORMAT format = m_precompositor.isProj0SRGB ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
         if (texture.Format != DXGI_FORMAT_R8G8B8A8_TYPELESS && texture.Format != format &&
-            texture.Format != DXGI_FORMAT_R8G8B8A8_UNORM) {
+            texture.Format != DXGI_FORMAT_R8G8B8A8_UNORM && texture.Format != DXGI_FORMAT_B8G8R8A8_TYPELESS &&
+            texture.Format != DXGI_FORMAT_B8G8R8A8_UNORM && texture.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) {
             return bypass();
         }
         if (m_frameGeneration &&
@@ -132,6 +134,7 @@ namespace virtualdesktop_openxr {
             // Start the ETW capture before launching the game. Avoid changing
             // instrumentation or recreating the GPU backend during gameplay.
             init.enableGpuTiming = IsTraceEnabled();
+            init.useFidelityFxFull = m_frameGenerationBackend == 1;
             const auto result = m_frameGeneration->initialize(init);
             if (FAILED(result)) {
                 if (result == VDXRFG_E_POISONED) {
@@ -139,7 +142,8 @@ namespace virtualdesktop_openxr {
                     CHECK_HRCMD(result);
                 }
                 m_frameGenerationUnavailable = true;
-                ErrorLog("Frame generation unavailable (0x%08x); preserving the NR path.\n",
+                ErrorLog("Frame generation unavailable (backend %s, 0x%08x); preserving the real-frame path.\n",
+                         init.useFidelityFxFull ? "FidelityFX full" : "NVIDIA",
                          static_cast<unsigned>(result));
                 return bypass();
             }
@@ -166,7 +170,7 @@ namespace virtualdesktop_openxr {
              settings.foveationSize != previous.foveationSize)) {
             const auto result = m_frameGeneration->reset(1);
             if (result == VDXRFG_E_BUSY) {
-                return bypass();
+                return bypass(true);
             }
             CHECK_HRCMD(result);
             m_fgPreviousCapturedTime = 0;
@@ -202,8 +206,17 @@ namespace virtualdesktop_openxr {
                          static_cast<uint32_t>(rect.Size.h)};
         }
         const auto result = m_frameGeneration->capture(input, m_fgTransactionForFrame);
+        TraceLoggingWrite(log::g_traceProvider,
+                          "FG_Capture",
+                          TLArg(input.serial, "Serial"),
+                          TLArg(m_frameGenerationMode, "RequestedMultiplier"),
+                          TLArg(m_fgBegunReservation.multiplier, "ReservedMultiplier"),
+                          TLArg(input.slots.count, "Slots"),
+                          TLArg(input.time, "Target"),
+                          TLArg(m_fgPreviousCapturedTime, "PreviousTarget"),
+                          TLArg(static_cast<int>(result), "Result"));
         if (result == VDXRFG_E_BUSY || result == VDXRFG_E_REJECTED) {
-            return bypass();
+            return bypass(result == VDXRFG_E_BUSY);
         }
         CHECK_HRCMD(result);
         if (!settings.enabled) {
@@ -571,6 +584,9 @@ namespace virtualdesktop_openxr {
                     TraceLoggingWrite(log::g_traceProvider,
                                       "FG_Present",
                                       TLArg(nativeId, "NativeId"),
+                                      TLArg(transaction.ticket.current_serial, "Serial"),
+                                      TLArg(slot, "Slot"),
+                                      TLArg(cycles, "Slots"),
                                       TLArg(generated && slot < cycles - 1, "Synthetic"),
                                       TLArg(!generated && slot < cycles - 1, "PaddingRepeat"),
                                       TLArg(static_cast<int>(result), "Result"));
