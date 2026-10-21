@@ -72,6 +72,8 @@ def main():
                          "invalid-rect", "invalid-pose", "wrong-device"):
             module_case("pack-" + scenario, "nr_fg_pack_regression", module, scenario)
     if args.suite in {"lifecycle", "all"}:
+        for scenario in ("all", "wait-failure"):
+            module_case("ready-wait-" + scenario, "nr_fg_ready_wait_regression", module, scenario)
         for scenario in ("removed", "event-failure", "wait-failure", "stale-wake"):
             module_case("event-" + scenario, "nr_fg_event_regression", module, scenario)
         for scenario in ("timeout", "event-failure", "stale-wake", "removed", "invalid", "next"):

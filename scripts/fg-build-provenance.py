@@ -24,7 +24,7 @@ def snapshot(repo, kind):
         for name in ("frame_generation", "frame_generation_pacing"):
             paths.update((repo / "virtualdesktop-openxr" / (name + suffix)) for suffix in (".cpp", ".h"))
         paths.update((repo / "tests").glob("fg_*.*"))
-        paths.update(repo / "tests" / (name + ".cpp") for name in ("nr_fg_integration_regression", "nr_fg_presenter_regression", "nr_fg_event_regression", "nr_fg_ready_regression", "nr_fg_pack_regression", "nr_fg_bgra_regression"))
+        paths.update(repo / "tests" / (name + ".cpp") for name in ("nr_fg_integration_regression", "nr_fg_presenter_regression", "nr_fg_event_regression", "nr_fg_ready_regression", "nr_fg_ready_wait_regression", "nr_fg_pack_regression", "nr_fg_bgra_regression"))
         paths.add(repo / "virtualdesktop-openxr/FrameGenerationCopyCS.hlsl")
     for name in ("Experimental-MSVC145.props", "prepare-fg-vendor.py", "fg-build-provenance.py"):
         if (repo / "scripts" / name).is_file():

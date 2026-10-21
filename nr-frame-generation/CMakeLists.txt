@@ -114,6 +114,22 @@ if(BUILD_TESTING)
         set_tests_properties(fg_host_${OPTION} PROPERTIES TIMEOUT 60 PASS_REGULAR_EXPRESSION "PASS:")
     endforeach()
 
+    add_executable(nr_fg_ready_wait_regression ../tests/nr_fg_ready_wait_regression.cpp
+        ../virtualdesktop-openxr/frame_generation.cpp ../virtualdesktop-openxr/frame_generation_pacing.cpp)
+    target_include_directories(nr_fg_ready_wait_regression PRIVATE include ../packages/Detours.4.0.1/lib/native/include)
+    target_compile_features(nr_fg_ready_wait_regression PRIVATE cxx_std_17)
+    target_compile_definitions(nr_fg_ready_wait_regression PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(nr_fg_ready_wait_regression PRIVATE d3d11 d3d12 dxgi
+        "${CMAKE_CURRENT_SOURCE_DIR}/../packages/Detours.4.0.1/lib/native/libs/x64/detours.lib")
+    foreach(BACKEND nvidia fidelityfx-full)
+        foreach(SCENARIO all wait-failure)
+            add_test(NAME fg_ready_wait_${BACKEND}_${SCENARIO}
+                COMMAND nr_fg_ready_wait_regression "$<TARGET_FILE:vdxr_frame_generation>" ${SCENARIO})
+            set_tests_properties(fg_ready_wait_${BACKEND}_${SCENARIO} PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE
+                ENVIRONMENT "VDXR_FG_TEST_BACKEND=${BACKEND}" PASS_REGULAR_EXPRESSION "PASS:")
+        endforeach()
+    endforeach()
+
     add_executable(fg_v2_regression ../tests/fg_v2_regression.cpp)
     target_compile_features(fg_v2_regression PRIVATE cxx_std_20)
     target_include_directories(fg_v2_regression PRIVATE include)
@@ -263,7 +279,7 @@ if(BUILD_TESTING)
         endforeach()
     endforeach()
     foreach(HOST fg_v2_host_regression nr_fg_integration_regression nr_fg_pack_regression
-            nr_fg_event_regression nr_fg_ready_regression nr_fg_bgra_regression)
+            nr_fg_event_regression nr_fg_ready_regression nr_fg_ready_wait_regression nr_fg_bgra_regression)
         add_dependencies(${HOST} fg_host_shader)
         target_include_directories(${HOST} PRIVATE "${GENERATED}")
     endforeach()

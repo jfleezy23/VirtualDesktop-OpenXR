@@ -705,7 +705,10 @@ namespace virtualdesktop_openxr {
             }
         }
         HRESULT hr = S_OK;
-        if (role != FrameGenerationRole::real) {
+        if (role != FrameGenerationRole::real && !state.roleConsumerValues[ticket.bank][0] &&
+            !state.roleConsumerValues[ticket.bank][1]) {
+            // One queued wait orders both synthetic copies on this context.
+            // Only this live ticket's prepared synthetic roles prove it exists.
             hr = state.context11->Wait(state.ready11.Get(), ticket.output_ready_value);
             if (FAILED(hr)) {
                 state.poisoned = state.hostCompletionUnknown = true;
