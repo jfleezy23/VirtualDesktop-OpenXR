@@ -164,7 +164,7 @@ namespace {
                     hr = device->CreateCommittedResource(&heap,
                                                          D3D12_HEAP_FLAG_NONE,
                                                          &isolatedDescription,
-                                                         D3D12_RESOURCE_STATE_COMMON,
+                                                         D3D12_RESOURCE_STATE_RENDER_TARGET,
                                                          nullptr,
                                                          IID_PPV_ARGS(&context->isolatedOutputs[bank][role]));
                     if (FAILED(hr)) {
@@ -193,7 +193,7 @@ namespace {
                                                  current,
                                                  std::span<ID3D12Resource* const>(synthetic.data(), syntheticCount),
                                                  static_cast<DXGI_FORMAT>(info->format),
-                                                 D3D12_RESOURCE_STATE_COMMON,
+                                                 D3D12_RESOURCE_STATE_RENDER_TARGET,
                                                  fidelityFxFull ? xrfg::D3D12OpticalFlowBackend::fidelity_fx
                                                                 : xrfg::D3D12OpticalFlowBackend::nvidia,
                                                  opticalFlowOptions,
@@ -460,7 +460,7 @@ namespace {
                 packBarriers[packBarrierCount++] = transition(
                     context->outputs[bank][role].Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
                 packBarriers[packBarrierCount++] = transition(context->isolatedOutputs[bank][role].Get(),
-                                                              D3D12_RESOURCE_STATE_COMMON,
+                                                              D3D12_RESOURCE_STATE_RENDER_TARGET,
                                                               D3D12_RESOURCE_STATE_COPY_SOURCE);
             }
             if (packBarrierCount) {

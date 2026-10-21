@@ -14,7 +14,7 @@ class FullInputProbe {
                                                REFIID,
                                                void**);
     inline static FullInputProbe* active{};
-    Gpu gpu;
+    Gpu gpu{false}; // Match the native-operation fixture before any device enables validation.
     Create original{};
     const DWORD thread = GetCurrentThreadId();
     unsigned packed{}, halfPacked{};

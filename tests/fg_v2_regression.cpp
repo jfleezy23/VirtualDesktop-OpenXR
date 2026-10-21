@@ -64,7 +64,7 @@ Images generated(HMODULE module,
                  bool auditPrimeTiming = false,
                  bool guardFfxQueries = false) {
     const bool hostOwned = !legacy && (flags & VDXRFG_CREATE_HOST_OWNS_REAL);
-    Gpu gpu;
+    Gpu gpu(false);
     VDXRFG_ApiV1 api{};
     api.struct_size = sizeof(api);
     api.api_version = 1;

@@ -7,6 +7,7 @@
 struct FgOperationCounts {
     unsigned submits{}, waits{}, copies{}, queries{}, resolves{}, maps{}, failedMaps{}, uninitializedResolves{};
     unsigned listResets{}, listCloses{}, outerBarrierCalls{}, outerTransitions{}, outerCopies{};
+    unsigned resourceCopies{}, captureRegionCopies{};
 };
 
 class FgOperationProbe {
@@ -25,6 +26,7 @@ class FgOperationProbe {
                                           UINT,
                                           const D3D12_TEXTURE_COPY_LOCATION*,
                                           const D3D12_BOX*);
+    using CopyResource = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12Resource*, ID3D12Resource*);
     using Query = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12QueryHeap*, D3D12_QUERY_TYPE, UINT);
     using Resolve = void(STDMETHODCALLTYPE*)(
         ID3D12GraphicsCommandList*, ID3D12QueryHeap*, D3D12_QUERY_TYPE, UINT, UINT, ID3D12Resource*, UINT64);
@@ -39,6 +41,7 @@ class FgOperationProbe {
     Close close{};
     Barrier barrier{};
     Copy copy{};
+    CopyResource copyResource{};
     Query query{};
     Resolve resolve{};
     Map map{};
@@ -70,6 +73,9 @@ class FgOperationProbe {
     std::array<ID3D12CommandList*, 64> executed{};
     size_t executedCount{};
     unsigned queueOrder{}, firstExecuteOrder{}, lastExecuteOrder{};
+    ID3D12Resource* captureDestination{};
+    unsigned captureSlices{};
+    bool validCaptureCopies{true};
 
     void record(const Event& event) {
         if (eventCount == events.size()) {
@@ -146,6 +152,28 @@ class FgOperationProbe {
         if (active->watches()) {
             ++active->counts.copies;
             active->record({list, {}, src->pResource, dst->pResource});
+            if (src->pResource == active->atlases[0]) {
+                const auto input = src->pResource->GetDesc();
+                const auto output = dst->pResource->GetDesc();
+                const UINT slice = dst->SubresourceIndex;
+                ++active->counts.captureRegionCopies;
+                active->validCaptureCopies &=
+                    src->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX && src->SubresourceIndex == 0 &&
+                    dst->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX && slice < 2 && !x && !y && !z && box &&
+                    input.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && input.DepthOrArraySize == 1 &&
+                    output.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && output.DepthOrArraySize == 2 &&
+                    output.Width * 2 == input.Width && output.Height == input.Height && output.Format == input.Format;
+                if (slice < 2 && box) {
+                    active->validCaptureCopies &= !(active->captureSlices & (1u << slice)) &&
+                                                  box->left == slice * output.Width &&
+                                                  box->right == (slice + 1) * output.Width && box->top == 0 &&
+                                                  box->bottom == output.Height && box->front == 0 && box->back == 1;
+                    active->captureSlices |= 1u << slice;
+                }
+                if (active->captureDestination)
+                    active->validCaptureCopies &= active->captureDestination == dst->pResource;
+                active->captureDestination = dst->pResource;
+            }
             for (auto atlas : active->atlases) {
                 if (atlas && (src->pResource == atlas || dst->pResource == atlas)) {
                     if (active->outerLists[0] != list && active->outerLists[1] != list) {
@@ -158,6 +186,13 @@ class FgOperationProbe {
             }
         }
         active->copy(list, dst, x, y, z, src, box);
+    }
+    static void STDMETHODCALLTYPE onCopyResource(ID3D12GraphicsCommandList* list,
+                                                 ID3D12Resource* dst,
+                                                 ID3D12Resource* src) {
+        if (active->watches())
+            ++active->counts.resourceCopies;
+        active->copyResource(list, dst, src);
     }
     static void STDMETHODCALLTYPE onQuery(ID3D12GraphicsCommandList* list,
                                           ID3D12QueryHeap* heap,
@@ -235,6 +270,8 @@ class FgOperationProbe {
         if (!hr)
             hr = operation(reinterpret_cast<PVOID*>(&copy), onCopy);
         if (!hr)
+            hr = operation(reinterpret_cast<PVOID*>(&copyResource), onCopyResource);
+        if (!hr)
             hr = operation(reinterpret_cast<PVOID*>(&query), onQuery);
         if (!hr)
             hr = operation(reinterpret_cast<PVOID*>(&resolve), onResolve);
@@ -250,6 +287,8 @@ class FgOperationProbe {
   public:
     explicit FgOperationProbe(Gpu& gpu, std::array<ID3D12Resource*, 7> watchedAtlases, bool guardQueries = false)
         : queue(gpu.queue.Get()), guardQueryRanges(guardQueries), atlases(watchedAtlases) {
+        check(!gpu.debugEnabled && !gpu.diagnostics,
+              "native operation counting requires a nondebug device; use the separate GBV regression for validation");
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> list;
         success(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)),
@@ -267,6 +306,7 @@ class FgOperationProbe {
         reset = reinterpret_cast<Reset>(l[10]);
         barrier = reinterpret_cast<Barrier>(l[26]);
         copy = reinterpret_cast<Copy>(l[16]);
+        copyResource = reinterpret_cast<CopyResource>(l[17]);
         query = reinterpret_cast<Query>(l[53]);
         resolve = reinterpret_cast<Resolve>(l[54]);
         auto sample = gpu.texture();
@@ -297,6 +337,9 @@ class FgOperationProbe {
         signalCount = executedCount = 0;
         writtenQueryCount = 0;
         queueOrder = firstExecuteOrder = lastExecuteOrder = 0;
+        captureDestination = nullptr;
+        captureSlices = 0;
+        validCaptureCopies = true;
         armed = true;
     }
     FgOperationCounts countersOnly() {
@@ -309,7 +352,16 @@ class FgOperationProbe {
     }
     FgOperationCounts end(const VDXRFG_TicketV1& ticket) {
         armed = false;
+        if (overflow)
+            std::fprintf(stderr,
+                         "operation trace overflow: events=%zu queries=%zu signals=%zu executed=%zu\n",
+                         eventCount,
+                         writtenQueryCount,
+                         signalCount,
+                         executedCount);
         check(!overflow, "bounded native operation trace did not overflow");
+        check(counts.captureRegionCopies == 2 && captureSlices == 3 && validCaptureCopies,
+              "capture copies both atlas eyes exactly once into the matching two-slice resource");
         unsigned consumedOrder{}, readyOrder{}, consumedSignals{}, readySignals{};
         for (size_t i = 0; i < signalCount; ++i) {
             const auto& value = signals[i];
@@ -327,6 +379,22 @@ class FgOperationProbe {
               "consumed follows unpack and ready is signaled after all submitted backend/pack work");
         // Outer copies are on their own lists. Replay their real transition/copy
         // order, including descriptors that precede the first observed copy.
+        // Infer private render targets from copy roles, never from a barrier's
+        // claimed StateBefore. Public atlases and the unpack input rest COMMON.
+        const auto restingState = [&](ID3D12Resource* resource) {
+            for (size_t i = 0; i < eventCount; ++i) {
+                const auto& event = events[i];
+                if (event.source != resource)
+                    continue;
+                for (size_t output = 1; output < atlases.size(); ++output)
+                    if (atlases[output] && event.destination == atlases[output]) {
+                        for (auto atlas : atlases)
+                            check(resource != atlas, "private pack sources do not alias public atlases");
+                        return D3D12_RESOURCE_STATE_RENDER_TARGET;
+                    }
+            }
+            return D3D12_RESOURCE_STATE_COMMON;
+        };
         for (auto list : outerLists) {
             if (!list)
                 continue;
@@ -337,8 +405,11 @@ class FgOperationProbe {
             std::array<std::pair<ID3D12Resource*, D3D12_RESOURCE_STATES>, 8> states{};
             const auto state = [&](ID3D12Resource* resource) -> D3D12_RESOURCE_STATES& {
                 for (auto& entry : states) {
-                    if (entry.first == resource || !entry.first) {
+                    if (entry.first == resource)
+                        return entry.second;
+                    if (!entry.first) {
                         entry.first = resource;
+                        entry.second = restingState(resource);
                         return entry.second;
                     }
                 }
@@ -367,7 +438,9 @@ class FgOperationProbe {
                 }
             }
             for (const auto& entry : states)
-                check(entry.second == D3D12_RESOURCE_STATE_COMMON, "outer copies restore all resources to COMMON");
+                if (entry.first)
+                    check(entry.second == restingState(entry.first),
+                          "outer copies restore each public or private resource's resting state");
         }
         return counts;
     }

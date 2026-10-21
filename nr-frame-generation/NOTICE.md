@@ -8,8 +8,10 @@ The OFXR-derived module contains **LGPL-3.0** code. Its license is retained in [
 with the companion full [GPL-3.0 text](vendor/LICENSE.GPL-3.0.txt). The runtime's top-level MIT license does not replace
 these module terms. The optional module can be replaced separately from the runtime.
 
-Builds apply the initialization/lifetime ownership and diagnostic timing fixes in `scripts/prepare-fg-vendor.py`; the script generates its
-corresponding patch and modified source. The unmodified source and upstream/retained hashes are recorded in
+Builds apply initialization/lifetime ownership, GPU-state, diagnostic timing, FidelityFX endpoint-validation and
+camera-space motion corrections
+in `scripts/prepare-fg-vendor.py`, using `src/ffx_endpoint_validation.hlsl`. The script generates corresponding
+patches and modified C++/HLSL sources. The unmodified source and upstream/retained hashes are recorded in
 [vendor/ofxr/manifest.json](vendor/ofxr/manifest.json).
 
 FidelityFX source is pinned to `c6efa6bf7f2027b3ec94f28578bb5965eabb9e55` (1.1.4). Its MIT license, the OFXR LGPL/GPL texts,
