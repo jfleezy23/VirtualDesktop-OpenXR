@@ -1,5 +1,6 @@
 import ctypes
 import os
+import subprocess
 import sys
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -18,7 +19,8 @@ VALUE_NAMES = (
     "FoveationSize",
 )
 VALUE_MAXIMUMS = (2, 100, 100, 100, 100, 100)
-VALUE_DEFAULTS = (0, 100, 20, 70, 50, 66)
+VALUE_DEFAULTS = (0, 100, 20, 70, 50, 100)
+VALUE_LABELS = ("NR style (0–2)", "NR strength", "Local tone", "Structure detail", "Skin detail", "NR coverage (%)")
 FRAME_GENERATION_VALUE_NAME = "FrameGenerationMode"
 FRAME_GENERATION_MODES = {"Off": 0, "OFXR 2×": 2, "OFXR 3×": 3}
 FRAME_GENERATION_BACKEND_NAME = "FrameGenerationBackend"
@@ -86,8 +88,10 @@ def is_elevated():
 
 def relaunch_as_admin():
     executable = sys.executable
-    script = os.path.abspath(sys.argv[0])
-    parameters = " ".join(f'"{argument}"' for argument in [script, *sys.argv[1:]])
+    arguments = sys.argv[1:]
+    if not getattr(sys, "frozen", False):
+        arguments = [os.path.abspath(sys.argv[0]), *arguments]
+    parameters = subprocess.list2cmdline(arguments)
     result = ctypes.windll.shell32.ShellExecuteW(
         None, "runas", executable, parameters, None, 1
     )
@@ -95,74 +99,88 @@ def relaunch_as_admin():
         raise OSError(f"Could not request administrator access (error {result}).")
 
 
-def read_values():
-    values = list(VALUE_DEFAULTS)
+def read_nr_value(name, default, maximum, errors):
     try:
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
-            for index, name in enumerate(VALUE_NAMES):
-                try:
-                    value, _ = winreg.QueryValueEx(key, name)
-                    values[index] = max(0, min(VALUE_MAXIMUMS[index], int(value)))
-                except FileNotFoundError:
-                    pass
+            value, kind = winreg.QueryValueEx(key, name)
     except FileNotFoundError:
-        pass
-    return values
+        if name == "FoveationSize":
+            errors.append("NR coverage is not saved; showing 100%. Toggle NR off/on to apply displayed defaults.")
+        return default
+    except OSError:
+        errors.append(f"Cannot read {name}; showing its default.")
+        return default
+    if kind != winreg.REG_DWORD or not isinstance(value, int) or not 0 <= value <= maximum:
+        errors.append(f"Invalid saved {name}; showing its default.")
+        return default
+    return value
 
 
-def read_enabled():
-    try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
-            value, _ = winreg.QueryValueEx(key, ENABLE_VALUE_NAME)
-            return bool(int(value))
-    except FileNotFoundError:
-        return False
+def read_values(errors=None):
+    errors = [] if errors is None else errors
+    return [read_nr_value(name, default, maximum, errors)
+            for name, default, maximum in zip(VALUE_NAMES, VALUE_DEFAULTS, VALUE_MAXIMUMS)]
+
+
+def read_enabled(errors=None):
+    return bool(read_nr_value(ENABLE_VALUE_NAME, 0, 1, [] if errors is None else errors))
 
 
 def write_value(name, value):
-    maximum = 2 if name == "DLSSNR_Style" else 100
+    maximum = 1 if name == ENABLE_VALUE_NAME else VALUE_MAXIMUMS[VALUE_NAMES.index(name)]
     value = max(0, min(maximum, int(value)))
     with winreg.CreateKeyEx(
         winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, 0, winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY
     ) as key:
         winreg.SetValueEx(key, name, 0, winreg.REG_DWORD, int(value))
+    with winreg.OpenKey(
+        winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY
+    ) as key:
+        stored, kind = winreg.QueryValueEx(key, name)
+    if kind != winreg.REG_DWORD or stored != value:
+        raise OSError(f"{name} readback did not match the selection")
 
 
 class VDXRRegistryApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("DLSS-NR Settings")
+        self.root.title("VDXR NR/FG Controls")
         self.root.resizable(False, False)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.updating = True
+        errors = []
+        self.saved_values = read_values(errors)
+        self.saved_enabled = read_enabled(errors)
 
         frame = ttk.Frame(root, padding=16)
         frame.grid()
 
-        ttk.Label(frame, text="VDXR registry values", font=("Segoe UI", 12, "bold")).grid(
+        ttk.Label(frame, text="VDXR NR/FG Controls", font=("Segoe UI", 14, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 12)
         )
 
-        self.enabled = tk.BooleanVar(value=read_enabled())
+        self.enabled = tk.BooleanVar(value=self.saved_enabled)
         ttk.Checkbutton(
             frame,
-            text="Enable DLSS-NR",
+            text="Enable neural rendering · applies during play",
             variable=self.enabled,
             command=self.on_enabled_changed,
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 8))
         ttk.Button(
             frame,
-            text="Reset to defaults",
+            text="Reset NR settings",
             command=self.reset_defaults,
         ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
         self.variables = []
         self.slider_widgets = []
         self.foveation_save_id = None
-        for index, value in enumerate(read_values(), start=0):
+        for index, value in enumerate(self.saved_values, start=0):
             variable = tk.IntVar(value=value)
             variable.trace_add("write", lambda *_args, i=index, v=variable: self.save(i, v))
             self.variables.append(variable)
 
-            ttk.Label(frame, text=VALUE_NAMES[index], width=31).grid(
+            ttk.Label(frame, text=VALUE_LABELS[index], width=31).grid(
                 row=index + 3, column=0, sticky="w", padx=(0, 8), pady=4
             )
             tk.Scale(
@@ -181,11 +199,11 @@ class VDXRRegistryApp:
                 row=index + 3, column=2, sticky="e", padx=(8, 0), pady=4
             )
 
-        fg_error = None
         try:
             mode = read_frame_generation_mode()
         except (ValueError, OSError) as error:
-            mode, fg_error = 0, str(error)
+            mode = 0
+            errors.append(str(error))
         self.saved_frame_generation = next(label for label, value in FRAME_GENERATION_MODES.items() if value == mode)
         self.frame_generation = tk.StringVar(value=self.saved_frame_generation)
         ttk.Label(frame, text="Requested PC frame generation").grid(row=9, column=0, sticky="w", pady=(12, 4))
@@ -198,7 +216,8 @@ class VDXRRegistryApp:
         try:
             backend = read_frame_generation_backend()
         except (ValueError, OSError) as error:
-            backend, fg_error = 0, str(error)
+            backend = 0
+            errors.append(str(error))
         self.saved_frame_generation_backend = next(
             label for label, value in FRAME_GENERATION_BACKENDS.items() if value == backend
         )
@@ -210,23 +229,24 @@ class VDXRRegistryApp:
         )
         backend_selector.grid(row=10, column=1, columnspan=2, sticky="ew", pady=4)
         backend_selector.bind("<<ComboboxSelected>>", self.on_frame_generation_backend_changed)
-        ttk.Label(frame, text="OFXR works with NR on or off; restart after changing FG.").grid(
+        ttk.Label(frame, text="NR sliders save automatically and apply during play.").grid(
             row=11, column=0, columnspan=3, sticky="w",
         )
         ttk.Label(frame, text="Turn SSW off in Virtual Desktop when testing OFXR.").grid(
             row=12, column=0, columnspan=3, sticky="w",
         )
-        ttk.Label(frame, text="With NR enabled, use at least 90% coverage (100% recommended).").grid(
+        ttk.Label(frame, text="100% NR coverage is recommended. Reset affects NR only.").grid(
             row=13, column=0, columnspan=3, sticky="w",
         )
-        ttk.Label(frame, text="FidelityFX is experimental; restart after changing the backend.").grid(
+        ttk.Label(frame, text="FG selections are requests, not active status. Restart after changes.").grid(
             row=14, column=0, columnspan=3, sticky="w",
         )
-        self.status = tk.StringVar(value=fg_error or REGISTRY_PATH)
-        ttk.Label(frame, textvariable=self.status).grid(
+        self.status = tk.StringVar(value="; ".join(errors) or "Ready · changes save automatically")
+        ttk.Label(frame, textvariable=self.status, wraplength=610).grid(
             row=15, column=0, columnspan=3, sticky="w", pady=(12, 0)
         )
         self.set_slider_state()
+        self.updating = False
 
     def on_frame_generation_backend_changed(self, _event=None):
         selection = self.frame_generation_backend.get()
@@ -263,54 +283,101 @@ class VDXRRegistryApp:
 
     def on_enabled_changed(self):
         try:
+            if self.enabled.get():
+                # Runtime's missing-value default is 66%, so persist the displayed coverage first.
+                self.cancel_foveation_save()
+                if not self.save_foveation_size(self.variables[-1]):
+                    self.enabled.set(self.saved_enabled)
+                    self.set_slider_state()
+                    return
+                # Explicit enable also makes any displayed fallback values real, verified settings.
+                for index, variable in enumerate(self.variables[:-1]):
+                    if not self.save_nr_value(index, variable):
+                        self.enabled.set(self.saved_enabled)
+                        self.set_slider_state()
+                        return
             write_value(ENABLE_VALUE_NAME, int(self.enabled.get()))
+            self.saved_enabled = self.enabled.get()
             self.set_slider_state()
             state = "enabled" if self.enabled.get() else "disabled"
             self.status.set(f"DLSS-NR {state}")
         except PermissionError:
+            self.enabled.set(self.saved_enabled)
+            self.set_slider_state()
             self.status.set("Administrator access is required to write HKLM.")
         except OSError as error:
+            self.enabled.set(self.saved_enabled)
+            self.set_slider_state()
             self.status.set(f"Registry error: {error}")
 
     def reset_defaults(self):
+        self.cancel_foveation_save()
+        self.updating = True
         try:
-            self.enabled.set(False)
             write_value(ENABLE_VALUE_NAME, 0)
-            for variable, default in zip(self.variables, VALUE_DEFAULTS):
-                variable.set(default)
-            self.set_slider_state()
-            self.status.set("Reset to defaults")
+            for name, default in zip(VALUE_NAMES, VALUE_DEFAULTS):
+                write_value(name, default)
+            self.status.set("NR reset: disabled, coverage 100%. FG selections retained.")
         except PermissionError:
             self.status.set("Administrator access is required to write HKLM.")
         except OSError as error:
             self.status.set(f"Registry error: {error}")
+        finally:
+            errors = []
+            self.saved_values = read_values(errors)
+            self.saved_enabled = read_enabled(errors)
+            self.enabled.set(self.saved_enabled)
+            for variable, value in zip(self.variables, self.saved_values):
+                variable.set(value)
+            self.set_slider_state()
+            self.updating = False
+            if errors:
+                self.status.set("; ".join(errors))
 
     def save(self, index, variable):
+        if self.updating:
+            return
         if VALUE_NAMES[index] == "FoveationSize":
-            if self.foveation_save_id is not None:
-                self.root.after_cancel(self.foveation_save_id)
+            self.cancel_foveation_save()
             self.foveation_save_id = self.root.after(
                 400, self.save_foveation_size, variable
             )
             return
 
+        return self.save_nr_value(index, variable)
+
+    def save_nr_value(self, index, variable):
         try:
             write_value(VALUE_NAMES[index], variable.get())
-            self.status.set(f"Saved {VALUE_NAMES[index]} = {variable.get()}")
+            self.saved_values[index] = variable.get()
+            self.status.set(f"Saved {VALUE_LABELS[index]} = {variable.get()} · applies during play")
+            return True
         except PermissionError:
             self.status.set("Administrator access is required to write HKLM.")
         except OSError as error:
             self.status.set(f"Registry error: {error}")
+        self.updating = True
+        try:
+            variable.set(self.saved_values[index])
+        finally:
+            self.updating = False
+        return False
 
     def save_foveation_size(self, variable):
         self.foveation_save_id = None
-        try:
-            write_value("FoveationSize", variable.get())
-            self.status.set(f"Saved FoveationSize = {variable.get()}")
-        except PermissionError:
-            self.status.set("Administrator access is required to write HKLM.")
-        except OSError as error:
-            self.status.set(f"Registry error: {error}")
+        return self.save_nr_value(len(VALUE_NAMES) - 1, variable)
+
+    def cancel_foveation_save(self):
+        if self.foveation_save_id is not None:
+            self.root.after_cancel(self.foveation_save_id)
+            self.foveation_save_id = None
+
+    def on_close(self):
+        if self.foveation_save_id is not None:
+            self.cancel_foveation_save()
+            if not self.save_foveation_size(self.variables[-1]):
+                return
+        self.root.destroy()
 
 
 def main():

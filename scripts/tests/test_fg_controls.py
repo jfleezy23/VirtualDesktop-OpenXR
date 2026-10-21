@@ -2,6 +2,7 @@
 
 import importlib.util
 from pathlib import Path
+import subprocess
 import tkinter as tk
 import unittest
 from unittest import mock
@@ -186,6 +187,173 @@ class FrameGenerationControlsTests(unittest.TestCase):
         self.assertEqual(self.registry.values["FrameGenerationBackend"], (1, 4))
         self.assertEqual(app.frame_generation_backend.get(), "FidelityFX (full resolution)")
         self.assertNotIn("FrameGenerationBackend", [name for name, _, _ in self.registry.writes])
+
+    def test_missing_coverage_defaults_to_100_without_startup_writes(self):
+        self.registry.values.clear()
+        app = self.app()
+        self.assertEqual(app.variables[-1].get(), 100)
+        self.assertEqual(self.registry.writes, [])
+
+    def test_already_enabled_missing_coverage_warns_without_startup_write(self):
+        self.registry.values.pop("FoveationSize")
+        app = self.app()
+        self.assertTrue(app.enabled.get())
+        self.assertEqual(app.variables[-1].get(), 100)
+        self.assertIn("not saved", app.status.get().lower())
+        self.assertEqual(self.registry.writes, [])
+
+    def test_malformed_nr_values_open_with_defaults_and_warning(self):
+        for stored in [("bad", 1), ("50", 1), (101, 4), (b"bad", 3)]:
+            with self.subTest(stored=stored):
+                self.registry.values["DLSSNR_Intensity"] = stored
+                try:
+                    app = self.app()
+                except (ValueError, TypeError) as error:
+                    self.fail(f"Malformed registry value crashed startup: {error}")
+                self.assertEqual(app.variables[1].get(), 100)
+                self.assertIn("invalid", app.status.get().lower())
+                self.assertEqual(self.registry.writes, [])
+
+    def test_malformed_enabled_does_not_crash_or_enable_nr(self):
+        for stored in [("bad", 1), (2, 4), ("1", 1)]:
+            self.registry.values["DLSSNR_Enabled"] = stored
+            try:
+                app = self.app()
+            except (ValueError, TypeError) as error:
+                self.fail(f"Malformed enable value crashed startup: {error}")
+            self.assertFalse(app.enabled.get())
+            self.assertIn("invalid", app.status.get().lower())
+        self.assertEqual(self.registry.writes, [])
+
+    def test_denied_read_still_opens_without_writing(self):
+        with mock.patch.object(self.registry, "OpenKey", side_effect=PermissionError("fixture read denial")):
+            try:
+                app = self.app()
+            except OSError as error:
+                self.fail(f"Registry read denial crashed startup: {error}")
+        self.assertIn("read", app.status.get().lower())
+        self.assertEqual(self.registry.writes, [])
+
+    def test_reset_persists_100_immediately_and_cancels_pending_coverage(self):
+        app = self.app()
+        app.variables[-1].set(92)
+        self.assertIsNotNone(app.foveation_save_id)
+        app.reset_defaults()
+        self.assertEqual(self.registry.values["FoveationSize"], (100, 4))
+        self.assertIsNone(app.foveation_save_id)
+        self.assertEqual([self.registry.values[name][0] for name in gui.VALUE_NAMES], list(gui.VALUE_DEFAULTS))
+        self.assertFalse(app.enabled.get())
+
+    def test_failed_reset_does_not_show_unsaved_disabled_state(self):
+        app = self.app()
+        self.registry.denied = True
+        app.reset_defaults()
+        self.assertTrue(app.enabled.get())
+        self.assertNotIn("reset to defaults", app.status.get().lower())
+
+    def test_failed_nr_toggle_restores_verified_state(self):
+        app = self.app()
+        self.registry.denied = True
+        app.enabled.set(False)
+        app.on_enabled_changed()
+        self.assertTrue(app.enabled.get())
+        self.assertIn("administrator", app.status.get().lower())
+
+    def test_failed_nr_slider_readback_is_not_reported_as_saved(self):
+        app = self.app()
+        with mock.patch.object(self.registry, "SetValueEx", side_effect=lambda *_: None):
+            app.variables[1].set(42)
+        self.assertEqual(app.variables[1].get(), 100)
+        self.assertIn("error", app.status.get().lower())
+
+    def test_enabling_nr_saves_displayed_coverage_before_enable(self):
+        self.registry.values.clear()
+        app = self.app()
+        app.enabled.set(True)
+        app.on_enabled_changed()
+        writes = [(name, value) for name, value, _ in self.registry.writes]
+        expected = [("FoveationSize", 100), *zip(gui.VALUE_NAMES[:-1], gui.VALUE_DEFAULTS[:-1]), ("DLSSNR_Enabled", 1)]
+        self.assertEqual(writes, expected)
+
+    def test_enabling_nr_normalizes_displayed_invalid_parameters(self):
+        self.registry.values["DLSSNR_Enabled"] = (0, 4)
+        self.registry.values["DLSSNR_Style"] = (3, 4)
+        app = self.app()
+        self.assertEqual(self.registry.writes, [])
+        self.assertEqual(app.variables[0].get(), 0)
+        app.enabled.set(True)
+        app.on_enabled_changed()
+        self.assertEqual(self.registry.values["DLSSNR_Style"], (0, 4))
+        self.assertEqual(self.registry.values["DLSSNR_Enabled"], (1, 4))
+
+    def test_failed_parameter_normalization_prevents_enable(self):
+        self.registry.values["DLSSNR_Enabled"] = (0, 4)
+        self.registry.values["DLSSNR_Style"] = (3, 4)
+        app = self.app()
+        original = self.registry.SetValueEx
+        def fail_style(key, name, reserved, kind, value):
+            if name == "DLSSNR_Style":
+                raise PermissionError("fixture style denial")
+            original(key, name, reserved, kind, value)
+        with mock.patch.object(self.registry, "SetValueEx", side_effect=fail_style):
+            app.enabled.set(True)
+            app.on_enabled_changed()
+        self.assertFalse(app.enabled.get())
+        self.assertEqual(self.registry.values["DLSSNR_Enabled"], (0, 4))
+
+    def test_failed_coverage_save_prevents_nr_enable(self):
+        self.registry.values.clear()
+        app = self.app()
+        app.variables[-1].set(94)
+        original = self.registry.SetValueEx
+        def fail_coverage(key, name, reserved, kind, value):
+            if name == "FoveationSize":
+                raise PermissionError("fixture coverage denial")
+            original(key, name, reserved, kind, value)
+        with mock.patch.object(self.registry, "SetValueEx", side_effect=fail_coverage):
+            app.enabled.set(True)
+            app.on_enabled_changed()
+        self.assertFalse(app.enabled.get())
+        self.assertEqual(app.variables[-1].get(), 100)
+        self.assertIsNone(app.foveation_save_id)
+        self.assertNotIn("DLSSNR_Enabled", self.registry.values)
+
+    def test_close_flushes_pending_coverage(self):
+        app = self.app()
+        app.variables[-1].set(94)
+        self.assertTrue(callable(getattr(app, "on_close", None)), "Missing close-save handler")
+        with mock.patch.object(self.root, "destroy") as destroy:
+            app.on_close()
+        self.assertEqual(self.registry.values["FoveationSize"], (94, 4))
+        self.assertIsNone(app.foveation_save_id)
+        destroy.assert_called_once()
+
+    def test_close_stays_open_after_pending_save_failure(self):
+        app = self.app()
+        app.variables[-1].set(94)
+        self.registry.denied = True
+        self.assertTrue(callable(getattr(app, "on_close", None)), "Missing close-save handler")
+        with mock.patch.object(self.root, "destroy") as destroy:
+            app.on_close()
+        destroy.assert_not_called()
+        self.assertIn("administrator", app.status.get().lower())
+
+
+class ElevationTests(unittest.TestCase):
+    def test_source_and_frozen_elevation_preserve_windows_arguments(self):
+        args = [r"C:\Controls Folder\settings.py", "space value", 'quote"value', "trailing space \\", "Unicode é"]
+        for frozen in (False, True):
+            with self.subTest(frozen=frozen), mock.patch.object(gui.sys, "frozen", frozen, create=True), \
+                    mock.patch.object(gui.sys, "argv", args), \
+                    mock.patch.object(gui.ctypes.windll.shell32, "ShellExecuteW", return_value=42) as execute:
+                gui.relaunch_as_admin()
+            expected = args[1:] if frozen else [str(Path(args[0]).resolve()), *args[1:]]
+            self.assertEqual(execute.call_args.args[3], subprocess.list2cmdline(expected))
+
+    def test_denied_elevation_is_reported(self):
+        with mock.patch.object(gui.ctypes.windll.shell32, "ShellExecuteW", return_value=5):
+            with self.assertRaises(OSError):
+                gui.relaunch_as_admin()
 
 
 if __name__ == "__main__":
