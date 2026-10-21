@@ -7,6 +7,11 @@ Streamer and the headset's existing Virtual Desktop connection. It does not prov
 The package was tested locally on an RTX 4090. Compatible NVIDIA hardware and a separately supplied, licensed
 `nvngx_dlssnr.dll` are required for NR. The proprietary NR DLL is not included in this repository or release.
 
+Use a current NVIDIA display driver and the latest
+[Microsoft Visual C++ v14 x64 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/).
+The synthesis DLL uses the Microsoft C++ runtime; the host also needs the Vulkan loader supplied by the graphics driver.
+End users do not need Visual Studio or a compiler. Python is needed only for the controls window, as described below.
+
 ## Install
 
 1. Install Virtual Desktop Streamer normally and connect the headset. Close all VR games before replacing runtime files.
@@ -62,6 +67,9 @@ occlusions and controller response. Keep NR coverage at 100%. If an artifact or 
 restart the game. The selected mode is a request, not confirmation that every frame was generated. Confirm actual
 synthetic submissions when validating a new game; perceived smoothness and a displayed FPS counter alone do not establish
 which component supplied the frames.
+
+Rapid head turns can still produce interpolation artifacts. This remains an experimental frame-generation path;
+the recovery and synchronization corrections do not establish artifact-free head motion in every title.
 
 ### Automatic color handoff
 
