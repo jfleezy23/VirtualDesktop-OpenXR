@@ -19,11 +19,10 @@ namespace {
         ComPtr<ID3D12Device> device;
         ComPtr<ID3D12CommandQueue> queue;
         ComPtr<ID3D12Resource> input;
-        ComPtr<ID3D12Resource> normalized;
         std::array<std::array<ComPtr<ID3D12Resource>, 3>, 2> outputs;
         std::array<std::array<ComPtr<ID3D12Resource>, 3>, 2> isolatedOutputs;
         std::array<ComPtr<ID3D12CommandAllocator>, 2> copyAllocators;
-        std::array<ComPtr<ID3D12GraphicsCommandList>, 2> unpackLists, packLists;
+        std::array<ComPtr<ID3D12GraphicsCommandList>, 2> packLists;
         std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
         xrfg::D3D12FrameSynthesizer synthesizer;
         ComPtr<ID3D12Fence> ready;
@@ -126,15 +125,7 @@ namespace {
             isolatedDescription.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
             D3D12_HEAP_PROPERTIES heap{};
             heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-            HRESULT hr = device->CreateCommittedResource(&heap,
-                                                         D3D12_HEAP_FLAG_NONE,
-                                                         &isolatedDescription,
-                                                         D3D12_RESOURCE_STATE_COMMON,
-                                                         nullptr,
-                                                         IID_PPV_ARGS(&context->normalized));
-            if (FAILED(hr)) {
-                return hr;
-            }
+            HRESULT hr = S_OK;
             syntheticCount = 0;
             for (uint32_t bank = 0; bank < 2; ++bank) {
                 hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -142,20 +133,17 @@ namespace {
                 if (FAILED(hr)) {
                     return hr;
                 }
-                for (auto list :
-                     {std::addressof(context->unpackLists[bank]), std::addressof(context->packLists[bank])}) {
-                    hr = device->CreateCommandList(0,
-                                                   D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                                   context->copyAllocators[bank].Get(),
-                                                   nullptr,
-                                                   IID_PPV_ARGS(list->ReleaseAndGetAddressOf()));
-                    if (FAILED(hr)) {
-                        return hr;
-                    }
-                    hr = (*list)->Close();
-                    if (FAILED(hr)) {
-                        return hr;
-                    }
+                hr = device->CreateCommandList(0,
+                                               D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                               context->copyAllocators[bank].Get(),
+                                               nullptr,
+                                               IID_PPV_ARGS(&context->packLists[bank]));
+                if (FAILED(hr)) {
+                    return hr;
+                }
+                hr = context->packLists[bank]->Close();
+                if (FAILED(hr)) {
+                    return hr;
                 }
                 for (uint32_t role = 0; role < 3; ++role) {
                     if (role == 1 && info->multiplier == 2) {
@@ -178,8 +166,13 @@ namespace {
                 }
             }
             context->history = std::make_shared<xrfg::D3D12SwapchainHistory>();
-            ID3D12Resource* input[] = {context->normalized.Get()};
-            hr = context->history->initialize(device, context->queue.Get(), input, D3D12_RESOURCE_STATE_COMMON);
+            ID3D12Resource* input[] = {context->input.Get()};
+            hr = context->history->initialize(device,
+                                              context->queue.Get(),
+                                              input,
+                                              D3D12_RESOURCE_STATE_COMMON,
+                                              nullptr,
+                                              xrfg::D3D12HistorySourceLayout::stereo_atlas);
             if (FAILED(hr)) {
                 return hr;
             }
@@ -286,7 +279,7 @@ namespace {
         return barrier;
     }
 
-    void copyStereo(ID3D12GraphicsCommandList* list, ID3D12Resource* atlas, ID3D12Resource* isolated, bool unpack) {
+    void copyStereo(ID3D12GraphicsCommandList* list, ID3D12Resource* atlas, ID3D12Resource* isolated) {
         const uint32_t eyeWidth = static_cast<uint32_t>(atlas->GetDesc().Width / 2);
         const uint32_t height = atlas->GetDesc().Height;
         for (uint32_t eye = 0; eye < 2; ++eye) {
@@ -297,10 +290,8 @@ namespace {
             mono.pResource = isolated;
             mono.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
             mono.SubresourceIndex = eye;
-            const D3D12_BOX source{
-                unpack ? eye * eyeWidth : 0, 0, 0, unpack ? (eye + 1) * eyeWidth : eyeWidth, height, 1};
-            list->CopyTextureRegion(
-                unpack ? &mono : &wide, unpack ? 0 : eye * eyeWidth, 0, 0, unpack ? &wide : &mono, &source);
+            const D3D12_BOX source{0, 0, 0, eyeWidth, height, 1};
+            list->CopyTextureRegion(&wide, eye * eyeWidth, 0, 0, &mono, &source);
         }
     }
 
@@ -379,41 +370,19 @@ namespace {
                     return poison();
                 }
             }
-            hr = context->copyAllocators[bank]->Reset();
+            // Capture owns the selected history slot and copies both eyes
+            // directly from the atlas before publishing input consumption.
+            xrfg::D3D12HistoryCaptureTicket capture{};
+            hr = context->history->capture(0, &capture);
             if (FAILED(hr)) {
                 return poison();
             }
-            hr = context->unpackLists[bank]->Reset(context->copyAllocators[bank].Get(), nullptr);
-            if (FAILED(hr)) {
-                return poison();
-            }
-            std::array unpackBarriers{
-                transition(context->input.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE),
-                transition(context->normalized.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST)};
-            context->unpackLists[bank]->ResourceBarrier(static_cast<UINT>(unpackBarriers.size()),
-                                                        unpackBarriers.data());
-            copyStereo(context->unpackLists[bank].Get(), context->input.Get(), context->normalized.Get(), true);
-            for (auto& barrier : unpackBarriers)
-                std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-            context->unpackLists[bank]->ResourceBarrier(static_cast<UINT>(unpackBarriers.size()),
-                                                        unpackBarriers.data());
-            hr = context->unpackLists[bank]->Close();
-            if (FAILED(hr)) {
-                return poison();
-            }
-            ID3D12CommandList* unpack[] = {context->unpackLists[bank].Get()};
-            context->queue->ExecuteCommandLists(1, unpack);
             hr = context->queue->Signal(context->consumed.Get(), lease->ticket.token);
             if (FAILED(hr)) {
                 return poison();
             }
             lease->ticket.input_consumed_fence = context->consumed.Get();
             lease->ticket.input_consumed_value = lease->ticket.token;
-            xrfg::D3D12HistoryCaptureTicket capture{};
-            hr = context->history->capture(0, &capture);
-            if (FAILED(hr)) {
-                return poison();
-            }
             hr = context->history->commit(capture);
             if (FAILED(hr)) {
                 return poison();
@@ -464,6 +433,10 @@ namespace {
                                                               D3D12_RESOURCE_STATE_COPY_SOURCE);
             }
             if (packBarrierCount) {
+                hr = context->copyAllocators[bank]->Reset();
+                if (FAILED(hr)) {
+                    return poison();
+                }
                 hr = context->packLists[bank]->Reset(context->copyAllocators[bank].Get(), nullptr);
                 if (FAILED(hr)) {
                     return poison();
@@ -474,8 +447,7 @@ namespace {
                 for (UINT i = 0; i < packBarrierCount; i += 2)
                     copyStereo(context->packLists[bank].Get(),
                                packBarriers[i].Transition.pResource,
-                               packBarriers[i + 1].Transition.pResource,
-                               false);
+                               packBarriers[i + 1].Transition.pResource);
                 for (UINT i = 0; i < packBarrierCount; ++i)
                     std::swap(packBarriers[i].Transition.StateBefore, packBarriers[i].Transition.StateAfter);
                 context->packLists[bank]->ResourceBarrier(packBarrierCount, packBarriers.data());

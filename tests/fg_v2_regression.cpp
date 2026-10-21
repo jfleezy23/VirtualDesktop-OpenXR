@@ -17,6 +17,7 @@ struct Images {
     FgOperationCounts operations{};
     FgOperationCounts primeOperations{};
     FgOperationCounts resetPrimeOperations{};
+    std::array<FgOperationCounts, 2> resetCaptureOperations{};
 };
 
 // A CPU-wait regression must fail without stranding the fixture's GPU queue.
@@ -64,6 +65,8 @@ Images generated(HMODULE module,
                  bool auditPrimeTiming = false,
                  bool guardFfxQueries = false) {
     const bool hostOwned = !legacy && (flags & VDXRFG_CREATE_HOST_OWNS_REAL);
+    // Count module calls without debug-layer command-list aliases. Resource
+    // states are checked separately by the mandatory GBV state regression.
     Gpu gpu(false);
     VDXRFG_ApiV1 api{};
     api.struct_size = sizeof(api);
@@ -228,6 +231,7 @@ Images generated(HMODULE module,
                   resetPrime.token > pair.token && resetPrime.generation > pair.generation,
               "reset prime retains fresh generation and nonreused ownership identity");
         result.resetPrimeOperations = resetOperations;
+        result.resetCaptureOperations[cycle] = resetOperations;
         gpu.wait(static_cast<ID3D12Fence*>(resetPrime.output_ready_fence), resetPrime.output_ready_value);
         if (auditPrimeTiming) {
             VDXRFG_StatisticsV1 stats{};
@@ -362,19 +366,68 @@ void emptyPrimeSubmission(HMODULE module) {
                             prime.submits,
                             prime.listResets,
                             prime.listCloses);
-                check(prime.submits == 4 && prime.listResets + 1 == ordinary.primeOperations.listResets &&
+                check(prime.submits == 3 && prime.listResets + 1 == ordinary.primeOperations.listResets &&
                           prime.listCloses + 1 == ordinary.primeOperations.listCloses,
                       "empty outer prime removes exactly one submission/reset/close and retains backend work");
             }
             check(result.pixels[0] == ordinary.pixels[0] && result.pixels[1] == ordinary.pixels[1],
                   "empty prime elision leaves following generated images exact");
         }
-        check(ordinary.primeOperations.submits == 5 && legacy.primeOperations.submits == 5 &&
-                  ordinary.resetPrimeOperations.submits == 5 && legacy.resetPrimeOperations.submits == 5,
+        check(ordinary.primeOperations.submits == 4 && legacy.primeOperations.submits == 4 &&
+                  ordinary.resetPrimeOperations.submits == 4 && legacy.resetPrimeOperations.submits == 4,
               "V1 and ordinary V2 primes retain actual real-image pack submissions");
         check(ordinary.operations.submits == owned.operations.submits,
               "nonprime submission count is unchanged by empty prime elision");
     }
+}
+
+void directHistoryCapture(HMODULE module) {
+    bool reduced = true;
+    for (uint32_t multiplier : {2u, 3u}) {
+        for (const bool fidelityFx : {false, true}) {
+            for (UINT mode = fidelityFx ? 1u : 0u; mode < 5; ++mode) {
+                const bool legacy = mode == 0;
+                const bool hostOwned = mode >= 3;
+                const bool timed = legacy || mode == 2 || mode == 4;
+                const uint32_t flags = (fidelityFx ? VDXRFG_CREATE_FIDELITYFX_FULL : 0u) |
+                                       (hostOwned ? VDXRFG_CREATE_HOST_OWNS_REAL : 0u) |
+                                       (timed && !legacy ? VDXRFG_CREATE_GPU_TIMING : 0u);
+                const auto result = generated(module, multiplier, legacy, flags);
+                const auto verify = [&](const FgOperationCounts& operations, bool prime, const char* phase) {
+                    std::printf("history %s %uX mode%u %s submits=%u resets=%u closes=%u textureCopies=%u "
+                                "resourceCopies=%u captureCopies=%u\n",
+                                fidelityFx ? "ffx" : "nvidia",
+                                multiplier,
+                                mode,
+                                phase,
+                                operations.submits,
+                                operations.listResets,
+                                operations.listCloses,
+                                operations.copies,
+                                operations.resourceCopies,
+                                operations.captureRegionCopies);
+                    // Removing the normalization list and the following
+                    // whole-resource history copy leaves one owned capture.
+                    // These are literal driver-call budgets, not counters
+                    // supplied by the module under test.
+                    const unsigned submits = prime ? (hostOwned ? 3u : 4u) : (fidelityFx ? 4u : timed ? 6u : 5u);
+                    const unsigned resets =
+                        prime ? (fidelityFx ? (hostOwned ? 3u : 4u) : (hostOwned ? 4u : 5u)) : submits;
+                    const unsigned copies = prime ? (hostOwned ? 2u : 4u) : (multiplier + (hostOwned ? 0u : 1u)) * 2u;
+                    reduced &= operations.submits == submits && operations.listResets == resets &&
+                               operations.listCloses == resets && operations.copies == copies &&
+                               operations.resourceCopies == 1 && operations.captureRegionCopies == 2;
+                };
+                verify(result.primeOperations, true, "prime");
+                verify(result.operations, false, "pair");
+                verify(result.resetCaptureOperations[0], true, "fresh-reset-prime");
+                verify(result.resetCaptureOperations[1], true, "reused-reset-prime");
+            }
+        }
+    }
+    check(reduced,
+          "direct owned history capture removes exactly one full copy and one submission/reset/close, preserving "
+          "both eye-region copies on initial, paired and reset captures");
 }
 
 void hostRealComparison(HMODULE module) {
@@ -483,7 +536,7 @@ void rejectEnvelopes(VDXRFG_GetApiV2Fn get) {
 
 int main(int argc, char** argv) {
     try {
-        check(argc == 2 || argc == 3, "module path and optional barriers/prime/capture mode required");
+        check(argc == 2 || argc == 3, "module path and optional barriers/prime/capture/history mode required");
         HMODULE module =
             LoadLibraryExA(argv[1], nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
         check(module != nullptr, "load real module");
@@ -491,7 +544,8 @@ int main(int argc, char** argv) {
         check(get != nullptr, "module publishes optional creation and diagnostic negotiation");
         rejectEnvelopes(get);
         const std::string mode = argc == 3 ? argv[2] : "all";
-        check(mode == "all" || mode == "barriers" || mode == "prime" || mode == "capture", "recognized test mode");
+        check(mode == "all" || mode == "barriers" || mode == "prime" || mode == "capture" || mode == "history",
+              "recognized test mode");
         if (mode == "all" || mode == "capture") {
             timingComparison(module);
             hostRealComparison(module);
@@ -500,6 +554,8 @@ int main(int argc, char** argv) {
             barrierBatching(module);
         if (mode == "all" || mode == "prime")
             emptyPrimeSubmission(module);
+        if (mode == "all" || mode == "history")
+            directHistoryCapture(module);
         FreeLibrary(module);
         std::puts("PASS: optional creation negotiation");
         return 0;

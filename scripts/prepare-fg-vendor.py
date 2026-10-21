@@ -12,6 +12,103 @@ import json
 from pathlib import Path
 
 
+def prepare_history(source: Path, output: Path) -> None:
+    """Capture a stereo atlas into the existing owned history slots."""
+    header_path = source / "include/xrfg/d3d12_history.hpp"
+    source_path = source / "src/d3d12/d3d12_history.cpp"
+    original_header = header_path.read_text(encoding="utf-8")
+    original_source = source_path.read_text(encoding="utf-8")
+    header = original_header
+    implementation = original_source
+    header_changes = [
+        ("enum class D3D12HistoryInitializationStage : std::uint32_t {",
+         "// Internal source layout; the public module ABI is unchanged.\n"
+         "enum class D3D12HistorySourceLayout { native, stereo_atlas };\n\n"
+         "enum class D3D12HistoryInitializationStage : std::uint32_t {"),
+        ("        D3D12HistoryInitializationStage* failure_stage = nullptr) noexcept;",
+         "        D3D12HistoryInitializationStage* failure_stage = nullptr,\n"
+         "        D3D12HistorySourceLayout source_layout = D3D12HistorySourceLayout::native) noexcept;"),
+    ]
+    source_changes = [
+        ("    D3D12_RESOURCE_STATES release_state{};",
+         "    D3D12_RESOURCE_STATES release_state{};\n"
+         "    D3D12HistorySourceLayout source_layout{};"),
+        ("        D3D12HistoryInitializationStage* failure_stage) {",
+         "        D3D12HistoryInitializationStage* failure_stage,\n"
+         "        D3D12HistorySourceLayout input_layout) {"),
+        ("        if (input_device == nullptr || input_queue == nullptr || inputs.empty() ||",
+         "        if ((input_layout != D3D12HistorySourceLayout::native &&\n"
+         "             input_layout != D3D12HistorySourceLayout::stereo_atlas) ||\n"
+         "            input_device == nullptr || input_queue == nullptr || inputs.empty() ||"),
+        ("        source_images.reserve(inputs.size());",
+         "        if (input_layout == D3D12HistorySourceLayout::stereo_atlas &&\n"
+         "            ((source_description.Width & 1) != 0 ||\n"
+         "             source_description.Width > std::numeric_limits<UINT>::max() ||\n"
+         "             source_description.DepthOrArraySize != 1 || source_description.MipLevels != 1 ||\n"
+         "             source_description.SampleDesc.Count != 1)) {\n"
+         "            if (failure_stage != nullptr) {\n"
+         "                *failure_stage = D3D12HistoryInitializationStage::source_description;\n"
+         "            }\n"
+         "            return E_INVALIDARG;\n"
+         "        }\n\n"
+         "        source_images.reserve(inputs.size());"),
+        ("        release_state = input_release_state;",
+         "        release_state = input_release_state;\n"
+         "        source_layout = input_layout;"),
+        ("        for (HistorySlot& slot : slots) {\n            HRESULT result = device->CreateCommittedResource(",
+         "        if (source_layout == D3D12HistorySourceLayout::stereo_atlas) {\n"
+         "            history_description.Width /= 2;\n"
+         "            history_description.DepthOrArraySize = 2;\n"
+         "            history_description.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;\n"
+         "        }\n"
+         "        for (HistorySlot& slot : slots) {\n            HRESULT result = device->CreateCommittedResource("),
+        ("        slot.capture_list->CopyResource(slot.resource.Get(), source);",
+         "        if (source_layout == D3D12HistorySourceLayout::stereo_atlas) {\n"
+         "            const auto description = source->GetDesc();\n"
+         "            const UINT eye_width = static_cast<UINT>(description.Width / 2);\n"
+         "            for (UINT eye = 0; eye < 2; ++eye) {\n"
+         "                D3D12_TEXTURE_COPY_LOCATION atlas{};\n"
+         "                atlas.pResource = source;\n"
+         "                atlas.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;\n"
+         "                D3D12_TEXTURE_COPY_LOCATION isolated{};\n"
+         "                isolated.pResource = slot.resource.Get();\n"
+         "                isolated.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;\n"
+         "                isolated.SubresourceIndex = eye;\n"
+         "                const D3D12_BOX box{eye * eye_width, 0, 0,\n"
+         "                    (eye + 1) * eye_width, description.Height, 1};\n"
+         "                slot.capture_list->CopyTextureRegion(&isolated, 0, 0, 0, &atlas, &box);\n"
+         "            }\n"
+         "        } else {\n"
+         "            slot.capture_list->CopyResource(slot.resource.Get(), source);\n"
+         "        }"),
+        ("    D3D12_RESOURCE_STATES release_state,\n"
+         "    D3D12HistoryInitializationStage* failure_stage) noexcept {",
+         "    D3D12_RESOURCE_STATES release_state,\n"
+         "    D3D12HistoryInitializationStage* failure_stage,\n"
+         "    D3D12HistorySourceLayout source_layout) noexcept {"),
+        ("            device, queue, source_images, release_state, failure_stage);",
+         "            device, queue, source_images, release_state, failure_stage, source_layout);"),
+    ]
+    for old, new in header_changes:
+        if header.count(old) != 1:
+            raise ValueError("Pinned history header context does not match uniquely")
+        header = header.replace(old, new)
+    for old, new in source_changes:
+        if implementation.count(old) != 1:
+            raise ValueError(f"Pinned history capture context does not match uniquely: {old!r}")
+        implementation = implementation.replace(old, new)
+    (output / "xrfg").mkdir(parents=True, exist_ok=True)
+    (output / "xrfg/d3d12_history.hpp").write_text(header, encoding="utf-8")
+    (output / "d3d12_history.cpp").write_text(implementation, encoding="utf-8")
+    patch = "".join(difflib.unified_diff(
+        original_header.splitlines(keepends=True), header.splitlines(keepends=True),
+        fromfile="upstream/include/xrfg/d3d12_history.hpp", tofile="compiled/include/xrfg/d3d12_history.hpp"))
+    patch += "".join(difflib.unified_diff(
+        original_source.splitlines(keepends=True), implementation.splitlines(keepends=True),
+        fromfile="upstream/src/d3d12/d3d12_history.cpp", tofile="compiled/src/d3d12/d3d12_history.cpp"))
+    (output / "history-capture.patch").write_text(patch, encoding="utf-8")
+
+
 def prepare(source: Path, output: Path) -> None:
     manifest = json.loads((source / "manifest.json").read_text())
     if manifest["commit"] != "07449429c139e5d2070b6f0855ed5323de7cee00":
@@ -19,6 +116,7 @@ def prepare(source: Path, output: Path) -> None:
     for name, digest in manifest["files"].items():
         if hashlib.sha256((source / name).read_bytes()).hexdigest() != digest:
             raise ValueError(f"Modified immutable vendor source: {name}")
+    prepare_history(source, output)
     path = source / "src/d3d12/d3d12_frame_synthesizer.cpp"
     original = path.read_text(encoding="utf-8")
     modified = original

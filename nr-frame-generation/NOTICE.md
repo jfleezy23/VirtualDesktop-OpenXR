@@ -8,7 +8,7 @@ The OFXR-derived module contains **LGPL-3.0** code. Its license is retained in [
 with the companion full [GPL-3.0 text](vendor/LICENSE.GPL-3.0.txt). The runtime's top-level MIT license does not replace
 these module terms. The optional module can be replaced separately from the runtime.
 
-Builds apply initialization/lifetime ownership, GPU-state, diagnostic timing, FidelityFX endpoint-validation and
+Builds apply direct stereo-atlas history capture, initialization/lifetime ownership, GPU-state, diagnostic timing, FidelityFX endpoint-validation and
 camera-space motion corrections
 in `scripts/prepare-fg-vendor.py`, using `src/ffx_endpoint_validation.hlsl`. The script generates corresponding
 patches and modified C++/HLSL sources. The unmodified source and upstream/retained hashes are recorded in

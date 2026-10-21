@@ -12,6 +12,7 @@ execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/prepare-fg-vendor.py"
     "${OFXR}/src/d3d12/d3d12_frame_synthesizer.cpp" "${OFXR}/manifest.json"
+    "${OFXR}/src/d3d12/d3d12_history.cpp" "${OFXR}/include/xrfg/d3d12_history.hpp"
     "${OFXR}/src/d3d12/frame_synthesis.hlsl" "${CMAKE_CURRENT_SOURCE_DIR}/src/ffx_endpoint_validation.hlsl")
 set(FFX "${FG_DEPS}/fidelityfx/sdk")
 set(FXC "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/fxc.exe" CACHE FILEPATH "Pinned shader compiler")
@@ -56,7 +57,7 @@ foreach(RECIPE IN LISTS SHADER_RECIPES)
     list(APPEND SHADER_HEADERS "${HEADER}")
 endforeach()
 add_library(vdxr_frame_generation SHARED src/fg_module.cpp
-    "${OFXR}/src/d3d12/d3d12_history.cpp"
+    "${DERIVATIVE}/d3d12_history.cpp"
     "${DERIVATIVE}/d3d12_frame_synthesizer.cpp"
     "${OFXR}/src/common/dlss_motion_vectors.cpp"
     "${OFXR}/src/core/pose.cpp"
@@ -65,7 +66,7 @@ set_target_properties(vdxr_frame_generation PROPERTIES OUTPUT_NAME "vdxr-frame-g
 target_compile_features(vdxr_frame_generation PRIVATE cxx_std_20)
 target_compile_options(vdxr_frame_generation PRIVATE /W4 /permissive- /EHsc /fp:precise)
 target_compile_definitions(vdxr_frame_generation PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
-target_include_directories(vdxr_frame_generation PRIVATE include "${OFXR}/include" "${GENERATED}" "${FFX}/include"
+target_include_directories(vdxr_frame_generation PRIVATE include "${DERIVATIVE}" "${OFXR}/include" "${GENERATED}" "${FFX}/include"
     "${OFXR}/external/NVIDIA-Optical-Flow-SDK-5.0.7/Optical_Flow_SDK_5.0.7/NvOFInterface")
 target_link_libraries(vdxr_frame_generation PRIVATE d3d12 dxgi
     "${FFX}/bin/ffx_sdk/ffx_opticalflow_x64.lib" "${FFX}/bin/ffx_sdk/ffx_backend_dx12_x64.lib")
@@ -120,7 +121,23 @@ if(BUILD_TESTING)
     target_link_libraries(fg_v2_regression PRIVATE d3d12 dxgi
         "${CMAKE_CURRENT_SOURCE_DIR}/../packages/Detours.4.0.1/lib/native/libs/x64/detours.lib")
     add_test(NAME fg_v2 COMMAND fg_v2_regression "$<TARGET_FILE:vdxr_frame_generation>")
-    set_tests_properties(fg_v2 PROPERTIES TIMEOUT 60 PASS_REGULAR_EXPRESSION "PASS:")
+    set_tests_properties(fg_v2 PROPERTIES TIMEOUT 120 PASS_REGULAR_EXPRESSION "PASS:")
+
+    add_executable(fg_history_consumed_regression ../tests/fg_history_consumed_regression.cpp)
+    target_compile_features(fg_history_consumed_regression PRIVATE cxx_std_20)
+    target_include_directories(fg_history_consumed_regression PRIVATE include ../packages/Detours.4.0.1/lib/native/include)
+    target_link_libraries(fg_history_consumed_regression PRIVATE d3d12 dxgi
+        "${CMAKE_CURRENT_SOURCE_DIR}/../packages/Detours.4.0.1/lib/native/libs/x64/detours.lib")
+    foreach(BACKEND nvidia fidelityfx-full)
+        foreach(MULTIPLIER 2 3)
+            foreach(OWNER host module)
+                add_test(NAME fg_history_consumed_${BACKEND}_${MULTIPLIER}x_${OWNER}
+                    COMMAND fg_history_consumed_regression "$<TARGET_FILE:vdxr_frame_generation>" ${BACKEND} ${MULTIPLIER} ${OWNER})
+                set_tests_properties(fg_history_consumed_${BACKEND}_${MULTIPLIER}x_${OWNER}
+                    PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "PASS:")
+            endforeach()
+        endforeach()
+    endforeach()
 
     add_executable(fg_ffx_regression ../tests/fg_ffx_regression.cpp)
     target_compile_features(fg_ffx_regression PRIVATE cxx_std_20)
