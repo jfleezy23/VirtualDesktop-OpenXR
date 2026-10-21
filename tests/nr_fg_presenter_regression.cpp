@@ -60,5 +60,45 @@ int main() {
         require(group.fractions[0] == static_cast<float>(group.targets[0] - a.currentTarget) / interval,
                 "fractions use reserved endpoints, including nanosecond rounding");
     }
+    for (const auto interval : {28775268LL, 29979406LL, 32767774LL, 39723500LL, 41952600LL}) {
+        FrameGenerationCadence live;
+        constexpr int64_t nativePeriod = 8333333, previous = 1000000000;
+        const auto first = previous + interval - 2 * nativePeriod;
+        const auto reservation = live.reserve(previous, first, nativePeriod, 3, 3);
+        const auto group = live.plan(reservation, previous, true);
+        require(group.count == 3, "captured nonuniform game intervals retain both valid synthetic slots");
+        require(group.targets[0] == first && group.targets[1] == first + nativePeriod &&
+                    group.targets[2] == previous + interval,
+                "nonuniform interpolation never retimes reserved native targets");
+        for (unsigned slot = 0; slot < 2; ++slot) {
+            require(group.fractions[slot] == static_cast<float>(group.targets[slot] - previous) / interval,
+                    "nonuniform fractions use actual source endpoints");
+        }
+        require(!live.onTime(group, first + 1), "nonuniform inputs retain the original deadline guard");
+    }
+    for (const unsigned multiplier : {2u, 3u}) {
+        FrameGenerationCadence jittered;
+        constexpr int64_t nativePeriod = 8333333, previous = 1000000000;
+        const auto first = previous + nativePeriod + 15000;
+        const auto reservation = jittered.reserve(previous, first, nativePeriod, multiplier, 3);
+        const auto group = jittered.plan(reservation, previous, true);
+        require(group.count == multiplier, "prediction jitter does not force otherwise valid pairs to re-prime");
+    }
+    for (const auto firstOffset : {0LL, 1LL, 19LL}) {
+        FrameGenerationCadence bounds;
+        constexpr int64_t previous = 1000000000;
+        const auto nativePeriod = firstOffset == 19 ? 1 : 19;
+        const auto reservation = bounds.reserve(previous, previous + firstOffset, nativePeriod, 2, 3);
+        const auto fallback = bounds.plan(reservation, previous, true);
+        require(fallback.count == 1 && fallback.roles[0] == FrameGenerationRole::real &&
+                    fallback.targets[0] == reservation.currentTarget,
+                "out-of-bracket and exact module fraction boundaries preserve a pristine real-only plan");
+    }
+    FrameGenerationCadence partial;
+    const auto upper = partial.reserve(firstTarget, firstTarget + 180, 10, 3, 3);
+    const auto rejected = partial.plan(upper, firstTarget, true);
+    require(rejected.count == 1 && rejected.roles[0] == FrameGenerationRole::real &&
+                rejected.targets[0] == upper.currentTarget,
+            "invalid second fraction cannot expose a partially initialized synthetic plan");
     std::puts("PASS: FG pure reservation, 2X/3X roles, fractions, late/overflow/reset guards");
 }

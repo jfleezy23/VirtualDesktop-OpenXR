@@ -59,8 +59,21 @@ those titles need a compatible OpenXR translation path. NR and OFXR are independ
 
 Use fresh Off / 2× / 3× sessions at the same refresh rate and resolution. Check stereo alignment, hair and faces in motion,
 occlusions and controller response. Keep NR coverage at 100%. If an artifact or startup issue occurs, select FG Off and
-restart the game. The maintainer reported smooth play at 120 Hz with Godlike quality and increased pixel density;
-that observation is not a controlled latency benchmark or a guarantee for every game and headset.
+restart the game. The selected mode is a request, not confirmation that every frame was generated. Confirm actual
+synthetic submissions when validating a new game; perceived smoothness and a displayed FPS counter alone do not establish
+which component supplied the frames.
+
+### Automatic color handoff
+
+The shared runtime handoff supports 8-bit RGBA and BGRA, including linear/sRGB and typeless textures. Both eyes may use
+different channel layouts. Packed, separate, cropped, and resolved array/mip images use the same path; no game profile or
+launch flag is needed. BGRA conversion preserves encoded color and alpha bytes. NR output, coverage, and appearance settings
+are unchanged, and the existing RGBA copy path remains available.
+
+Unsupported higher-precision or X8 formats retain the original real-frame path rather than being silently reduced to
+8-bit input. For development captures, `FG_Capture` records accepted slot plans and `FG_Present` identifies the source serial,
+slot, and whether a native submission was synthetic or a fallback repeat. These are software submissions, not a measurement
+of physical headset scanout. Regular gameplay telemetry remains off.
 
 ## Restore the original files
 

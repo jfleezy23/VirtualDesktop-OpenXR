@@ -539,12 +539,12 @@ namespace virtualdesktop_openxr {
             runtime.m_layersForFrame[0].EyeFov.Viewport[1].Size = {eyeWidth, height};
             if (scenario == L"unequal-eyes") {
                 runtime.m_layersForFrame[0].EyeFov.Viewport[1].Size.w -= 4;
-            } else if (scenario == L"bgra") {
+            } else if (scenario == L"bgrx") {
                 D3D11_TEXTURE2D_DESC desc{};
                 runtime.m_precompositor.finalColour[0]->GetDesc(&desc);
-                desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                desc.Format = DXGI_FORMAT_B8G8R8X8_UNORM;
                 ComPtr<ID3D11Texture2D> bgra;
-                success(hw.device->CreateTexture2D(&desc, nullptr, &bgra), "unsupported final BGRA control");
+                success(hw.device->CreateTexture2D(&desc, nullptr, &bgra), "unsupported final BGRX control");
                 runtime.m_precompositor.finalColour[0] = runtime.m_precompositor.finalColour[1] = bgra;
             }
             XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
@@ -857,7 +857,7 @@ int wmain(int argc, wchar_t** argv) {
         const unsigned multiplier = std::wcstoul(argv[3], nullptr, 10);
         require(multiplier == 2 || multiplier == 3, "2X or 3X required");
         const std::wstring scenario = argv[4];
-        if (scenario == L"bgra" || scenario == L"unequal-eyes" || scenario == L"static" || scenario == L"protected" ||
+        if (scenario == L"bgrx" || scenario == L"unequal-eyes" || scenario == L"static" || scenario == L"protected" ||
             scenario == L"nr-off" || scenario == L"low-coverage" || scenario == L"app-submission" ||
             scenario == L"synchronous" || scenario == L"depth" || scenario == L"overlay" ||
             scenario == L"second-projection") {

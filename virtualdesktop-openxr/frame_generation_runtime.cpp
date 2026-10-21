@@ -60,7 +60,8 @@ namespace virtualdesktop_openxr {
         m_precompositor.finalColour[0]->GetDesc(&texture);
         DXGI_FORMAT format = m_precompositor.isProj0SRGB ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
         if (texture.Format != DXGI_FORMAT_R8G8B8A8_TYPELESS && texture.Format != format &&
-            texture.Format != DXGI_FORMAT_R8G8B8A8_UNORM) {
+            texture.Format != DXGI_FORMAT_R8G8B8A8_UNORM && texture.Format != DXGI_FORMAT_B8G8R8A8_TYPELESS &&
+            texture.Format != DXGI_FORMAT_B8G8R8A8_UNORM && texture.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) {
             return bypass();
         }
         if (m_frameGeneration &&
@@ -204,6 +205,15 @@ namespace virtualdesktop_openxr {
                          static_cast<uint32_t>(rect.Size.h)};
         }
         const auto result = m_frameGeneration->capture(input, m_fgTransactionForFrame);
+        TraceLoggingWrite(log::g_traceProvider,
+                          "FG_Capture",
+                          TLArg(input.serial, "Serial"),
+                          TLArg(m_frameGenerationMode, "RequestedMultiplier"),
+                          TLArg(m_fgBegunReservation.multiplier, "ReservedMultiplier"),
+                          TLArg(input.slots.count, "Slots"),
+                          TLArg(input.time, "Target"),
+                          TLArg(m_fgPreviousCapturedTime, "PreviousTarget"),
+                          TLArg(static_cast<int>(result), "Result"));
         if (result == VDXRFG_E_BUSY || result == VDXRFG_E_REJECTED) {
             return bypass();
         }
@@ -573,6 +583,9 @@ namespace virtualdesktop_openxr {
                     TraceLoggingWrite(log::g_traceProvider,
                                       "FG_Present",
                                       TLArg(nativeId, "NativeId"),
+                                      TLArg(transaction.ticket.current_serial, "Serial"),
+                                      TLArg(slot, "Slot"),
+                                      TLArg(cycles, "Slots"),
                                       TLArg(generated && slot < cycles - 1, "Synthetic"),
                                       TLArg(!generated && slot < cycles - 1, "PaddingRepeat"),
                                       TLArg(static_cast<int>(result), "Result"));

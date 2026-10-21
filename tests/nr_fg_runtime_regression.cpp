@@ -73,9 +73,10 @@ namespace {
     std::condition_variable clockChanged;
     bool clockWarmed{};
     unsigned nativeRate = 120;
+    bool predictionJitter{};
     uint64_t nextWaitId{};
     double OVR_CDECL stablePrediction(ovrSession, long long id) {
-        return clockBase.load() + id / static_cast<double>(nativeRate);
+        return clockBase.load() + id / static_cast<double>(nativeRate) + (predictionJitter ? id * .000005 : 0.);
     }
     ovrHmdDesc OVR_CDECL display120(ovrSession session) {
         auto info = originalDisplay(session);
@@ -153,6 +154,7 @@ namespace virtualdesktop_openxr {
         static std::map<ovrTextureSwapChain, unsigned> nrCommits;
         static std::map<ovrTextureSwapChain, unsigned> commitsBeforeInput;
         static std::vector<long long> presentedIds;
+        static std::vector<std::pair<long long, unsigned>> presentedRoles;
         static ovrLayerEyeFov lastProjection;
         static decltype(&NVSDK_NGX_D3D12_EvaluateFeature) originalEvaluate[2];
         template <unsigned eye>
@@ -288,6 +290,7 @@ namespace virtualdesktop_openxr {
         }
         static void observePresentation(const ovrLayerEyeFov& projection) {
             lastProjection = projection;
+            unsigned presentedRole = 2;
             // Called within production End's context lease, before the backend
             // consumes this actual layer. A synthesized GPU pair alone is not
             // evidence that any synthetic pixels were submitted.
@@ -295,9 +298,12 @@ namespace virtualdesktop_openxr {
                 for (unsigned role = 0; role < 2; ++role) {
                     if (bank[role].ovrSwapchain && bank[role].ovrSwapchain == projection.ColorTexture[0]) {
                         ++syntheticPresentations;
+                        presentedRole = role;
                     }
                 }
             }
+            require(!presentedIds.empty(), "projection follows its actual native End ID");
+            presentedRoles.emplace_back(presentedIds.back(), presentedRole);
         }
         static void verifyPixels() {
             auto& value = runtime();
@@ -379,6 +385,36 @@ namespace virtualdesktop_openxr {
                     "public Wait/Begin/End retains consecutive independent native IDs");
             presentedIds.push_back(id);
         }
+        static void verifyBgraFormats(bool srgb) {
+            auto& value = runtime();
+            std::unique_lock contextLease(value.m_fgContextMutex);
+            require(value.m_fgFormat == (srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM),
+                    "BGRA NR capture normalizes FG to the matching RGBA transfer function");
+            const auto nrFormat = srgb ? OVR_FORMAT_B8G8R8A8_UNORM_SRGB : OVR_FORMAT_B8G8R8A8_UNORM;
+            require(value.m_dlssnrOutputSwapchainFormat == nrFormat,
+                    "NR output retains its original BGRA transfer-function metadata");
+            ovrTextureSwapChainDesc nrDescription{};
+            require(OVR_SUCCESS(
+                        ovr_GetTextureSwapChainDesc(value.m_ovrSession, value.m_dlssnrOutputSwapchain, &nrDescription)),
+                    "read the original BGRA NR output swapchain description");
+            require(nrDescription.Format == nrFormat, "original NR output swapchain remains BGRA");
+            const auto fgFormat = srgb ? OVR_FORMAT_R8G8B8A8_UNORM_SRGB : OVR_FORMAT_R8G8B8A8_UNORM;
+            unsigned allocated{};
+            for (const auto& bank : value.m_fgPresentationBanks) {
+                for (const auto& slice : bank) {
+                    if (slice.ovrSwapchain) {
+                        ++allocated;
+                        ovrTextureSwapChainDesc description{};
+                        require(OVR_SUCCESS(
+                                    ovr_GetTextureSwapChainDesc(value.m_ovrSession, slice.ovrSwapchain, &description)),
+                                "read each allocated FG presentation swapchain description");
+                        require(description.Format == fgFormat,
+                                "every FG presentation swapchain uses the matching RGBA transfer function");
+                    }
+                }
+            }
+            require(allocated > 0, "BGRA NR allocates FG presentation swapchains");
+        }
         static void verifyFinal(bool nr, int size, bool drain) {
             auto& value = runtime();
             if (drain) {
@@ -427,6 +463,7 @@ namespace virtualdesktop_openxr {
     std::map<ovrTextureSwapChain, unsigned> RuntimeFrameGenerationRegression::nrCommits;
     std::map<ovrTextureSwapChain, unsigned> RuntimeFrameGenerationRegression::commitsBeforeInput;
     std::vector<long long> RuntimeFrameGenerationRegression::presentedIds;
+    std::vector<std::pair<long long, unsigned>> RuntimeFrameGenerationRegression::presentedRoles;
     ovrLayerEyeFov RuntimeFrameGenerationRegression::lastProjection{};
     decltype(&NVSDK_NGX_D3D12_EvaluateFeature) RuntimeFrameGenerationRegression::originalEvaluate[2]{};
 } // namespace virtualdesktop_openxr
@@ -438,6 +475,9 @@ int main(int argc, char** argv) {
         require(argc == 4, "private backend, state directory and FG scenario required");
         const bool discard = !strcmp(argv[3], "discard");
         const bool toggle = !strcmp(argv[3], "nr-toggle");
+        predictionJitter = !strcmp(argv[3], "bgra-srgb-jitter");
+        const bool bgra = !strcmp(argv[3], "bgra") || !strcmp(argv[3], "bgra-srgb") || predictionJitter;
+        const bool bgraSrgb = !strcmp(argv[3], "bgra-srgb") || predictionJitter;
         const bool d3d12 = !strcmp(argv[3], "nr-off-d3d12") || !strcmp(argv[3], "nr-off-d3d12-reuse") ||
                            !strcmp(argv[3], "nr-off-d3d12-reuse-bypass");
         const bool cropped = !strcmp(argv[3], "nr-off-cropped");
@@ -454,7 +494,8 @@ int main(int argc, char** argv) {
         }
         std::cout << "private backend test clock=" << nativeRate << "Hz\n";
         const bool sharpenOnly = !strcmp(argv[3], "sharpen");
-        require(noNr || discard || toggle || sharpenOnly || !strcmp(argv[3], "native") || !strcmp(argv[3], "upscaled"),
+        require(noNr || discard || toggle || sharpenOnly || bgra || !strcmp(argv[3], "native") ||
+                    !strcmp(argv[3], "upscaled"),
                 "known public FG scenario");
         requestedFrameGeneration = !strcmp(argv[3], "nr-off-2") ? 2 : 3;
         if (const auto backend = std::getenv("VDXR_FG_TEST_BACKEND")) {
@@ -466,7 +507,7 @@ int main(int argc, char** argv) {
         const bool upscaled = !strcmp(argv[3], "upscaled") || !strcmp(argv[3], "nr-off-upscaled");
         nrUpscalingSetting = upscaled ? 150 : 100;
         nrSharpenSetting = upscaled || sharpenOnly ? 25 : 0;
-        enabled = toggle;
+        enabled = toggle || bgra;
         // Blocking Map readbacks inside each native End would themselves miss
         // 120Hz deadlines. Verify final pixels after draining the actual worker.
         readSubmittedColour = false;
@@ -565,7 +606,9 @@ int main(int argc, char** argv) {
             XR_CHECK(xrCreateReferenceSpace(session, &reference, &space));
             const unsigned width = packed ? 1024u : (cropped ? 544u : 512u);
             const unsigned height = cropped ? 536u : 512u;
-            auto colour = createImages(session, DXGI_FORMAT_R8G8B8A8_UNORM, width, height, false, !d3d12);
+            const auto colourFormat = bgraSrgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+                                               : (bgra ? DXGI_FORMAT_B8G8R8A8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM);
+            auto colour = createImages(session, colourFormat, width, height, false, !d3d12);
             if (input12) {
                 input12->attach(colour.chain);
             }
@@ -586,7 +629,7 @@ int main(int argc, char** argv) {
             unsigned beforeDiscard{};
             NrLookupProbe lookupProbe;
             for (unsigned frame = 0; frame < inputs; ++frame) {
-                const bool nr = toggle ? (frame < 3 || frame >= 6) : (!noNr && frame != 0);
+                const bool nr = bgra || (toggle ? (frame < 3 || frame >= 6) : (!noNr && frame != 0));
                 virtualdesktop_openxr::RuntimeInputRegression::setEnabled(nr);
                 XrFrameWaitInfo wait{XR_TYPE_FRAME_WAIT_INFO};
                 XrFrameState state{XR_TYPE_FRAME_STATE};
@@ -607,7 +650,8 @@ int main(int argc, char** argv) {
                 }
                 for (unsigned eye = 0; !input12 && eye < 2; ++eye) {
                     const auto& tint = expectedOffColour[eye];
-                    const auto pixel = tint[0] | (tint[1] << 8) | (tint[2] << 16) | (tint[3] << 24);
+                    const auto pixel = (bgra ? tint[2] : tint[0]) | (tint[1] << 8) |
+                                       ((bgra ? tint[0] : tint[2]) << 16) | (tint[3] << 24);
                     if (!packed || !eye) {
                         std::fill(rgba.begin(), rgba.end(), pixel);
                         if (cropped) {
@@ -712,6 +756,9 @@ int main(int argc, char** argv) {
                 }
                 Regression::verifyFinal(
                     nr, ((51200 / nrUpscalingSetting + 3) / 4) * 4, frame <= 1 || frame == inputs - 1);
+                if (bgra) {
+                    Regression::verifyBgraFormats(bgraSrgb);
+                }
                 Regression::verifyInternalChains();
                 if (toggle && frame == 4) {
                     Regression::drainAndVerifyPixels();
@@ -758,6 +805,20 @@ int main(int argc, char** argv) {
             if (discard) {
                 require(Regression::syntheticPresentations >= beforeDiscard + 4,
                         "public discard recovers real synthetic presentation after reanchoring");
+            }
+            if (bgra) {
+                unsigned s1{}, s2{}, complete{};
+                const auto& roles = Regression::presentedRoles;
+                for (size_t i = 0; i < roles.size(); ++i) {
+                    s1 += roles[i].second == 0;
+                    s2 += roles[i].second == 1;
+                    if (i >= 2 && roles[i - 2].second == 0 && roles[i - 1].second == 1 && roles[i].second == 2 &&
+                        roles[i - 2].first + 1 == roles[i - 1].first && roles[i - 1].first + 1 == roles[i].first)
+                        ++complete;
+                }
+                require(s1 >= 4 && s2 >= 4 && complete >= 1,
+                        "BGRA NR must present both synthetic roles and a complete consecutive S1/S2/B group");
+                std::cout << "BGRA3x proof: S1=" << s1 << " S2=" << s2 << " complete=" << complete << '\n';
             }
             observeProjection = {};
             observeNativeEnd = {};

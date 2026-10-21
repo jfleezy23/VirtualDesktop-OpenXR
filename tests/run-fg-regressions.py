@@ -61,6 +61,8 @@ def main():
         for scenario in ("stationary", "motion"):
             module_case("stereo-" + scenario, "fg_gpu_regression", module, 3, scenario)
     if args.suite in {"integration", "lifecycle", "all"}:
+        for scenario in ("typeless", "unorm", "srgb", "rgba", "rgba-srgb", "motion", "motion-srgb", "separate", "array-mip", "source-reuse", "two-live", "mixed", "mixed-reverse", "unsupported-right", "invalid-right"):
+            module_case("bgra-" + scenario, "nr_fg_bgra_regression", module, scenario)
         for scenario in ("interop", "invalid-plan", "stale-ticket", "blocked-consumer", "invalid-context", "copy-identity", "copy-alias", "event-stale", "source-overwrite"):
             module_case("host-" + scenario, "nr_fg_integration_regression", module, scenario)
         for mode in range(8):
@@ -120,7 +122,7 @@ def main():
         if args.suite in {"integration", "all"}:
             runtime_case("cpu-query-allocations", "nonnr_input_regression", "query-allocations")
             runtime_case("cpu-resolve-allocations", "nonnr_copy_preprocess_regression", "allocations", backend)
-            for scenario in ("native", "upscaled", "sharpen", "discard", "nr-toggle"):
+            for scenario in ("native", "upscaled", "sharpen", "discard", "nr-toggle", "bgra", "bgra-srgb", "bgra-srgb-jitter"):
                 runtime_case("nr-" + scenario, "nr_fg_runtime_regression", backend, output / ("state-" + scenario), scenario)
             for scenario in ("color", "depth", "ignored", "reuse", "upscaled", "direct", "static", "static-array"):
                 runtime_case("commits-" + scenario, "nr_intermediate_commit_regression", backend,
@@ -137,7 +139,7 @@ def main():
                              "ready-event-failure", "ready-wait-failure", "ready-cancel"):
                 runtime_case("delay-" + scenario, "nr_fg_delay_regression", backend, module, scenario)
         if args.suite in {"lifecycle", "all"}:
-            scenarios = ["failed-pending", "stop-before-begin", "cleanup-producer", "bgra", "unequal-eyes", "status-snapshots",
+            scenarios = ["failed-pending", "stop-before-begin", "cleanup-producer", "bgrx", "unequal-eyes", "status-snapshots",
                          "startup-retry", "startup-timeout", "startup-stop",
                          "allocation-create", "allocation-length", "allocation-empty", "allocation-buffer",
                          "static", "protected", "nr-off", "low-coverage", "app-submission", "synchronous",
