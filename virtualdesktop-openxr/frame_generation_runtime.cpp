@@ -7,8 +7,9 @@ namespace virtualdesktop_openxr {
 
     bool OpenXrRuntime::prepareFrameGeneration(const XrFrameEndInfo& info) {
         const auto& settings = m_precompositor.dlssnrSettings;
-        const auto bypass = [&] {
-            m_fgDesiredMultiplier = 1;
+        const auto bypass = [&](bool temporary = false) {
+            // Live history pressure must not shorten the next recovery prime.
+            m_fgDesiredMultiplier = temporary ? m_frameGenerationMode : 1;
             m_fgPreviousCapturedTime = 0;
             m_frameGenerationCadence.reset();
             if (m_frameGeneration && m_frameGeneration->initialized()) {
@@ -169,7 +170,7 @@ namespace virtualdesktop_openxr {
              settings.foveationSize != previous.foveationSize)) {
             const auto result = m_frameGeneration->reset(1);
             if (result == VDXRFG_E_BUSY) {
-                return bypass();
+                return bypass(true);
             }
             CHECK_HRCMD(result);
             m_fgPreviousCapturedTime = 0;
@@ -215,7 +216,7 @@ namespace virtualdesktop_openxr {
                           TLArg(m_fgPreviousCapturedTime, "PreviousTarget"),
                           TLArg(static_cast<int>(result), "Result"));
         if (result == VDXRFG_E_BUSY || result == VDXRFG_E_REJECTED) {
-            return bypass();
+            return bypass(result == VDXRFG_E_BUSY);
         }
         CHECK_HRCMD(result);
         if (!settings.enabled) {

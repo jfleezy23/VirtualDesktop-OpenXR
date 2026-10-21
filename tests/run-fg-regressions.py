@@ -124,7 +124,7 @@ def main():
         if args.suite in {"integration", "all"}:
             runtime_case("cpu-query-allocations", "nonnr_input_regression", "query-allocations")
             runtime_case("cpu-resolve-allocations", "nonnr_copy_preprocess_regression", "allocations", backend)
-            for scenario in ("native", "upscaled", "sharpen", "discard", "nr-toggle", "bgra", "bgra-srgb", "bgra-srgb-jitter"):
+            for scenario in ("native", "upscaled", "sharpen", "discard", "nr-toggle", "bgra", "bgra-srgb", "bgra-srgb-jitter", "nr-off-reset-busy", "nr-off-capture-busy"):
                 runtime_case("nr-" + scenario, "nr_fg_runtime_regression", backend, output / ("state-" + scenario), scenario)
             for scenario in ("color", "depth", "ignored", "reuse", "upscaled", "direct", "static", "static-array"):
                 runtime_case("commits-" + scenario, "nr_intermediate_commit_regression", backend,

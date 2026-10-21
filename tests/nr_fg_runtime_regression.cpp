@@ -225,6 +225,103 @@ namespace virtualdesktop_openxr {
         static void forceFallback() {
             runtime().m_fgBegunReservation.shouldRender = false;
         }
+        static void retainBusyHistory(std::array<OwnedFrameTransaction, 2>& held, bool bothBanks) {
+            auto& value = runtime();
+            value.waitForAsyncSubmissionIdle();
+            std::unique_lock lease(value.m_fgContextMutex);
+            require(value.m_frameGeneration && value.m_fgPreviousCapturedTime,
+                    "busy-reset fixture starts after an actual public capture");
+            const auto period = value.m_fgBegunReservation.period;
+            FrameGenerationCadence cadence;
+            FinalProjectionInput input;
+            input.period = period;
+            input.colour = value.m_precompositor.finalColour;
+            const bool packed = input.colour[0] == input.colour[1];
+            for (unsigned eye = 0; eye < 2; ++eye) {
+                auto& view = input.views[eye];
+                view.rect = {packed ? eye * 512u : 0u, 0, 512, 512};
+                view.orientation[3] = 1.f;
+                view.position[0] = eye ? .032f : -.032f;
+                view.fov[0] = view.fov[3] = -.8f;
+                view.fov[1] = view.fov[2] = .8f;
+            }
+            for (unsigned index = 0; index < (bothBanks ? 2u : 1u); ++index) {
+                input.serial = value.m_frameBegun + index + 1;
+                const auto previous = value.m_fgPreviousCapturedTime + index * 3 * period;
+                input.time = previous + 3 * period;
+                input.slots = cadence.plan(cadence.reserve(0, previous + period, period, 3, 0), previous, true);
+                checkHr(value.m_frameGeneration->capture(input, held[index]));
+                const auto deadline = std::chrono::steady_clock::now() + 5s;
+                while (!value.m_frameGeneration->ready(held[index]) && std::chrono::steady_clock::now() < deadline) {
+                    std::this_thread::sleep_for(1ms);
+                }
+                require(value.m_frameGeneration->ready(held[index]), "bounded held-history GPU readiness");
+            }
+            require(held[0].ticket.token && value.m_frameGeneration->reset(1) == VDXRFG_E_BUSY,
+                    "a real retained GPU ticket prevents history reset");
+            if (bothBanks) {
+                OwnedFrameTransaction refused;
+                require(held[1].ticket.token && held[0].ticket.bank != held[1].ticket.bank &&
+                            value.m_frameGeneration->capture(input, refused) == VDXRFG_E_BUSY && !refused.ticket.token,
+                        "both retained real banks prevent capture without accepting another GPU ticket");
+            }
+        }
+        static void retireBusyHistory(OwnedFrameTransaction& held) {
+            if (!held.ticket.token) {
+                return;
+            }
+            auto& value = runtime();
+            value.waitForAsyncSubmissionIdle();
+            const auto deadline = std::chrono::steady_clock::now() + 5s;
+            HRESULT result = VDXRFG_E_BUSY;
+            do {
+                {
+                    std::unique_lock lease(value.m_fgContextMutex);
+                    result = value.m_frameGeneration->retire(held);
+                }
+                if (result == VDXRFG_E_BUSY) {
+                    std::this_thread::sleep_for(1ms);
+                }
+            } while (result == VDXRFG_E_BUSY && std::chrono::steady_clock::now() < deadline);
+            checkHr(result);
+        }
+        static void verifyBusyFallback() {
+            auto& value = runtime();
+            value.waitForAsyncSubmissionIdle();
+            require(value.m_fgPreviousCapturedTime == 0 && !value.m_fgTransactionForSubmission.ticket.token,
+                    "the public End bypasses busy reset without publishing a partial GPU ticket");
+        }
+        static void verifyRecoveryCadence(const XrFrameState& state, bool native, XrTime previous) {
+            const auto& value = runtime();
+            const auto& reservation = value.m_fgWaitedReservation;
+            const unsigned multiplier = native ? 1u : 3u;
+            std::cout << "public recovery cadence: multiplier=" << reservation.multiplier
+                      << " period=" << state.predictedDisplayPeriod << " first=" << reservation.firstTarget
+                      << " target=" << state.predictedDisplayTime << '\n';
+            require(reservation.valid && reservation.multiplier == multiplier &&
+                        state.predictedDisplayPeriod == multiplier * reservation.period &&
+                        state.predictedDisplayTime == reservation.firstTarget + (multiplier - 1) * reservation.period &&
+                        state.predictedDisplayTime - previous >= multiplier * reservation.period,
+                    native ? "unsupported composition must restore the public native application cadence"
+                           : "temporary busy reset must not release the public application at native cadence");
+        }
+        static void verifyRecoveryGroup(size_t begin, uint64_t expectedCaptures, uint64_t expectedPairs, bool pair) {
+            auto& value = runtime();
+            value.waitForAsyncSubmissionIdle();
+            const auto current = statistics();
+            std::cout << "public recovery presentation: native_slots=" << (presentedRoles.size() - begin)
+                      << " captures_delta=" << (current.captures - expectedCaptures + 1)
+                      << " pairs_delta=" << (current.pairs - expectedPairs + (pair ? 1u : 0u)) << '\n';
+            require(current.captures == expectedCaptures && current.pairs == expectedPairs,
+                    pair ? "the next public capture produces exactly one recovered synthesized pair"
+                         : "recovery consumes exactly one public capture and primes without a stale pair");
+            require(presentedRoles.size() == begin + 3 && presentedRoles[begin].second == (pair ? 0u : 2u) &&
+                        presentedRoles[begin + 1].second == (pair ? 1u : 2u) && presentedRoles[begin + 2].second == 2 &&
+                        presentedRoles[begin].first + 1 == presentedRoles[begin + 1].first &&
+                        presentedRoles[begin + 1].first + 1 == presentedRoles[begin + 2].first,
+                    pair ? "the immediately following public group presents consecutive S1/S2/B native slots"
+                         : "a recovered public prime preserves all three consecutive native slots");
+        }
         static void verifyCaptureRoute(XrTime time, bool accepted) {
             require((runtime().m_fgPreviousCapturedTime == time) == accepted,
                     "source overwrite exercises the intended accepted or bypassed input route");
@@ -475,6 +572,8 @@ int main(int argc, char** argv) {
         require(argc == 4, "private backend, state directory and FG scenario required");
         const bool discard = !strcmp(argv[3], "discard");
         const bool toggle = !strcmp(argv[3], "nr-toggle");
+        const bool captureBusyRecovery = !strcmp(argv[3], "nr-off-capture-busy");
+        const bool busyRecovery = !strcmp(argv[3], "nr-off-reset-busy") || captureBusyRecovery;
         predictionJitter = !strcmp(argv[3], "bgra-srgb-jitter");
         const bool bgra = !strcmp(argv[3], "bgra") || !strcmp(argv[3], "bgra-srgb") || predictionJitter;
         const bool bgraSrgb = !strcmp(argv[3], "bgra-srgb") || predictionJitter;
@@ -487,7 +586,8 @@ int main(int argc, char** argv) {
         const bool reuse = !strcmp(argv[3], "nr-off-reuse") || !strcmp(argv[3], "nr-off-d3d12-reuse") || reuseFallback;
         const bool fallback = !strcmp(argv[3], "nr-off-bypass") || reuseFallback;
         const bool noNr = !strcmp(argv[3], "nr-off-2") || !strcmp(argv[3], "nr-off-3") ||
-                          !strcmp(argv[3], "nr-off-upscaled") || cropped || packed || reuse || fallback || d3d12;
+                          !strcmp(argv[3], "nr-off-upscaled") || cropped || packed || reuse || fallback || d3d12 ||
+                          busyRecovery;
         if (const auto rate = std::getenv("VDXR_FG_TEST_REFRESH_RATE")) {
             nativeRate = static_cast<unsigned>(std::stoul(rate));
             require(nativeRate == 30 || nativeRate == 60 || nativeRate == 120, "explicit supported test clock");
@@ -593,6 +693,17 @@ int main(int argc, char** argv) {
                     }
                 }
             });
+            std::array<virtualdesktop_openxr::OwnedFrameTransaction, 2> heldHistory;
+            auto releaseHistory = MakeScopeGuard([&] {
+                try {
+                    for (auto& held : heldHistory) {
+                        Regression::retireBusyHistory(held);
+                    }
+                } catch (const std::exception& error) {
+                    std::cerr << "FAIL: bounded busy-history cleanup: " << error.what() << '\n';
+                    std::_Exit(2);
+                }
+            });
             observeProjection = Regression::observePresentation;
             observeNativeEnd = Regression::observeId;
             expectDepth[0] = expectDepth[1] = false;
@@ -625,15 +736,24 @@ int main(int argc, char** argv) {
                     reuseViews.push_back(std::move(view));
                 }
             }
-            const unsigned inputs = reuse ? 4u : ((fallback || toggle) ? 18u : 12u);
+            const unsigned inputs = reuse ? 4u : ((fallback || toggle || busyRecovery) ? 18u : 12u);
             unsigned beforeDiscard{};
+            XrTime previousPublicTime{};
             NrLookupProbe lookupProbe;
             for (unsigned frame = 0; frame < inputs; ++frame) {
                 const bool nr = bgra || (toggle ? (frame < 3 || frame >= 6) : (!noNr && frame != 0));
                 virtualdesktop_openxr::RuntimeInputRegression::setEnabled(nr);
+                if (busyRecovery && frame == 4) {
+                    Regression::retainBusyHistory(heldHistory, captureBusyRecovery);
+                }
                 XrFrameWaitInfo wait{XR_TYPE_FRAME_WAIT_INFO};
                 XrFrameState state{XR_TYPE_FRAME_STATE};
+                const auto previousTarget = previousPublicTime;
                 XR_CHECK(xrWaitFrame(session, &wait, &state));
+                if (busyRecovery && (frame == 10 || frame == 11)) {
+                    Regression::verifyRecoveryCadence(state, frame == 10, previousPublicTime);
+                }
+                previousPublicTime = state.predictedDisplayTime;
                 XrFrameBeginInfo fb{XR_TYPE_FRAME_BEGIN_INFO};
                 XR_CHECK(xrBeginFrame(session, &fb));
                 if (discard && frame == 4) {
@@ -682,6 +802,9 @@ int main(int argc, char** argv) {
                     views[eye].pose.orientation.w = 1.f;
                     views[eye].pose.position.x = eye ? .032f : -.032f;
                     views[eye].fov = {-.8f, .8f, .8f, -.8f};
+                    if (busyRecovery && !captureBusyRecovery && frame >= 4 && !eye) {
+                        views[eye].fov.angleLeft = -.7f;
+                    }
                     views[eye].subImage = {
                         colour.chain,
                         {{packed ? static_cast<int>(eye * 512) : (cropped ? 16 : 0), cropped ? 12 : 0}, {512, 512}},
@@ -692,11 +815,18 @@ int main(int argc, char** argv) {
                 layer.viewCount = 2;
                 layer.views = views;
                 const auto* header = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer);
+                const XrCompositionLayerBaseHeader* duplicateLayers[]{header, header};
                 XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
                 end.displayTime = state.predictedDisplayTime;
                 end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
                 end.layerCount = 1;
                 end.layers = &header;
+                if (busyRecovery && frame == 9) {
+                    // A genuinely unsupported composition must still select
+                    // native cadence; it is not temporary history pressure.
+                    end.layerCount = 2;
+                    end.layers = duplicateLayers;
+                }
                 Regression::beforeInputEnd();
                 if (fallback && frame == (reuseFallback ? 3u : 2u)) {
                     // The third app image wraps to SDK-current minus one while
@@ -727,7 +857,25 @@ int main(int argc, char** argv) {
                 const bool measureLookups = nr && frame >= 2;
                 if (measureLookups)
                     Regression::beginLookupProbe(lookupProbe);
+                VDXRFG_StatisticsV1 beforeRecovery{};
+                size_t beforeRecoveryRoles{};
+                if (busyRecovery && (frame == 5 || frame == 6)) {
+                    beforeRecovery = Regression::statistics();
+                    beforeRecoveryRoles = Regression::presentedRoles.size();
+                }
                 XR_CHECK(xrEndFrame(session, &end));
+                if (busyRecovery && frame == 4) {
+                    Regression::verifyBusyFallback();
+                    for (auto& held : heldHistory) {
+                        Regression::retireBusyHistory(held);
+                    }
+                } else if (busyRecovery && (frame == 5 || frame == 6)) {
+                    Regression::verifyRecoveryGroup(beforeRecoveryRoles,
+                                                    beforeRecovery.captures + 1,
+                                                    beforeRecovery.pairs + (frame == 6 ? 1u : 0u),
+                                                    frame == 6);
+                    Regression::verifyRecoveryCadence(state, false, previousTarget);
+                }
                 if (measureLookups)
                     lookupProbe.finish(upscaled || sharpenOnly);
                 if (measureLookups)

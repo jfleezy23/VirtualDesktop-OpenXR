@@ -412,7 +412,8 @@ namespace virtualdesktop_openxr {
                 require(!runtime.prepareFrameGeneration(end) && !runtime.m_fgTransactionForFrame.ticket.token &&
                             held.ticket.token == token && runtime.m_frameGeneration->ready(held),
                         "metadata change bypasses rather than reset or overwrite a live output");
-                require(runtime.m_fgDesiredMultiplier.load() == 1, "busy metadata transition restores native cadence");
+                require(runtime.m_fgDesiredMultiplier.load() == 3,
+                        "busy metadata transition preserves the requested recovery cadence");
                 hw.retire(*runtime.m_frameGeneration, held);
                 capture(4, true);
                 capture(5, false);
