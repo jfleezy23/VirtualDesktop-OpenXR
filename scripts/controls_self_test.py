@@ -63,6 +63,17 @@ def run(result_path):
             root.update()
             time.sleep(0.01)
 
+    def control(widget_type, option, value):
+        def descendants(parent):
+            for child in parent.winfo_children():
+                yield child
+                yield from descendants(child)
+        matches = [widget for widget in descendants(root)
+                   if isinstance(widget, widget_type) and str(widget.cget(option)) == str(value)]
+        if len(matches) != 1:
+            raise AssertionError(f"Expected one {widget_type.__name__} for {option}={value}, found {len(matches)}")
+        return matches[0]
+
     try:
         target = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, owned, 0,
                                    winreg.KEY_ALL_ACCESS | winreg.KEY_WOW64_64KEY)
@@ -80,8 +91,7 @@ def run(result_path):
         root.update()
         check(snapshot() == before, "normal startup is read-only")
         check(app.variables[-1].get() == 100 and not app.enabled.get(), "fresh defaults: NR off, coverage 100")
-        frame = root.winfo_children()[0]
-        toggle = next(widget for widget in frame.winfo_children() if isinstance(widget, ttk.Checkbutton))
+        toggle = control(ttk.Checkbutton, "variable", app.enabled)
         toggle.invoke()
         check(read("FoveationSize") == (100, winreg.REG_DWORD), "enable persists actual coverage 100")
         check(read(gui.ENABLE_VALUE_NAME) == (1, winreg.REG_DWORD), "actual NR toggle")
@@ -94,15 +104,18 @@ def run(result_path):
         app.slider_widgets[-1].set(94)
         wait_for_callbacks()
         check(read("FoveationSize")[0] == 94, "coverage debounce persists")
-        selectors = [widget for widget in frame.winfo_children() if isinstance(widget, ttk.Combobox)]
+        mode_selector = control(ttk.Combobox, "textvariable", app.frame_generation)
+        backend_selector = control(ttk.Combobox, "textvariable", app.frame_generation_backend)
+        check(str(mode_selector.cget("state")) == str(backend_selector.cget("state")) == "readonly",
+              "FG selectors restrict input to supported choices")
         for label, value in gui.FRAME_GENERATION_MODES.items():
-            app.frame_generation.set(label)
-            selectors[0].event_generate("<<ComboboxSelected>>")
+            mode_selector.set(label)
+            mode_selector.event_generate("<<ComboboxSelected>>")
             root.update()
             check(read(gui.FRAME_GENERATION_VALUE_NAME)[0] == value, f"FG mode {value}")
         for label, value in gui.FRAME_GENERATION_BACKENDS.items():
-            app.frame_generation_backend.set(label)
-            selectors[1].event_generate("<<ComboboxSelected>>")
+            backend_selector.set(label)
+            backend_selector.event_generate("<<ComboboxSelected>>")
             root.update()
             check(read(gui.FRAME_GENERATION_BACKEND_NAME)[0] == value, f"FG backend {value}")
         app.slider_widgets[-1].set(95)
@@ -112,7 +125,7 @@ def run(result_path):
         root = tk.Tk()
         app = gui.VDXRRegistryApp(root)
         check(app.variables[-1].get() == 95 and app.enabled.get(), "restart restores saved values")
-        app.reset_defaults()
+        control(ttk.Button, "text", "Reset NR settings").invoke()
         check([read(name)[0] for name in gui.VALUE_NAMES] == list(gui.VALUE_DEFAULTS), "reset persists every NR default immediately")
         check(read(gui.ENABLE_VALUE_NAME)[0] == 0, "reset disables NR")
         check(read(gui.FRAME_GENERATION_VALUE_NAME)[0] == 3 and read(gui.FRAME_GENERATION_BACKEND_NAME)[0] == 1,

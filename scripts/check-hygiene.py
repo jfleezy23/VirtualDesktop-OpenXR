@@ -30,6 +30,10 @@ SECRET_PATTERNS = (
 MACHINE_PATH = re.compile(r"[A-Za-z]:[/\\](?:Users|Documents and Settings)[/\\]|/(?:Users|home)/[^/\s]+/", re.IGNORECASE)
 VENDOR_ROOT = "nr-frame-generation/vendor/ofxr/"
 VENDOR_PIN = "07449429c139e5d2070b6f0855ed5323de7cee00"
+DOCUMENTATION_PNG_SHA256 = {
+    "docs/images/controls-overview.png": "07cca35b1694000bd9bbabab0ca5140e737bb2d9ddea3920231501d53cec4fd3",
+    "docs/images/controls-fg-only.png": "498f3214557d3d480631a4be6227a4e583e7e20d9dfc555d30646dda5c9717ed",
+}
 
 
 class CheckError(Exception):
@@ -56,6 +60,11 @@ def normalized_text(data):
         return data.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
     except UnicodeDecodeError:
         return None
+
+
+def documentation_png(path, data):
+    """Allow only the exact documentation screenshots reviewed for this release."""
+    return hashlib.sha256(data).hexdigest() == DOCUMENTATION_PNG_SHA256.get(path)
 
 
 def added_ranges(before, after):
@@ -151,7 +160,8 @@ def check_repository(repo, base, formatter):
         ):
             failures.append(f"artifact: {path} (new or changed generated/binary payload)")
         if current_text is None:
-            failures.append(f"binary: {path} (new or changed non-UTF-8 source)")
+            if not documentation_png(path, current):
+                failures.append(f"binary: {path} (new or changed non-UTF-8 source)")
             continue
         ranges = added_ranges(previous_text or "", current_text)
         lines = current_text.splitlines(keepends=True)

@@ -10,7 +10,7 @@ The package was tested locally on an RTX 4090. Compatible NVIDIA hardware and a 
 Use a current NVIDIA display driver and the latest
 [Microsoft Visual C++ v14 x64 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/).
 The synthesis DLL uses the Microsoft C++ runtime; the host also needs the Vulkan loader supplied by the graphics driver.
-End users do not need Visual Studio or a compiler. Python is needed only for the controls window, as described below.
+End users do not need Visual Studio, a compiler, or Python for the standalone Controls app.
 
 ## Install
 
@@ -18,8 +18,8 @@ End users do not need Visual Studio or a compiler. Python is needed only for the
 2. Download the Windows x64 NR/FG package from [Releases](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases)
    and extract it. Keep the matching runtime and synthesis DLL together.
 3. Back up the existing files with these names from `%ProgramFiles%\Virtual Desktop Streamer\OpenXR`:
-   `virtualdesktop-openxr.dll`, `vdxr-frame-generation.dll` and `vdxr_registry_gui.py`. Record any that were absent.
-4. Copy the package's three files into that OpenXR folder, accepting Windows administrator access when prompted.
+   `virtualdesktop-openxr.dll` and `vdxr-frame-generation.dll`. Record any that were absent.
+4. Copy those two DLLs from the package into that OpenXR folder, accepting Windows administrator access when prompted.
    Leave the runtime JSON, stock 32-bit DLL and other files intact. Keep your licensed `nvngx_dlssnr.dll` beside the runtime if you want NR. FG with NR off does not initialize NR or require this vendor DLL.
 5. In Streamer's Options, select **VDXR** as the OpenXR runtime. Fully restart the game after installation.
 
@@ -28,14 +28,24 @@ Streamer updates may replace a custom runtime; retain the package and backups.
 
 ## Open NR Controls
 
-Install **64-bit Python 3.13**, including Tcl/Tk and the Python launcher. From PowerShell in the OpenXR folder, run:
+Download **VDXR-NR-FG-Controls-Windows-x64.zip** from the same release. Extract the entire folder and open
+**VDXR-NR-FG-Controls.exe**, keeping `_internal` beside it. Python and Tk are bundled. The unsigned community app
+requests administrator access to save settings; opening it only reads existing settings and does not reset them.
+
+See the [illustrated Controls guide](NR-FG-CONTROLS.md) for each setting, automatic saving and troubleshooting.
+
+![The standalone dark Controls app with NR at 100% and OFXR 3× selected](images/controls-overview.png)
+
+The runtime ZIP also retains the optional source script. If you prefer that route, install **64-bit Python 3.13**
+with Tcl/Tk and the Python launcher. Copy `vdxr_registry_gui.py` into the OpenXR folder, backing up an existing
+copy before replacing it, then run this from PowerShell in that folder:
 
 ```powershell
 pyw -3.13 .\vdxr_registry_gui.py
 ```
 
-The window requests administrator access to save settings. The release UI targets VD Streamer's 64-bit runtime registry.
-You can create a desktop shortcut to the same command. Opening the panel only reads settings; it does not reset them.
+Both versions edit VD Streamer's same 64-bit runtime registry settings. The standalone app does not install or select
+the runtime, and its extracted folder can be stored outside the Streamer installation.
 
 ## Choose a mode
 
@@ -70,6 +80,9 @@ which component supplied the frames.
 
 Rapid head turns can still produce interpolation artifacts. This remains an experimental frame-generation path;
 the recovery and synchronization corrections do not establish artifact-free head motion in every title.
+The reported left-offset multiple-image issue and separate exposure-change artifact are not established as fixed by
+this release. The new bounds, scaling and copy corrections have automated coverage; combined headset testing of those
+latest changes remains pending.
 
 ### Automatic color handoff
 
@@ -85,7 +98,8 @@ of physical headset scanout. Regular gameplay telemetry remains off.
 
 ## Restore the original files
 
-With games closed, restore the backed-up three files. Remove only a package file that was absent before installation.
+With games closed, restore the backed-up DLLs. Remove only a package file that was absent before installation.
+If you also installed the optional Python script, restore or remove it using the same rule.
 Set FG Off before reverting if you want the saved setting cleared; restoring files by itself preserves registry settings.
 Do not replace the stock 32-bit runtime or proprietary NR DLL as part of this rollback.
 

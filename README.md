@@ -34,6 +34,12 @@ a GPU fence event rather than timer polling.
 
 For installation, controls and rollback, follow the [NR/FG quick start](docs/NR-FG-QUICKSTART.md).
 Download the Windows x64 runtime and controls package from [Releases](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases).
+The standalone **VDXR NR/FG Controls** app includes Python/Tk; extract its full ZIP and run the EXE.
+Its [illustrated guide](docs/NR-FG-CONTROLS.md) covers live NR adjustments, NR-off frame generation, backend selection
+and the settings that require a game restart.
+
+![VDXR NR/FG Controls](docs/images/controls-overview.png)
+
 The [FG regression guide](tests/frame-generation.md) describes supported inputs, build requirements and test limits.
 The optional OFXR-derived module has separate [LGPL-3.0 notices and corresponding-source requirements](nr-frame-generation/NOTICE.md).
 

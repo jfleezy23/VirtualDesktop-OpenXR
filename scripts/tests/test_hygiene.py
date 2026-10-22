@@ -14,6 +14,8 @@ import tempfile
 import textwrap
 import unittest
 from unittest import mock
+import struct
+import zlib
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "check-hygiene.py"
@@ -223,6 +225,42 @@ class HygieneTests(unittest.TestCase):
     def test_binary_without_known_extension_is_rejected(self):
         (self.repo / "payload").write_bytes(b"\0private payload")
         self.assert_rejects("binary")
+
+    def documentation_png(self):
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(b"\x00\x14\x28\x3c\xff")) + chunk(b"IEND", b""))
+
+    def test_documentation_png_is_allowed(self):
+        for name in ("controls-overview.png", "controls-fg-only.png"):
+            image = self.repo / "docs/images" / name
+            image.parent.mkdir(parents=True, exist_ok=True)
+            image.write_bytes((SCRIPT.parent.parent / "docs/images" / name).read_bytes())
+        self.assert_passes()
+
+    def test_image_exception_rejects_other_paths_and_malformed_payloads(self):
+        png = self.documentation_png()
+        corrupt = bytearray(png)
+        corrupt[-1] ^= 1
+        for path, data in (
+            ("outside.png", png),
+            ("docs/images/unreviewed.png", png),
+            ("docs/images/controls-overview.png", png),
+            ("docs/images/executable.png", b"MZ\0executable"),
+            ("docs/images/header-only.png", png[:8]),
+            ("docs/images/truncated.png", png[:-1]),
+            ("docs/images/corrupt.png", bytes(corrupt)),
+            ("docs/images/trailing.png", png + b"MZ\0payload"),
+        ):
+            with self.subTest(path=path):
+                image = self.repo / path
+                image.parent.mkdir(parents=True, exist_ok=True)
+                image.write_bytes(data)
+                try:
+                    self.assert_rejects("binary")
+                finally:
+                    image.unlink()
 
     def test_secret_screen_reports_category_without_echoing_value(self):
         token = "gh" + "p_" + "a" * 36

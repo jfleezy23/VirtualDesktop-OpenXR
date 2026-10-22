@@ -17,13 +17,14 @@ NAME = "VDXR-NR-FG-Controls"
 PYINSTALLER_VERSION = "6.22.3"
 ALLOWED_DLLS = {"python3.dll", "python313.dll", "tcl86t.dll", "tk86t.dll", "libffi-8.dll",
                 "vcruntime140.dll", "vcruntime140_1.dll", "libcrypto-3.dll", "zlib1.dll"}
+DOC_IMAGES = ("docs/images/controls-overview.png", "docs/images/controls-fg-only.png")
 SOURCE_FILES = (
     "vdxr_registry_gui.py", "scripts/controls_entry.py", "scripts/controls_self_test.py",
     "scripts/build-controls.py", "scripts/controls-build-requirements.txt",
     "scripts/tests/test_fg_controls.py", "scripts/tests/test_controls_package.py",
     "scripts/licenses/Tcl-8.6.15.txt", "docs/NR-FG-CONTROLS.md", "LICENSE",
     "scripts/licenses/OpenSSL-3.0.16.txt", "scripts/licenses/zlib-1.3.1.txt",
-)
+) + DOC_IMAGES
 
 
 def sha(path):
@@ -62,6 +63,15 @@ def verify_recorded_payload(output, bundle):
     current = {path.relative_to(bundle).as_posix(): sha(path) for path in bundle.rglob("*") if path.is_file()}
     if current != recorded:
         raise ValueError("Tested package contents changed; do not publish this build")
+
+
+def copy_documentation(snapshot, bundle):
+    """Keep the extracted guide and its relative screenshot links usable offline."""
+    shutil.copyfile(snapshot / "docs/NR-FG-CONTROLS.md", bundle / "README.md")
+    images = bundle / "images"
+    images.mkdir()
+    for name in DOC_IMAGES:
+        shutil.copyfile(snapshot / name, images / Path(name).name)
 
 
 def build(output):
@@ -108,7 +118,7 @@ def build(output):
     shutil.copyfile(snapshot / "scripts/licenses/Tcl-8.6.15.txt", licenses / "Tcl-8.6.15.txt")
     shutil.copyfile(snapshot / "scripts/licenses/OpenSSL-3.0.16.txt", licenses / "OpenSSL-3.0.16.txt")
     shutil.copyfile(snapshot / "scripts/licenses/zlib-1.3.1.txt", licenses / "zlib-1.3.1.txt")
-    shutil.copyfile(snapshot / "docs/NR-FG-CONTROLS.md", bundle / "README.md")
+    copy_documentation(snapshot, bundle)
     metadata = {"name": NAME, "source_revision": None,
                 "build_base_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                 "source_sha256": inputs, "exe_sha256": sha(bundle / (NAME + ".exe")),
@@ -131,7 +141,9 @@ def bind_revision(output, revision):
     for name, digest in metadata["source_sha256"].items():
         source = bundle / "source" / name
         committed = subprocess.check_output(["git", "show", f"{revision}:{name}"], cwd=ROOT)
-        if sha(source) != digest or source.read_bytes().replace(b"\r\n", b"\n") != committed.replace(b"\r\n", b"\n"):
+        data = source.read_bytes()
+        matches = data == committed if name.endswith(".png") else data.replace(b"\r\n", b"\n") == committed.replace(b"\r\n", b"\n")
+        if sha(source) != digest or not matches:
             raise ValueError(f"Compiled source does not match revision: {name}")
     metadata["source_revision"] = revision
     (bundle / "BUILD.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")

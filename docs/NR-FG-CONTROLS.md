@@ -1,33 +1,97 @@
-# VDXR NR/FG Controls — Windows x64
+# VDXR NR/FG Controls
 
-Extract the entire ZIP to a local folder, then open **VDXR-NR-FG-Controls.exe**.
-Keep `_internal` beside the EXE. Python is included; no Python installation is needed.
-Windows requests administrator access because Virtual Desktop saves these settings in
-the machine-wide, 64-bit OpenXR registry key. The app is an unsigned community build.
+A standalone Windows x64 settings app for this repository's experimental VDXR runtime.
+Adjust neural rendering (NR) during play, or select PC-side OFXR frame generation (FG)
+for the next game session. Frame generation also works with NR off.
 
-Use this with the experimental NR/FG runtime from this repository and an existing
-Virtual Desktop Streamer installation. The controls do not install, replace or select
-a runtime. No DLSSNR DLLs, models, VR runtime DLLs or games are included or downloaded.
-NR requires a separately supplied, compatible licensed NR component. FG can run with NR off.
+![VDXR Controls showing neural rendering enabled at 100% coverage, OFXR 3× and NVIDIA](images/controls-overview.png)
 
-## Settings
+*The screenshots show the actual app with example settings. The appearance sliders are
+examples, not a preset applied by installation.*
 
-- **NR enable and sliders:** save automatically and apply during play. Coverage defaults
-  to **100%**. Existing saved values are preserved when the window opens.
-- **NR coverage:** saves after a short pause while dragging. Closing the app flushes the
-  last pending change. A failed save is reported rather than silently discarded.
-- **Frame generation:** choose Off, OFXR 2× or OFXR 3× and NVIDIA or FidelityFX.
-  Restart the game after changing either selector. A saved request does not prove FG is
-  active. NVIDIA is the default; FidelityFX full resolution remains experimental.
-- **Reset NR settings:** disables NR and immediately saves the NR defaults, including
-  100% coverage. It preserves both FG selections. This replaces your saved NR appearance
-  choices; simply opening or closing the window does not reset them.
+## Get started
 
-Use 100% coverage for NR and turn Virtual Desktop's SSW off when testing OFXR. The app
-does not control codecs, headset settings or Frame Launcher's separate SteamVR route.
-The window can be closed during gameplay. Uninstall by deleting its extracted folder;
-saved runtime settings remain in place. NR hair/face rendering and runtime binaries are
-unchanged by installing this controls package.
+1. Install the matching experimental NR/FG runtime in Virtual Desktop Streamer first.
+   This app changes settings; it does not install or select a runtime.
+2. Extract the **entire** controls ZIP to a local folder. Open
+   **VDXR-NR-FG-Controls.exe** and keep its `_internal` folder beside it.
+   No Python installation is needed.
+3. Accept the Windows administrator prompt. Settings are saved in Virtual Desktop's
+   machine-wide, 64-bit OpenXR registry key. This is an unsigned community build.
+4. In Streamer, select **VDXR** as the OpenXR runtime. Turn **SSW Off** in Virtual
+   Desktop when using OFXR, and disable any separate external FG layer.
+5. Choose **Off**, **OFXR 2×** or **OFXR 3×**, then an optical-flow backend.
+   Start with **NVIDIA (default)**. Fully close and relaunch the game after changing
+   either FG selector.
+6. For NR, enable **Enable NR** and keep **NR coverage (%) at 100**. The toggle and
+   appearance sliders save automatically and can be adjusted during play.
+
+Opening the app preserves existing saved settings. Fresh settings show NR off, FG off,
+NVIDIA selected and NR coverage at **100%**. If coverage has never been saved, the status
+message asks you to toggle NR off/on to persist the displayed defaults. Enabling NR
+saves the displayed coverage before turning NR on.
+
+NR requires compatible NVIDIA hardware and a separately supplied, compatible licensed
+NR component. **No DLSSNR DLLs or models are included or downloaded.** The controls
+package also contains no VR runtime DLLs or games. FG with NR off does not require the
+NR component.
+
+## Controls and when they apply
+
+| Control | What it changes | When it applies |
+| --- | --- | --- |
+| Enable NR | Neural processing on or off | During play |
+| NR style (0–2) | The NR component's numbered style selection | During play |
+| NR strength | Overall NR strength, 0–100 | During play |
+| Local tone | NR local-tone strength, 0–100 | During play |
+| Structure detail | NR structure-detail strength, 0–100 | During play |
+| Skin detail | NR skin-detail strength, 0–100 | During play |
+| NR coverage (%) | The portion of the image processed by NR; use **100%** | During play, saved after a short pause while dragging |
+| Mode | Off, OFXR 2× or OFXR 3× | After restarting the game |
+| Optical-flow backend | NVIDIA or experimental FidelityFX at full resolution | After restarting the game |
+
+There is no Apply button. The status line confirms a saved change or reports an error.
+The NR sliders are disabled while NR is off; FG remains selectable. Closing the app
+flushes a pending coverage change and leaves the saved settings in place.
+
+**Reset NR settings** disables NR and saves its defaults, including 100% coverage.
+It replaces the saved NR appearance choices but preserves the FG mode and backend.
+Installing or upgrading the controls app does not reset your hair/face settings.
+
+## Frame generation without NR
+
+Leave **Enable NR** off, choose OFXR 2× or 3×, and restart the game. OFXR then processes
+the ordinary final stereo images. Selecting **Off** disables OFXR while retaining the
+selected ordinary or NR processing path.
+
+![VDXR Controls showing NR off with OFXR 2× and FidelityFX full resolution selected](images/controls-fg-only.png)
+
+NVIDIA is the default optical-flow backend. FidelityFX uses full-resolution inputs and
+remains experimental; compare head motion, occlusions and image stability before
+choosing it for regular play. Changing the backend does not change game resolution,
+NR coverage or the NR appearance sliders.
+
+OFXR 2× can add one generated frame between real frames; 3× can add two. Eligibility
+and timing still matter: unsupported submissions or missed deadlines retain real
+frames. **The selectors show saved requests, not active runtime status or proof that
+every synthetic frame reached the headset.** Use runtime capture/log evidence when
+validating a new game; smoothness or an FPS counter alone cannot identify who supplied
+the frames.
+
+## Scope and troubleshooting
+
+- These settings affect games that actually reach the patched VDXR runtime. A native
+  Oculus or SteamVR game needs a compatible translation path; installing this app does
+  not reroute it. **Frame Launcher's separate SteamVR route is unaffected.**
+- The app does not control streaming codecs, bandwidth, headset refresh rate, SSW or
+  game pixel density. Make those changes in Virtual Desktop, the headset or the game.
+- If a change fails to save, read the status line and confirm administrator access.
+  Opening the app alone does not make a missing runtime or NR component available.
+- If FG causes artifacts or a startup problem, select **Off** and restart the game.
+  NR can remain enabled independently. Rapid head motion can still reveal interpolation
+  artifacts; this is an experimental build.
+- You can close the controls window during gameplay. To remove the app, delete its
+  extracted folder; the saved runtime settings remain.
 
 ## Build and local verification
 
@@ -42,9 +106,8 @@ python -m unittest discover -s scripts/tests -p test_fg_controls.py -v
 
 The build uses pinned PyInstaller dependencies and creates a folder bundle, its ZIP,
 source copies, license notices and a build manifest. No installed NR/VR DLL is collected.
-`BUILD.json` identifies the exact source files and interpreter used. Python 3.13.3 and
-Tcl/Tk 8.6.15 were used for this release; building with another patch version produces
-a different dependency inventory. A fresh output directory is required for every build.
+`BUILD.json` identifies the exact source files and interpreter used. A fresh output
+directory is required for every build.
 
 The actual EXE also supports a bounded integration check, from an elevated terminal:
 

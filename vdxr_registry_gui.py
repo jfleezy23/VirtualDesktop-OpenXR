@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 import winreg
 
@@ -25,6 +26,144 @@ FRAME_GENERATION_VALUE_NAME = "FrameGenerationMode"
 FRAME_GENERATION_MODES = {"Off": 0, "OFXR 2×": 2, "OFXR 3×": 3}
 FRAME_GENERATION_BACKEND_NAME = "FrameGenerationBackend"
 FRAME_GENERATION_BACKENDS = {"NVIDIA (default)": 0, "FidelityFX (full resolution)": 1}
+
+COLORS = {
+    "background": "#101217", "panel": "#1A1D25", "border": "#2B303C",
+    "control": "#252A36", "hover": "#30384A", "text": "#F3F5FA",
+    "muted": "#A6AEBD", "disabled": "#7D889C", "accent": "#8AA6FF",
+    "blue": "#698BFF", "selection": "#3B54A5", "amber": "#DDC18B",
+}
+
+
+def rounded_image(root, width, height, radius, color):
+    """Small native Tk image used by the switch and button theme elements."""
+    image = tk.PhotoImage(master=root, width=width, height=height)
+    for y in range(height):
+        distance = max(radius - y - 0.5, y - (height - radius) + 0.5, 0)
+        inset = round(radius - max(0, radius * radius - distance * distance) ** 0.5)
+        image.put(color, to=(inset, y, width - inset, y + 1))
+    return image
+
+
+def apply_dark_theme(root):
+    if hasattr(root, "_controls_theme_images"):
+        return
+    root.configure(background=COLORS["background"])
+    families = set(tkfont.families(root))
+    body_font = "Segoe UI Variable Text" if "Segoe UI Variable Text" in families else "Segoe UI"
+    heading_font = "Segoe UI Variable Display Semib" if "Segoe UI Variable Display Semib" in families else "Segoe UI Semibold"
+    number_font = "Segoe UI Variable Text Semibold" if "Segoe UI Variable Text Semibold" in families else "Segoe UI Semibold"
+    root.option_add("*TCombobox.font", (body_font, 11))
+    for option, value in {
+        "background": COLORS["control"], "foreground": COLORS["text"],
+        "selectBackground": COLORS["selection"], "selectForeground": COLORS["text"],
+        "font": (body_font, 11),
+    }.items():
+        root.option_add(f"*TCombobox*Listbox.{option}", value)
+    style = ttk.Style(root)
+    style.theme_use("clam")
+    style.configure(".", font=(body_font, 11))
+    style.configure("App.TFrame", background=COLORS["background"])
+    style.configure("Card.TFrame", background=COLORS["panel"])
+    style.configure("App.TLabel", background=COLORS["background"], foreground=COLORS["text"])
+    style.configure("Title.TLabel", background=COLORS["background"], foreground=COLORS["text"], font=(heading_font, 24))
+    style.configure("Subtitle.TLabel", background=COLORS["background"], foreground=COLORS["muted"])
+    style.configure("Card.TLabel", background=COLORS["panel"], foreground=COLORS["text"])
+    style.configure("Hint.TLabel", background=COLORS["panel"], foreground=COLORS["muted"])
+    style.configure("Section.TLabel", background=COLORS["panel"], foreground=COLORS["text"], font=(heading_font, 15))
+    style.configure("Live.TLabel", background=COLORS["panel"], foreground=COLORS["accent"])
+    style.configure("Restart.TLabel", background=COLORS["panel"], foreground=COLORS["amber"])
+    style.configure("Value.TLabel", background=COLORS["control"], foreground=COLORS["text"], padding=(8, 2), font=(number_font, 11))
+    style.configure("Dark.TCombobox", fieldbackground=COLORS["control"], background=COLORS["control"],
+                    foreground=COLORS["text"], arrowcolor=COLORS["muted"], bordercolor=COLORS["border"],
+                    lightcolor=COLORS["control"], darkcolor=COLORS["control"], padding=(10, 8))
+    style.map("Dark.TCombobox", fieldbackground=[("readonly", COLORS["control"])],
+              foreground=[("disabled", COLORS["disabled"]), ("readonly", COLORS["text"])],
+              selectbackground=[("readonly", COLORS["control"])], selectforeground=[("readonly", COLORS["text"])],
+              bordercolor=[("focus", COLORS["accent"])], arrowcolor=[("active", COLORS["accent"])])
+
+    switch_images = []
+    for selected in (False, True):
+        image = rounded_image(root, 42, 24, 12, COLORS["blue"] if selected else "#444D60")
+        center = 30 if selected else 12
+        for y in range(4, 20):
+            half = round(max(0, 8 * 8 - (y - 11.5) ** 2) ** 0.5)
+            image.put("#FFFFFF", to=(center - half, y, center + half, y + 1))
+        switch_images.append(image)
+    style.element_create("Controls.Switch", "image", switch_images[0], ("selected", switch_images[1]))
+    style.layout("Switch.TCheckbutton", [("Checkbutton.padding", {"sticky": "nswe", "children": [
+        ("Controls.Switch", {"side": "left", "sticky": ""}),
+        ("Checkbutton.focus", {"side": "left", "children": [("Checkbutton.label", {"sticky": "nswe"})]}),
+    ]})])
+    style.configure("Switch.TCheckbutton", background=COLORS["panel"], foreground=COLORS["text"],
+                    focuscolor=COLORS["accent"], padding=(0, 2))
+    style.map("Switch.TCheckbutton", background=[("active", COLORS["panel"])])
+    button_images = [rounded_image(root, 24, 24, 8, color)
+                     for color in (COLORS["control"], COLORS["hover"], "#3C4965")]
+    style.element_create("Controls.Button", "image", button_images[0],
+                         ("pressed", button_images[2]), ("active", button_images[1]), border=8, sticky="nswe")
+    style.layout("Soft.TButton", [("Controls.Button", {"sticky": "nswe", "children": [
+        ("Button.padding", {"sticky": "nswe", "children": [
+            ("Button.focus", {"sticky": "nswe", "children": [("Button.label", {"sticky": "nswe"})]}),
+        ]}),
+    ]})])
+    style.configure("Soft.TButton", background=COLORS["background"], foreground=COLORS["text"],
+                    padding=(14, 5), focuscolor=COLORS["accent"])
+    root._controls_theme_images = switch_images + button_images
+
+
+def dark_title_bar(root):
+    """Use system window chrome; unsupported DWM versions remain harmless."""
+    if sys.platform != "win32":
+        return False
+    try:
+        from ctypes import wintypes
+        ancestor = ctypes.WinDLL("user32").GetAncestor
+        ancestor.argtypes = (wintypes.HWND, wintypes.UINT)
+        ancestor.restype = wintypes.HWND
+        attribute = ctypes.WinDLL("dwmapi").DwmSetWindowAttribute
+        attribute.argtypes = (wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD)
+        attribute.restype = ctypes.c_long
+        handle = ancestor(root.winfo_id(), 2)
+        enabled = wintypes.BOOL(1)
+        if not handle:
+            return False
+        applied = attribute(handle, 20, ctypes.byref(enabled), ctypes.sizeof(enabled)) == 0
+        # Windows 11 caption/text colors; older DWM versions simply reject these.
+        for option, color in ((35, COLORS["background"]), (36, COLORS["text"])):
+            red, green, blue = (int(color[index:index + 2], 16) for index in (1, 3, 5))
+            value = wintypes.DWORD(red | green << 8 | blue << 16)
+            attribute(handle, option, ctypes.byref(value), ctypes.sizeof(value))
+        return applied
+    except (OSError, AttributeError, tk.TclError):
+        return False
+
+
+class RoundedPanel(tk.Canvas):
+    """Decorative card around ordinary, keyboard-accessible Tk controls."""
+    def __init__(self, parent):
+        super().__init__(parent, background=COLORS["background"], highlightthickness=0, borderwidth=0)
+        self.content = ttk.Frame(self, style="Card.TFrame")
+        self.window = self.create_window(20, 14, anchor="nw", window=self.content)
+        self.content.bind("<Configure>", self.fit_content)
+        self.bind("<Configure>", self.paint)
+
+    def fit_content(self, _event=None):
+        height = self.content.winfo_reqheight() + 28
+        width = self.content.winfo_reqwidth() + 40
+        if int(self.cget("height")) != height or int(self.cget("width")) != width:
+            self.configure(height=height, width=width)
+
+    def paint(self, event):
+        width, height, radius = event.width - 1, event.height - 1, 18
+        self.itemconfigure(self.window, width=max(1, width - 40))
+        self.delete("card")
+        self.create_polygon(radius, 1, width - radius, 1, width, 1, width, radius,
+                            width, height - radius, width, height, width - radius, height,
+                            radius, height, 1, height, 1, height - radius, 1, radius, 1, 1,
+                            smooth=True, splinesteps=24, fill=COLORS["panel"],
+                            outline=COLORS["border"], tags="card")
+        self.tag_lower("card")
 
 
 def read_frame_generation_backend():
@@ -147,30 +286,43 @@ class VDXRRegistryApp:
         self.root.title("VDXR NR/FG Controls")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        apply_dark_theme(root)
         self.updating = True
         errors = []
         self.saved_values = read_values(errors)
         self.saved_enabled = read_enabled(errors)
 
-        frame = ttk.Frame(root, padding=16)
+        frame = ttk.Frame(root, padding=(20, 16), style="App.TFrame")
         frame.grid()
+        frame.columnconfigure(0, minsize=592)
 
-        ttk.Label(frame, text="VDXR NR/FG Controls", font=("Segoe UI", 14, "bold")).grid(
-            row=0, column=0, columnspan=3, sticky="w", pady=(0, 12)
+        ttk.Label(frame, text="VDXR Controls", style="Title.TLabel").grid(
+            row=0, column=0, sticky="w"
         )
+        ttk.Label(frame, text="Neural rendering  /  Frame generation", style="Subtitle.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(2, 12)
+        )
+
+        nr_panel = RoundedPanel(frame)
+        nr_panel.grid(row=2, column=0, sticky="ew")
+        nr = nr_panel.content
+        nr.columnconfigure(1, weight=1)
+        nr_header = ttk.Frame(nr, style="Card.TFrame")
+        nr_header.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        nr_header.columnconfigure(0, weight=1)
+        ttk.Label(nr_header, text="Neural rendering", style="Section.TLabel").grid(row=0, column=0, sticky="w")
 
         self.enabled = tk.BooleanVar(value=self.saved_enabled)
         ttk.Checkbutton(
-            frame,
-            text="Enable neural rendering · applies during play",
+            nr_header,
+            text="  Enable NR",
+            style="Switch.TCheckbutton",
             variable=self.enabled,
             command=self.on_enabled_changed,
-        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 8))
-        ttk.Button(
-            frame,
-            text="Reset NR settings",
-            command=self.reset_defaults,
-        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        ).grid(row=0, column=1, sticky="e")
+        ttk.Label(nr, text="Live adjustments", style="Live.TLabel").grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(0, 8)
+        )
 
         self.variables = []
         self.slider_widgets = []
@@ -180,11 +332,11 @@ class VDXRRegistryApp:
             variable.trace_add("write", lambda *_args, i=index, v=variable: self.save(i, v))
             self.variables.append(variable)
 
-            ttk.Label(frame, text=VALUE_LABELS[index], width=31).grid(
-                row=index + 3, column=0, sticky="w", padx=(0, 8), pady=4
+            ttk.Label(nr, text=VALUE_LABELS[index], style="Card.TLabel").grid(
+                row=index + 2, column=0, sticky="w", padx=(0, 16)
             )
-            tk.Scale(
-                frame,
+            slider = tk.Scale(
+                nr,
                 from_=0,
                 to=VALUE_MAXIMUMS[index],
                 resolution=1,
@@ -192,13 +344,38 @@ class VDXRRegistryApp:
                 orient="horizontal",
                 length=260,
                 showvalue=False,
-                highlightthickness=0,
-            ).grid(row=index + 3, column=1, sticky="ew", pady=4)
-            self.slider_widgets.append(frame.grid_slaves(row=index + 3, column=1)[0])
-            ttk.Label(frame, textvariable=variable, width=4, anchor="e").grid(
-                row=index + 3, column=2, sticky="e", padx=(8, 0), pady=4
+                background="#B2C4FF",
+                foreground=COLORS["text"],
+                troughcolor="#56627A",
+                activebackground="#E7EDFF",
+                sliderrelief="flat",
+                sliderlength=18,
+                width=8,
+                borderwidth=0,
+                highlightthickness=1,
+                highlightbackground=COLORS["panel"],
+                highlightcolor=COLORS["accent"],
+                takefocus=True,
+            )
+            slider.grid(row=index + 2, column=1, sticky="ew")
+            self.slider_widgets.append(slider)
+            ttk.Label(nr, textvariable=variable, style="Value.TLabel", width=3, anchor="e").grid(
+                row=index + 2, column=2, sticky="e", padx=(14, 0)
             )
 
+        ttk.Label(nr, text="Changes apply during play.  100% coverage recommended.", style="Hint.TLabel").grid(
+            row=8, column=0, columnspan=3, sticky="w", pady=(10, 0)
+        )
+
+        fg_panel = RoundedPanel(frame)
+        fg_panel.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        fg = fg_panel.content
+        fg.columnconfigure(0, weight=1)
+        fg.columnconfigure(1, weight=1)
+        ttk.Label(fg, text="Frame generation", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(fg, text="Restart game to apply", style="Restart.TLabel").grid(row=0, column=1, sticky="e")
+        ttk.Label(fg, text="Mode", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=(14, 6))
+        ttk.Label(fg, text="Optical-flow backend", style="Card.TLabel").grid(row=1, column=1, sticky="w", pady=(14, 6))
         try:
             mode = read_frame_generation_mode()
         except (ValueError, OSError) as error:
@@ -206,12 +383,11 @@ class VDXRRegistryApp:
             errors.append(str(error))
         self.saved_frame_generation = next(label for label, value in FRAME_GENERATION_MODES.items() if value == mode)
         self.frame_generation = tk.StringVar(value=self.saved_frame_generation)
-        ttk.Label(frame, text="Requested PC frame generation").grid(row=9, column=0, sticky="w", pady=(12, 4))
         selector = ttk.Combobox(
-            frame, textvariable=self.frame_generation, values=tuple(FRAME_GENERATION_MODES),
-            state="readonly", width=22,
+            fg, textvariable=self.frame_generation, values=tuple(FRAME_GENERATION_MODES),
+            state="readonly", width=18, style="Dark.TCombobox",
         )
-        selector.grid(row=9, column=1, columnspan=2, sticky="ew", pady=(12, 4))
+        selector.grid(row=2, column=0, sticky="ew", padx=(0, 14))
         selector.bind("<<ComboboxSelected>>", self.on_frame_generation_changed)
         try:
             backend = read_frame_generation_backend()
@@ -222,29 +398,26 @@ class VDXRRegistryApp:
             label for label, value in FRAME_GENERATION_BACKENDS.items() if value == backend
         )
         self.frame_generation_backend = tk.StringVar(value=self.saved_frame_generation_backend)
-        ttk.Label(frame, text="PC frame-generation backend").grid(row=10, column=0, sticky="w", pady=4)
         backend_selector = ttk.Combobox(
-            frame, textvariable=self.frame_generation_backend, values=tuple(FRAME_GENERATION_BACKENDS),
-            state="readonly", width=30,
+            fg, textvariable=self.frame_generation_backend, values=tuple(FRAME_GENERATION_BACKENDS),
+            state="readonly", width=27, style="Dark.TCombobox",
         )
-        backend_selector.grid(row=10, column=1, columnspan=2, sticky="ew", pady=4)
+        backend_selector.grid(row=2, column=1, sticky="ew")
         backend_selector.bind("<<ComboboxSelected>>", self.on_frame_generation_backend_changed)
-        ttk.Label(frame, text="NR sliders save automatically and apply during play.").grid(
-            row=11, column=0, columnspan=3, sticky="w",
+        ttk.Label(fg, text="Works with NR on or off. Turn SSW off in Virtual Desktop.", style="Hint.TLabel").grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(12, 4)
         )
-        ttk.Label(frame, text="Turn SSW off in Virtual Desktop when testing OFXR.").grid(
-            row=12, column=0, columnspan=3, sticky="w",
+        ttk.Label(fg, text="Selections are saved requests, not active runtime status.", style="Hint.TLabel").grid(
+            row=4, column=0, columnspan=2, sticky="w"
         )
-        ttk.Label(frame, text="100% NR coverage is recommended. Reset affects NR only.").grid(
-            row=13, column=0, columnspan=3, sticky="w",
-        )
-        ttk.Label(frame, text="FG selections are requests, not active status. Restart after changes.").grid(
-            row=14, column=0, columnspan=3, sticky="w",
-        )
+        ttk.Button(
+            frame, text="Reset NR settings", command=self.reset_defaults, style="Soft.TButton",
+        ).grid(row=4, column=0, sticky="w", pady=(14, 0))
         self.status = tk.StringVar(value="; ".join(errors) or "Ready · changes save automatically")
-        ttk.Label(frame, textvariable=self.status, wraplength=610).grid(
-            row=15, column=0, columnspan=3, sticky="w", pady=(12, 0)
+        ttk.Label(frame, textvariable=self.status, style="Subtitle.TLabel", wraplength=592).grid(
+            row=5, column=0, sticky="w", pady=(8, 0)
         )
+        root.bind("<Map>", lambda event: root.after_idle(dark_title_bar, root) if event.widget is root else None, add="+")
         self.set_slider_state()
         self.updating = False
 
