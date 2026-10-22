@@ -109,6 +109,83 @@ def prepare_history(source: Path, output: Path) -> None:
     (output / "history-capture.patch").write_text(patch, encoding="utf-8")
 
 
+def prepare_pair_real_output(source: Path, output: Path, modified: str) -> str:
+    """Keep legacy real outputs; host-owned pairs only restore input state."""
+    header_path = source / "include/xrfg/d3d12_frame_synthesizer.hpp"
+    original_header = header_path.read_text(encoding="utf-8")
+    header_old = "        bool enable_nvidia_gpu_timing = false) noexcept;"
+    header_new = (
+        "        bool enable_nvidia_gpu_timing = false,\n"
+        "        // False skips the unused real output of ordinary pairs only.\n"
+        "        // Prime and repeated-capture output semantics stay unchanged.\n"
+        "        bool copy_current_output = true) noexcept;")
+    if original_header.count(header_old) != 1:
+        raise ValueError("Pinned current-output header context does not match uniquely")
+    header = original_header.replace(header_old, header_new)
+
+    changes = [
+        ("    bool nvidia_gpu_timing_enabled{};",
+         "    bool nvidia_gpu_timing_enabled{};\n    bool copy_current_output{true};"),
+        ("        bool enable_nvidia_gpu_timing) {",
+         "        bool enable_nvidia_gpu_timing,\n        bool input_copy_current_output) {"),
+        ("        backend = input_backend;\n        nvidia_options = input_nvidia_options;",
+         "        backend = input_backend;\n        nvidia_options = input_nvidia_options;\n"
+         "        copy_current_output = input_copy_current_output;"),
+        ("    bool enable_nvidia_gpu_timing) noexcept {",
+         "    bool enable_nvidia_gpu_timing,\n    bool copy_current_output) noexcept {"),
+        ("            enable_nvidia_gpu_timing);\n        if (FAILED(result)) {",
+         "            enable_nvidia_gpu_timing,\n            copy_current_output);\n        if (FAILED(result)) {"),
+        ("            backend, options, impl_->nvidia_gpu_timing_enabled);",
+         "            backend, options, impl_->nvidia_gpu_timing_enabled, impl_->copy_current_output);"),
+        ("            impl_->backend, impl_->nvidia_options, enabled);",
+         "            impl_->backend, impl_->nvidia_options, enabled, impl_->copy_current_output);"),
+    ]
+    for old, new in changes:
+        if modified.count(old) != 1:
+            raise ValueError(f"Pinned current-output context does not match uniquely: {old!r}")
+        modified = modified.replace(old, new)
+
+    # Preserve the current-copy command list and its submission/fence identity.
+    # Host-owned B is read directly by the host, so only its history source
+    # needs restoring; its private destination must remain untouched.
+    start_marker = (
+        "        // The copy's own transitions travel with the copy, so the resources\n"
+        "        // are left in their normal states while it waits to be submitted.\n")
+    end_marker = (
+        "        slot.current_copy_command_list->ResourceBarrier(\n"
+        "            static_cast<UINT>(after_current_copy.size()),\n"
+        "            after_current_copy.data());\n")
+    if modified.count(start_marker) != 2:
+        raise ValueError("Pinned pair-current-output block count differs")
+    offset = 0
+    for backend in ("NVIDIA", "FidelityFX"):
+        start = modified.index(start_marker, offset)
+        end = modified.index(end_marker, start) + len(end_marker)
+        block = modified[start:end]
+        if block.count("->CopyResource(") != 1 or block.count(f'"OFXR {backend} current copy"') != 1:
+            raise ValueError("Pinned backend current-output copy block differs")
+        wrapped = (
+            "        if (copy_current_output) {\n"
+            + "".join("    " + line if line.strip() else line for line in block.splitlines(keepends=True))
+            + "        } else {\n"
+            "            const auto restore_current = transition_barrier(\n"
+            "                current_resource,\n"
+            "                kShaderReadState,\n"
+            "                D3D12_RESOURCE_STATE_COMMON);\n"
+            "            slot.current_copy_command_list->ResourceBarrier(1, &restore_current);\n"
+            "        }\n")
+        modified = modified[:start] + wrapped + modified[end:]
+        offset = start + len(wrapped)
+
+    (output / "xrfg").mkdir(parents=True, exist_ok=True)
+    (output / "xrfg/d3d12_frame_synthesizer.hpp").write_text(header, encoding="utf-8")
+    (output / "current-output-header.patch").write_text("".join(difflib.unified_diff(
+        original_header.splitlines(keepends=True), header.splitlines(keepends=True),
+        fromfile="upstream/include/xrfg/d3d12_frame_synthesizer.hpp",
+        tofile="compiled/include/xrfg/d3d12_frame_synthesizer.hpp")), encoding="utf-8")
+    return modified
+
+
 def prepare(source: Path, output: Path) -> None:
     manifest = json.loads((source / "manifest.json").read_text())
     if manifest["commit"] != "07449429c139e5d2070b6f0855ed5323de7cee00":
@@ -276,7 +353,28 @@ def prepare(source: Path, output: Path) -> None:
         raise ValueError("Pinned NVIDIA timing publication context does not match uniquely")
     harvest = harvest.replace(marker, "        slot.cached_timing = timing;\n" + marker)
     modified = modified[:start] + harvest + modified[end:]
+    # Allocation padding is not the optical-flow sampling scale. Carry the
+    # nominal ratio independently in unused low flag bits, including extra S2
+    # draws (which already preserve the low byte when replacing the fraction).
+    marker = "// Packs the synthetic's position between the two captures into the spare"
+    scale_helper = (
+        "// Bits 2-3 carry the nominal scale; zero retains legacy shader fixtures.\n"
+        "[[nodiscard]] constexpr UINT packed_flow_input_scale(D3D12OpticalFlowInputScale scale) noexcept {\n"
+        "    switch (scale) {\n"
+        "    case D3D12OpticalFlowInputScale::half: return 3U << 2U;\n"
+        "    case D3D12OpticalFlowInputScale::three_quarter: return 2U << 2U;\n"
+        "    default: return 1U << 2U;\n"
+        "    }\n"
+        "}\n\n")
+    if modified.count(marker) != 1:
+        raise ValueError("Pinned flow scale helper context does not match uniquely")
+    modified = modified.replace(marker, scale_helper + marker)
+    marker = "parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction)"
+    if modified.count(marker) != 5:
+        raise ValueError("Pinned flow scale producers do not match")
+    modified = modified.replace(marker, marker + " |\n            packed_flow_input_scale(nvidia_options.input_scale)")
     output.mkdir(parents=True, exist_ok=True)
+    modified = prepare_pair_real_output(source, output, modified)
     (output / path.name).write_text(modified, encoding="utf-8")
     (output / "initialization-ownership.patch").write_text("".join(difflib.unified_diff(
         original.splitlines(keepends=True), modified.splitlines(keepends=True),
@@ -343,6 +441,90 @@ def prepare(source: Path, output: Path) -> None:
         "                        }\n")
     if shader.count(old) != 1:
         raise ValueError("Pinned FidelityFX endpoint output context does not match uniquely")
+    shader = shader.replace(old, new)
+    # Both temporal endpoints must use the same pixel-center domain. The old
+    # current sampler admitted an extra half-pixel strip, reading view padding
+    # where the previous sampler could not supply a matching endpoint.
+    current_start = shader.index("CameraSample sample_current_target(")
+    current_end = shader.index("[numthreads", current_start)
+    current_sampler = shader[current_start:current_end]
+    for old, new in (
+            ("target_coordinate.x >= target_minimum.x - 0.5", "target_coordinate.x >= target_minimum.x"),
+            ("target_coordinate.y >= target_minimum.y - 0.5", "target_coordinate.y >= target_minimum.y"),
+            ("target_coordinate.x <= target_maximum.x - 0.5", "target_coordinate.x <= target_maximum.x - 1.0"),
+            ("target_coordinate.y <= target_maximum.y - 0.5", "target_coordinate.y <= target_maximum.y - 1.0")):
+        if current_sampler.count(old) != 1:
+            raise ValueError("Pinned current endpoint bounds do not match uniquely")
+        current_sampler = current_sampler.replace(old, new)
+    shader = shader[:current_start] + current_sampler + shader[current_end:]
+    # A mapped endpoint can be geometrically valid in the half-pixel edge
+    # footprint. Clamp its bilinear sample to this view's active pixel centers,
+    # rather than mixing neighboring padding into a valid camera sample.
+    old = "        output.color = bilinear_previous_source(mapped.coordinate, slice);"
+    new = (
+        "        float4 source_rect = PreviousMappings[view_index].SourceRect;\n"
+        "        float2 source_coordinate = clamp(mapped.coordinate,\n"
+        "            source_rect.xy, source_rect.xy + source_rect.zw - 1.0);\n"
+        "        output.color = bilinear_previous_source(source_coordinate, slice);")
+    if shader.count(old) != 1:
+        raise ValueError("Pinned previous endpoint sample does not match uniquely")
+    shader = shader.replace(old, new)
+    old = (
+        "// The ratio the flow input was packed at, relative to the source image.\n"
+        "// One when the input is full resolution. Derived from the width alone and\n"
+        "// applied to both axes: the scale is uniform, and the packed height carries\n"
+        "// the stacked eyes on the FidelityFX path, so a height ratio would not\n"
+        "// describe it.\n"
+        "float2 flow_input_scale() {\n"
+        "    float ratio = min(\n"
+        "        1.0,\n"
+        "        float(PackedWidth) / max(float(Width), 1.0));\n"
+        "    return float2(ratio, ratio);\n"
+        "}")
+    new = (
+        "// The nominal uniform scale excludes backend block/minimum-size padding.\n"
+        "// Zero keeps legacy injected-flow fixtures compatible; production packs\n"
+        "// and composition always carry an explicit scale in bits 2-3.\n"
+        "float2 flow_input_scale() {\n"
+        "    uint nominal = (SynthesisFlags >> 2u) & 3u;\n"
+        "    float ratio = nominal == 3u ? 0.5 : nominal == 2u ? 0.75 :\n"
+        "        nominal == 1u ? 1.0 : min(1.0, float(PackedWidth) / max(float(Width), 1.0));\n"
+        "    return float2(ratio, ratio);\n"
+        "}")
+    shader_changes = [
+        (old, new),
+        ("    if (PackedWidth < Width) {", "    if (any(input_scale < 1.0)) {"),
+        ("        if (source_coordinate.y < float(Height)) {",
+         "        if (source_coordinate.x < float(Width) && source_coordinate.y < float(Height)) {"),
+        ("    bool downscaled = PackedWidth < Width || PackedHeight < Height;",
+         "    bool downscaled = any(flow_input_scale() < 1.0);"),
+    ]
+    for old, new in shader_changes:
+        if shader.count(old) != 1:
+            raise ValueError("Pinned nominal flow scale shader context does not match uniquely")
+        shader = shader.replace(old, new)
+    old = (
+        "            current_color = downscaled\n"
+        "                ? bilinear_current_source(target_coordinate, slice)\n"
+        "                : CurrentFrame.Load(int4(int2(thread_id.xy), int(slice), 0));")
+    new = (
+        "            bool cropped_target = false;\n"
+        "            if (view_index < 2u) {\n"
+        "                cropped_target = any(PreviousMappings[view_index].TargetRect !=\n"
+        "                    float4(0.0, 0.0, float(Width), float(Height)));\n"
+        "            }\n"
+        "            if (downscaled && cropped_target) {\n"
+        "                // Match previous target-center coverage inside a crop,\n"
+        "                // preserving resource-edge replication for full images.\n"
+        "                current_color = sample_current_target(\n"
+        "                    target_coordinate, slice, view_index).color;\n"
+        "            } else {\n"
+        "                current_color = downscaled\n"
+        "                    ? bilinear_current_source(target_coordinate, slice)\n"
+        "                    : CurrentFrame.Load(int4(int2(thread_id.xy), int(slice), 0));\n"
+        "            }")
+    if shader.count(old) != 1:
+        raise ValueError("Pinned NVIDIA current pack context does not match uniquely")
     shader = shader.replace(old, new)
     (output / shader_path.name).write_text(shader, encoding="utf-8")
     (output / "endpoint-validation.patch").write_text("".join(difflib.unified_diff(

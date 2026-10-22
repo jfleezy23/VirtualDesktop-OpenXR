@@ -12,6 +12,7 @@ execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/prepare-fg-vendor.py"
     "${OFXR}/src/d3d12/d3d12_frame_synthesizer.cpp" "${OFXR}/manifest.json"
+    "${OFXR}/include/xrfg/d3d12_frame_synthesizer.hpp"
     "${OFXR}/src/d3d12/d3d12_history.cpp" "${OFXR}/include/xrfg/d3d12_history.hpp"
     "${OFXR}/src/d3d12/frame_synthesis.hlsl" "${CMAKE_CURRENT_SOURCE_DIR}/src/ffx_endpoint_validation.hlsl")
 set(FFX "${FG_DEPS}/fidelityfx/sdk")
@@ -71,6 +72,7 @@ target_include_directories(vdxr_frame_generation PRIVATE include "${DERIVATIVE}"
 target_link_libraries(vdxr_frame_generation PRIVATE d3d12 dxgi
     "${FFX}/bin/ffx_sdk/ffx_opticalflow_x64.lib" "${FFX}/bin/ffx_sdk/ffx_backend_dx12_x64.lib")
 include(CTest)
+option(VDXR_FG_DIAGNOSTIC_TESTS "Register strict stationary-flow diagnostics with known rendering failures" OFF)
 if(BUILD_TESTING)
     add_executable(nr_fg_bgra_regression ../tests/nr_fg_bgra_regression.cpp
         ../virtualdesktop-openxr/frame_generation.cpp ../virtualdesktop-openxr/frame_generation_pacing.cpp)
@@ -259,6 +261,17 @@ if(BUILD_TESTING)
         add_test(NAME fg_gpu_${SCENARIO} COMMAND fg_gpu_regression "$<TARGET_FILE:vdxr_frame_generation>" 3 ${SCENARIO})
         set_tests_properties(fg_gpu_${SCENARIO} PROPERTIES TIMEOUT 60 PASS_REGULAR_EXPRESSION "PASS:")
     endforeach()
+    if(VDXR_FG_DIAGNOSTIC_TESTS)
+        foreach(BACKEND nvidia fidelityfx-full)
+            foreach(MULTIPLIER 2 3)
+                add_test(NAME fg_gpu_stationary_${BACKEND}_${MULTIPLIER}x
+                    COMMAND fg_gpu_regression "$<TARGET_FILE:vdxr_frame_generation>" ${MULTIPLIER} stationary)
+                set_tests_properties(fg_gpu_stationary_${BACKEND}_${MULTIPLIER}x PROPERTIES
+                    TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "VDXR_FG_TEST_BACKEND=${BACKEND}"
+                    PASS_REGULAR_EXPRESSION "PASS:" FAIL_REGULAR_EXPRESSION "FAIL:" LABELS "diagnostic;stationary-flow")
+            endforeach()
+        endforeach()
+    endif()
     add_executable(fg_initialization_regression ../tests/fg_initialization_regression.cpp)
     target_include_directories(fg_initialization_regression PRIVATE include
         "${CMAKE_CURRENT_SOURCE_DIR}/../packages/Detours.4.0.1/lib/native/include"
@@ -292,9 +305,15 @@ if(BUILD_TESTING)
     target_compile_definitions(fg_endpoint_regression PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(fg_endpoint_regression PRIVATE d3d12 dxgi)
     add_dependencies(fg_endpoint_regression vdxr_frame_generation)
-    foreach(SCENARIO uniform uniform-srgb nearwhite-gradient nearwhite-gradient-srgb false-match false-match-srgb dark-false-match-srgb translated-detail center-detail isolated-detail border border-no-neighbors scene-change repeated raw-endpoint rotation-motion rotation-static rotation-cap)
+    foreach(SCENARIO uniform uniform-srgb nearwhite-gradient nearwhite-gradient-srgb false-match false-match-srgb dark-false-match-srgb translated-detail translated-detail-aperiodic half-pixel-left half-pixel-right half-pixel-top half-pixel-bottom valid-edge-centers previous-camera-left previous-camera-right previous-camera-top previous-camera-bottom nvidia-half-input-bottom nvidia-half-input-cropped-view nvidia-full-input-padding nvidia-three-quarter-input-padding nvidia-small-half-input-padding ffx-half-input-padding ffx-full-input-padding ffx-three-quarter-input-padding ffx-small-half-input-padding center-detail isolated-detail border border-no-neighbors scene-change repeated raw-endpoint rotation-motion rotation-static rotation-cap stationary-alias stationary-alias-srgb stationary-alias-reverse stationary-alias-rotation stationary-alias-asymmetric ghost-thin-motion ghost-thin-motion-srgb ghost-thin-motion-reverse ghost-alpha-motion ghost-large-motion ghost-large-motion-reverse)
+        if(SCENARIO MATCHES "^stationary-alias" AND NOT VDXR_FG_DIAGNOSTIC_TESTS)
+            continue()
+        endif()
         add_test(NAME fg_endpoint_${SCENARIO} COMMAND fg_endpoint_regression ${SCENARIO})
         set_tests_properties(fg_endpoint_${SCENARIO} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
-            PASS_REGULAR_EXPRESSION "PASS: production endpoint shader draw and readback")
+            PASS_REGULAR_EXPRESSION "PASS: production (endpoint|NVIDIA pack|FFX pack) shader")
+        if(SCENARIO MATCHES "^stationary-alias")
+            set_tests_properties(fg_endpoint_${SCENARIO} PROPERTIES LABELS "diagnostic;stationary-flow")
+        endif()
     endforeach()
 endif()

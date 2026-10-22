@@ -190,7 +190,8 @@ namespace {
                                                  fidelityFxFull ? xrfg::D3D12OpticalFlowBackend::fidelity_fx
                                                                 : xrfg::D3D12OpticalFlowBackend::nvidia,
                                                  opticalFlowOptions,
-                                                 (flags & VDXRFG_CREATE_GPU_TIMING) != 0);
+                                                 (flags & VDXRFG_CREATE_GPU_TIMING) != 0,
+                                                 !context->hostOwnsReal);
             if (FAILED(hr)) {
                 if (hr == HRESULT_FROM_WIN32(ERROR_IO_INCOMPLETE)) {
                     context->initializationPoisoned = context->poisoned = true;

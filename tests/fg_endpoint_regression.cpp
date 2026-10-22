@@ -1,7 +1,10 @@
 #include "fg_gpu_helpers.h"
 
 #include "fullscreen_vertex_shader.hpp"
+#include "nvidia_pack_flow_input_shader.hpp"
+#include "nvidia_pack_luma_input_shader.hpp"
 #include "nvidia_synthesize_midpoint_pixel_shader.hpp"
+#include "pack_flow_input_shader.hpp"
 #include "synthesize_midpoint_pixel_shader.hpp"
 
 #include <algorithm>
@@ -360,19 +363,664 @@ namespace {
         }
     }
 
+    int runGhosting(const std::string& scenario) {
+        const bool stationary = scenario.rfind("stationary-alias", 0) == 0;
+        const bool srgb = scenario.find("srgb") != std::string::npos;
+        const bool reverse = scenario.find("reverse") != std::string::npos;
+        const bool rotation = scenario == "stationary-alias-rotation";
+        const bool asymmetric = scenario == "stationary-alias-asymmetric";
+        const bool alphaOnly = scenario == "ghost-alpha-motion";
+        const bool thin = scenario.rfind("ghost-thin-motion", 0) == 0;
+        const int displacement = stationary ? -24 : thin ? 2 : alphaOnly ? 18 : 24;
+        const int movement = reverse ? -displacement : displacement;
+        const double start = stationary ? 0 : thin ? 30 : reverse ? 42 : 20;
+        const double barWidth = thin ? 1 : 3;
+        const auto backgroundFor = [&](UINT eye) { return srgb && thin ? 40 : alphaOnly ? 50 : eye ? 40 : 26; };
+        const auto foregroundFor = [&](UINT eye) { return srgb && thin ? 30 : alphaOnly ? 200 : eye ? 160 : 179; };
+        const auto decode = [](double value) {
+            value /= 255.0;
+            return value <= 0.04045 ? value / 12.92 : std::pow((value + 0.055) / 1.055, 2.4);
+        };
+        const auto encode = [](double value) {
+            return 255 * (value <= 0.0031308 ? value * 12.92 : 1.055 * std::pow(value, 1 / 2.4) - 0.055);
+        };
+        ShaderFixture fixture(srgb);
+        bool allPassed = true;
+        for (bool useNvidia : {true, false}) {
+            for (float requested : {0.3f, 1.0f / 3.0f, 0.5f, 2.0f / 3.0f, 0.7f}) {
+                Parameters parameters;
+                parameters.flags = (static_cast<UINT>(std::lround(requested * 65535.0f)) << 8) | (srgb ? 2u : 0u);
+                const double fraction = double(parameters.flags >> 8) / 65535.0;
+                auto previous = flat(), current = flat();
+                for (UINT eye = 0; eye < eyes; ++eye) {
+                    for (UINT y = 0; y < side; ++y) {
+                        for (UINT x = 0; x < side; ++x) {
+                            auto* a = pixel(previous, eye, x, y);
+                            auto* b = pixel(current, eye, x, y);
+                            for (UINT c = 0; c < 4; ++c) {
+                                if (stationary) {
+                                    a[c] = b[c] = c == 3 ? (eye ? 193 : 91) : x % 24 < 8 ? (eye ? 237 : 255) : 0;
+                                } else {
+                                    const bool movingChannel = alphaOnly ? c == 3 : c < 3;
+                                    const int background = backgroundFor(eye);
+                                    const int foreground = foregroundFor(eye);
+                                    a[c] = static_cast<uint8_t>(
+                                        movingChannel ? (x >= start && x < start + barWidth ? foreground : background)
+                                        : alphaOnly   ? 120
+                                        : eye         ? 193
+                                                      : 91);
+                                    b[c] = static_cast<uint8_t>(
+                                        movingChannel
+                                            ? (x >= start + movement && x < start + movement + barWidth ? foreground
+                                                                                                        : background)
+                                            : a[c]);
+                                }
+                            }
+                        }
+                    }
+                }
+                std::vector<int32_t> flow((side / block) * (side * eyes / block) * 2);
+                std::vector<uint32_t> auxiliary((side / block) * (side * eyes / block));
+                for (size_t i = 0; i < flow.size(); i += 2)
+                    flow[i] = -movement * (useNvidia ? 32 : 1);
+                if (asymmetric) {
+                    for (auto& mapping : parameters.mappings) {
+                        mapping.sourceTangents[0] = mapping.targetTangents[0] = -0.8f;
+                        mapping.sourceTangents[1] = mapping.targetTangents[1] = 1.2f;
+                        mapping.sourceTangents[2] = mapping.targetTangents[2] = 1.1f;
+                        mapping.sourceTangents[3] = mapping.targetTangents[3] = -0.9f;
+                    }
+                }
+                if (rotation) {
+                    // Opposite eye rotations: H0(x,y)=(y,63-x), H1(x,y)=(63-y,x).
+                    // Paint A through H^-1 independently, so A(H(p)) is exactly B(p).
+                    for (UINT eye = 0; eye < eyes; ++eye) {
+                        parameters.mappings[eye].rotation[2] = (eye ? -1 : 1) * std::sqrt(0.5f);
+                        parameters.mappings[eye].rotation[3] = std::sqrt(0.5f);
+                        for (UINT y = 0; y < side; ++y)
+                            for (UINT x = 0; x < side; ++x)
+                                std::memcpy(pixel(previous, eye, x, y),
+                                            pixel(current, eye, eye ? y : side - 1 - y, eye ? side - 1 - x : x),
+                                            4);
+                        if (!useNvidia) {
+                            for (UINT y = 0; y < side / block; ++y) {
+                                for (UINT x = 0; x < side / block; ++x) {
+                                    const auto offset = ((eye * side / block + y) * (side / block) + x) * 2;
+                                    flow[offset] = eye ? 56 - 8 * int(x + y) : 8 * (int(y) - int(x));
+                                    flow[offset + 1] =
+                                        eye ? 8 * (int(x) - int(y)) - movement : 56 + movement - 8 * int(x + y);
+                                }
+                            }
+                        }
+                    }
+                }
+                fixture.transfer(fixture.resources[0].Get(), previous.data(), 4);
+                fixture.transfer(fixture.resources[1].Get(), current.data(), 4);
+                fixture.transfer(fixture.resources[2].Get(), flow.data(), 8);
+                fixture.transfer(fixture.resources[3].Get(), auxiliary.data(), 4);
+                auto output = fixture.draw(parameters, useNvidia);
+                for (UINT eye = 0; eye < eyes; ++eye) {
+                    size_t bad{};
+                    double maximum{};
+                    for (UINT y = 4; y + 4 < side; ++y) {
+                        for (UINT x = stationary ? 2u : 16u; x < (stationary ? side - 2 : 48u); ++x) {
+                            for (UINT c = 0; c < 4; ++c) {
+                                double expected = pixel(current, eye, x, y)[c];
+                                if (!stationary && (alphaOnly ? c == 3 : c < 3)) {
+                                    // Independently render the continuous translated bar at this time.
+                                    const double first = start + movement * fraction;
+                                    const double coverage = std::clamp(double(x) - first + 1, 0.0, 1.0) *
+                                                            std::clamp(first + barWidth - double(x), 0.0, 1.0);
+                                    const double background = backgroundFor(eye);
+                                    const double foreground = foregroundFor(eye);
+                                    expected = srgb && c < 3
+                                                   ? encode(decode(background) +
+                                                            (decode(foreground) - decode(background)) * coverage)
+                                                   : background + (foreground - background) * coverage;
+                                }
+                                const double error = std::abs(pixel(output, eye, x, y)[c] - expected);
+                                maximum = std::max(maximum, error);
+                                bad += error > 2.0;
+                            }
+                        }
+                    }
+                    std::printf("ghost-control=%s backend=%s fraction=%.6f eye=%u bad=%zu max=%.3f\n",
+                                scenario.c_str(),
+                                useNvidia ? "NVIDIA" : "FidelityFX",
+                                fraction,
+                                eye,
+                                bad,
+                                maximum);
+                    allPassed = allPassed && !bad;
+                }
+            }
+        }
+        check(allPassed,
+              "static images must stay still; moving detail and alpha must retain their interpolated position");
+        std::puts("PASS: production endpoint shader draw and readback");
+        return 0;
+    }
+
+    int runHalfPixelBoundary(bool reverse, bool vertical = false) {
+        ShaderFixture fixture(false);
+        for (bool useNvidia : {true, false}) {
+            for (float requested : {0.3f, 1.0f / 3.0f, 0.5f, 2.0f / 3.0f, 0.7f}) {
+                Parameters parameters;
+                parameters.flags = static_cast<UINT>(std::lround(requested * 65535.0f)) << 8;
+                const double fraction = double(parameters.flags >> 8) / 65535.0;
+                int displacement{};
+                double shift{};
+                for (int trial = 1; trial <= 24; ++trial) {
+                    shift = trial * (1 - fraction);
+                    const double remainder = shift - std::floor(shift);
+                    if (remainder > 0.1 && remainder <= 0.5) {
+                        displacement = reverse ? -trial : trial;
+                        break;
+                    }
+                }
+                check(displacement != 0, "construct current endpoint in half-pixel margin");
+                const UINT checkedCoordinate = reverse ? 55u - UINT(std::floor(shift)) : 8u + UINT(std::floor(shift));
+                const UINT checkedX = vertical ? 32u : checkedCoordinate;
+                const UINT checkedY = vertical ? checkedCoordinate : 32u;
+                const double endpoint = checkedCoordinate - displacement * (1 - fraction);
+                check(reverse ? endpoint > 55 && endpoint <= 55.5 : endpoint >= 7.5 && endpoint < 8,
+                      "half-pixel endpoint outside pixel-center domain");
+                for (auto& mapping : parameters.mappings) {
+                    mapping.sourceRect[0] = mapping.sourceRect[1] = 8;
+                    mapping.targetRect[0] = mapping.targetRect[1] = 8;
+                    mapping.sourceRect[2] = mapping.sourceRect[3] = 48;
+                    mapping.targetRect[2] = mapping.targetRect[3] = 48;
+                }
+                auto previous = flat(), current = flat();
+                for (UINT eye = 0; eye < eyes; ++eye)
+                    for (UINT y = 0; y < side; ++y)
+                        for (UINT x = 0; x < side; ++x)
+                            for (UINT c = 0; c < 4; ++c) {
+                                const bool inside = x >= 8 && x <= 55 && y >= 8 && y <= 55;
+                                const auto value = static_cast<uint8_t>(c == 3 ? (inside ? (eye ? 193 : 91) : 17)
+                                                                               : 100 + eye * 80 + (inside ? 20 : 0));
+                                pixel(previous, eye, x, y)[c] = pixel(current, eye, x, y)[c] = value;
+                            }
+                std::vector<int32_t> flow((side / block) * (side * eyes / block) * 2);
+                std::vector<uint32_t> auxiliary((side / block) * (side * eyes / block));
+                for (size_t i = 0; i < flow.size(); i += 2)
+                    flow[i + (vertical ? 1 : 0)] = displacement * (useNvidia ? 32 : 1);
+                fixture.transfer(fixture.resources[0].Get(), previous.data(), 4);
+                fixture.transfer(fixture.resources[1].Get(), current.data(), 4);
+                fixture.transfer(fixture.resources[2].Get(), flow.data(), 8);
+                fixture.transfer(fixture.resources[3].Get(), auxiliary.data(), 4);
+                auto output = fixture.draw(parameters, useNvidia);
+                for (UINT eye = 0; eye < eyes; ++eye)
+                    for (UINT c = 0; c < 4; ++c)
+                        compareChannel(pixel(output, eye, checkedX, checkedY)[c],
+                                       pixel(current, eye, checkedX, checkedY)[c],
+                                       "unsupported half-pixel endpoint preserves current view",
+                                       eye,
+                                       checkedX,
+                                       checkedY,
+                                       c,
+                                       2);
+                std::printf("verified half-pixel %s backend=%s fraction=%.6f endpoint=%.6f both eyes\n",
+                            vertical ? (reverse ? "bottom" : "top") : (reverse ? "right" : "left"),
+                            useNvidia ? "NVIDIA" : "FidelityFX",
+                            fraction,
+                            endpoint);
+            }
+        }
+        std::puts("PASS: production endpoint shader draw and readback");
+        return 0;
+    }
+
+    int runPreviousCameraPadding(bool reverse, bool vertical = false) {
+        ShaderFixture fixture(false);
+        bool allPassed = true;
+        for (bool useNvidia : {true, false}) {
+            for (float requested : {1.0f / 3.0f, 0.5f, 2.0f / 3.0f}) {
+                Parameters parameters;
+                parameters.flags = static_cast<UINT>(std::lround(requested * 65535.0f)) << 8;
+                const double fraction = double(parameters.flags >> 8) / 65535.0;
+                const float cameraShift = reverse ? 4.4f : -4.4f;
+                const UINT checkedCoordinate = reverse ? 51u : 12u;
+                const UINT checkedX = vertical ? 32u : checkedCoordinate;
+                const UINT checkedY = vertical ? checkedCoordinate : 32u;
+                for (auto& mapping : parameters.mappings) {
+                    mapping.sourceRect[0] = mapping.sourceRect[1] = 8;
+                    mapping.targetRect[0] = mapping.targetRect[1] = 8;
+                    mapping.sourceRect[2] = mapping.sourceRect[3] = 48;
+                    mapping.targetRect[2] = mapping.targetRect[3] = 48;
+                    // Identity rotation and a translated target FOV give H(p)=p+shift.
+                    // The source image remains white inside the view and black outside.
+                    const float tangentShift = cameraShift * (vertical ? -2.0f : 2.0f) / 48.0f;
+                    mapping.targetTangents[vertical ? 2 : 0] += tangentShift;
+                    mapping.targetTangents[vertical ? 3 : 1] += tangentShift;
+                }
+                auto previous = flat(), current = flat();
+                for (UINT eye = 0; eye < eyes; ++eye)
+                    for (UINT y = 0; y < side; ++y)
+                        for (UINT x = 0; x < side; ++x)
+                            for (UINT c = 0; c < 4; ++c) {
+                                const bool inside = x >= 8 && x <= 55 && y >= 8 && y <= 55;
+                                const auto value = static_cast<uint8_t>(inside ? (c == 3 ? (eye ? 193 : 91) : 255) : 0);
+                                pixel(previous, eye, x, y)[c] = pixel(current, eye, x, y)[c] = value;
+                            }
+                std::vector<int32_t> flow((side / block) * (side * eyes / block) * 2);
+                std::vector<uint32_t> auxiliary((side / block) * (side * eyes / block));
+                // FFX stores raw source displacement; NVIDIA stores camera residuals
+                // in S10.5. Both put the previous sample within a partial source texel:
+                // e.g. p=12, H(p)=7.6 and FFX raw=-4 give H(p+0.4*t)<8.
+                const int displacement = (reverse ? 1 : -1) * (useNvidia ? -13 : 4);
+                for (size_t i = 0; i < flow.size(); i += 2)
+                    flow[i + (vertical ? 1 : 0)] = displacement;
+                fixture.transfer(fixture.resources[0].Get(), previous.data(), 4);
+                fixture.transfer(fixture.resources[1].Get(), current.data(), 4);
+                fixture.transfer(fixture.resources[2].Get(), flow.data(), 8);
+                fixture.transfer(fixture.resources[3].Get(), auxiliary.data(), 4);
+                auto output = fixture.draw(parameters, useNvidia);
+                for (UINT eye = 0; eye < eyes; ++eye) {
+                    size_t bad{};
+                    double maximum{};
+                    for (UINT c = 0; c < 4; ++c) {
+                        const double error = std::abs(double(pixel(output, eye, checkedX, checkedY)[c]) -
+                                                      pixel(current, eye, checkedX, checkedY)[c]);
+                        maximum = std::max(maximum, error);
+                        bad += error > 2.0;
+                    }
+                    std::printf("previous-camera-padding=%s backend=%s fraction=%.6f eye=%u bad=%zu max=%.3f\n",
+                                vertical ? (reverse ? "bottom" : "top") : (reverse ? "right" : "left"),
+                                useNvidia ? "NVIDIA" : "FidelityFX",
+                                fraction,
+                                eye,
+                                bad,
+                                maximum);
+                    allPassed = allPassed && !bad;
+                }
+            }
+        }
+        check(allPassed, "previous camera endpoint must preserve view color without sampling inactive padding");
+        std::puts("PASS: production endpoint shader draw and readback");
+        return 0;
+    }
+
+    double expectedPackPattern(double sourceX, double sourceY, UINT sourceWidth, UINT sourceHeight, UINT eye) {
+        // Independently interpolate the two literal step edges painted below.
+        const double horizontal = std::clamp(sourceX - (double(sourceWidth / 2) - 1), 0.0, 1.0);
+        const double bottom = std::clamp(sourceY - (double(sourceHeight) - 7), 0.0, 1.0);
+        const double interior = (eye ? 96 : 32) + 40 * horizontal;
+        return interior * (1 - bottom) + (eye ? 192 : 255) * bottom;
+    }
+
+    int runNvidiaInputScale(const std::string& scenario) {
+        ShaderFixture fixture(false);
+        const bool full = scenario == "nvidia-full-input-padding";
+        const bool threeQuarter = scenario == "nvidia-three-quarter-input-padding";
+        const bool smallInput = scenario == "nvidia-small-half-input-padding";
+        const bool cropped = scenario == "nvidia-half-input-cropped-view";
+        const double nominalScale = full ? 1.0 : threeQuarter ? 0.75 : 0.5;
+        Parameters parameters;
+        parameters.width = smallInput ? 40 : 129;
+        parameters.height = smallInput ? 32 : 128;
+        parameters.packedWidth = smallInput ? 64 : full ? 132 : threeQuarter ? 100 : 68;
+        parameters.packedHeight = smallInput ? 64 : full ? 128 : threeQuarter ? 96 : 64;
+        parameters.eyeStride = 0;
+        // Explicit nominal scale must survive alignment and the minimum allocation.
+        parameters.flags = (full ? 1u : threeQuarter ? 2u : 3u) << 2;
+        for (auto& mapping : parameters.mappings) {
+            mapping.sourceRect[2] = mapping.targetRect[2] = float(parameters.width);
+            mapping.sourceRect[3] = mapping.targetRect[3] = float(parameters.height);
+            if (cropped) {
+                mapping.sourceRect[0] = mapping.sourceRect[1] = 9;
+                mapping.targetRect[0] = mapping.targetRect[1] = 9;
+                mapping.sourceRect[2] = mapping.sourceRect[3] = 47;
+                mapping.targetRect[2] = mapping.targetRect[3] = 47;
+            }
+        }
+        Pixels input(parameters.width * parameters.height * eyes * 4);
+        for (UINT eye = 0; eye < eyes; ++eye)
+            for (UINT y = 0; y < parameters.height; ++y)
+                for (UINT x = 0; x < parameters.width; ++x) {
+                    const size_t offset = ((eye * parameters.height + y) * parameters.width + x) * 4;
+                    // Vertical detail checks horizontal sampling; the last six source
+                    // rows check vertical sampling and distinguish the two eyes.
+                    const auto marker = static_cast<uint8_t>(
+                        y >= parameters.height - 6 ? (eye ? 192 : 255)
+                                                   : (eye ? 96 : 32) + (x >= parameters.width / 2 ? 40 : 0));
+                    const bool inside = x >= 9 && x <= 55 && y >= 9 && y <= 55;
+                    const auto value = static_cast<uint8_t>(cropped ? (inside ? (eye ? 192 : 255) : 0) : marker);
+                    input[offset] = input[offset + 1] = input[offset + 2] = value;
+                    input[offset + 3] = 255;
+                }
+        for (UINT index = 0; index < 2; ++index) {
+            fixture.resources[index] =
+                fixture.texture(parameters.width, parameters.height, eyes, DXGI_FORMAT_R8G8B8A8_UNORM);
+            fixture.transfer(fixture.resources[index].Get(), input.data(), 4);
+            D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+            view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            view.Texture2DArray.ArraySize = eyes;
+            view.Texture2DArray.MipLevels = 1;
+            auto handle = fixture.descriptors->GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += index * fixture.descriptorStride;
+            fixture.gpu.device->CreateShaderResourceView(fixture.resources[index].Get(), &view, handle);
+        }
+        bool allPassed = true;
+        for (bool luma : {false, true}) {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};
+            pipeline.pRootSignature = fixture.root.Get();
+            pipeline.CS = luma ? D3D12_SHADER_BYTECODE{g_xrfg_nvidia_pack_luma_input_shader,
+                                                       sizeof(g_xrfg_nvidia_pack_luma_input_shader)}
+                               : D3D12_SHADER_BYTECODE{g_xrfg_nvidia_pack_flow_input_shader,
+                                                       sizeof(g_xrfg_nvidia_pack_flow_input_shader)};
+            ComPtr<ID3D12PipelineState> pack;
+            success(fixture.gpu.device->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&pack)),
+                    "NVIDIA production pack PSO");
+            const UINT bytesPerPixel = luma ? 1 : 4;
+            const auto format = luma ? DXGI_FORMAT_R8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
+            std::array<ComPtr<ID3D12Resource>, 2> packed;
+            for (UINT index = 0; index < packed.size(); ++index) {
+                packed[index] = fixture.texture(parameters.packedWidth,
+                                                parameters.packedHeight,
+                                                1,
+                                                format,
+                                                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+                D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
+                view.Format = format;
+                view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+                auto handle = fixture.descriptors->GetCPUDescriptorHandleForHeapStart();
+                handle.ptr += (index + 8) * fixture.descriptorStride;
+                fixture.gpu.device->CreateUnorderedAccessView(packed[index].Get(), nullptr, &view, handle);
+            }
+            for (UINT eye = 0; eye < eyes; ++eye) {
+                parameters.slice = parameters.viewIndex = eye;
+                ComPtr<ID3D12CommandAllocator> allocator;
+                ComPtr<ID3D12GraphicsCommandList> list;
+                success(fixture.gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                                   IID_PPV_ARGS(&allocator)),
+                        "pack allocator");
+                success(fixture.gpu.device->CreateCommandList(
+                            0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), pack.Get(), IID_PPV_ARGS(&list)),
+                        "pack list");
+                std::array<D3D12_RESOURCE_BARRIER, 4> barriers{};
+                for (UINT index = 0; index < barriers.size(); ++index) {
+                    barriers[index].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                    barriers[index].Transition = {index < 2 ? fixture.resources[index].Get() : packed[index - 2].Get(),
+                                                  D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                                  D3D12_RESOURCE_STATE_COMMON,
+                                                  index < 2 ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                                                            : D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+                }
+                list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+                list->SetComputeRootSignature(fixture.root.Get());
+                list->SetComputeRoot32BitConstants(0, 62, &parameters, 0);
+                ID3D12DescriptorHeap* heaps[]{fixture.descriptors.Get()};
+                list->SetDescriptorHeaps(1, heaps);
+                auto table = fixture.descriptors->GetGPUDescriptorHandleForHeapStart();
+                list->SetComputeRootDescriptorTable(1, table);
+                table.ptr += 7 * fixture.descriptorStride;
+                list->SetComputeRootDescriptorTable(2, table);
+                list->Dispatch((parameters.packedWidth + 7) / 8, (parameters.packedHeight + 7) / 8, 1);
+                for (auto& barrier : barriers)
+                    std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+                list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+                fixture.execute(list.Get());
+                for (UINT endpoint = 0; endpoint < packed.size(); ++endpoint) {
+                    auto output = fixture.transfer(packed[endpoint].Get(), nullptr, bytesPerPixel);
+                    size_t bad{};
+                    double maximum{};
+                    for (UINT y = 0; y < parameters.packedHeight; ++y)
+                        for (UINT x = 0; x < parameters.packedWidth; ++x)
+                            for (UINT c = 0; c < bytesPerPixel; ++c) {
+                                const double sourceX = (x + 0.5) / nominalScale - 0.5;
+                                const double sourceY = (y + 0.5) / nominalScale - 0.5;
+                                bool active = sourceX < parameters.width && sourceY < parameters.height;
+                                // Previous sampling maps through the view's pixel-center
+                                // domain. The ceil-width last partial texel may be outside it.
+                                if (!endpoint)
+                                    active =
+                                        active && sourceX <= parameters.width - 1 && sourceY <= parameters.height - 1;
+                                if (cropped)
+                                    active = sourceX >= 9 && sourceX <= 55 && sourceY >= 9 && sourceY <= 55;
+                                const double expected =
+                                    c == 3 ? 255
+                                    : active
+                                        ? (cropped ? (eye ? 192 : 255)
+                                                   : expectedPackPattern(
+                                                         sourceX, sourceY, parameters.width, parameters.height, eye))
+                                        : 0;
+                                const size_t offset = (y * parameters.packedWidth + x) * bytesPerPixel + c;
+                                const double error = std::abs(double(output[offset]) - expected);
+                                if (!bad && error > 2.0)
+                                    std::printf("first pack mismatch pixel=(%u,%u) source=(%.6f,%.6f) channel=%u "
+                                                "actual=%u expected=%.3f\n",
+                                                x,
+                                                y,
+                                                sourceX,
+                                                sourceY,
+                                                c,
+                                                output[offset],
+                                                expected);
+                                maximum = std::max(maximum, error);
+                                bad += error > 2.0;
+                            }
+                    std::printf("%s format=%s endpoint=%s eye=%u bad=%zu max=%.3f\n",
+                                scenario.c_str(),
+                                luma ? "R8" : "RGBA8",
+                                endpoint ? "current" : "previous",
+                                eye,
+                                bad,
+                                maximum);
+                    allPassed = allPassed && !bad;
+                }
+            }
+        }
+        check(allPassed, "NVIDIA packing must preserve nominal-scale detail and leave allocation padding black");
+        std::puts("PASS: production NVIDIA pack shader dispatch and readback");
+        return 0;
+    }
+
+    int runFfxInputScale(const std::string& scenario) {
+        ShaderFixture fixture(false);
+        const bool full = scenario == "ffx-full-input-padding";
+        const bool threeQuarter = scenario == "ffx-three-quarter-input-padding";
+        const bool smallInput = scenario == "ffx-small-half-input-padding";
+        const double nominalScale = full ? 1.0 : threeQuarter ? 0.75 : 0.5;
+        Parameters parameters;
+        parameters.width = smallInput ? 40 : 129;
+        parameters.height = smallInput ? 32 : 128;
+        parameters.packedWidth = smallInput ? 64 : full ? 136 : threeQuarter ? 104 : 72;
+        parameters.packedHeight = smallInput ? 96 : full ? 320 : threeQuarter ? 256 : 192;
+        parameters.eyeStride = smallInput ? 80 : full ? 192 : threeQuarter ? 160 : 128;
+        parameters.flags = (full ? 1u : threeQuarter ? 2u : 3u) << 2;
+        Pixels input(parameters.width * parameters.height * eyes * 4);
+        for (UINT eye = 0; eye < eyes; ++eye)
+            for (UINT y = 0; y < parameters.height; ++y)
+                for (UINT x = 0; x < parameters.width; ++x) {
+                    const size_t offset = ((eye * parameters.height + y) * parameters.width + x) * 4;
+                    const auto value = static_cast<uint8_t>(
+                        y >= parameters.height - 6 ? (eye ? 192 : 255)
+                                                   : (eye ? 96 : 32) + (x >= parameters.width / 2 ? 40 : 0));
+                    input[offset] = input[offset + 1] = input[offset + 2] = value;
+                    input[offset + 3] = 255;
+                }
+        fixture.resources[1] = fixture.texture(parameters.width, parameters.height, eyes, DXGI_FORMAT_R8G8B8A8_UNORM);
+        fixture.transfer(fixture.resources[1].Get(), input.data(), 4);
+        D3D12_SHADER_RESOURCE_VIEW_DESC sourceView{};
+        sourceView.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sourceView.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sourceView.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        sourceView.Texture2DArray.ArraySize = eyes;
+        sourceView.Texture2DArray.MipLevels = 1;
+        auto sourceHandle = fixture.descriptors->GetCPUDescriptorHandleForHeapStart();
+        sourceHandle.ptr += fixture.descriptorStride;
+        fixture.gpu.device->CreateShaderResourceView(fixture.resources[1].Get(), &sourceView, sourceHandle);
+        auto packed = fixture.texture(parameters.packedWidth,
+                                      parameters.packedHeight,
+                                      1,
+                                      DXGI_FORMAT_R8G8B8A8_UNORM,
+                                      D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        D3D12_UNORDERED_ACCESS_VIEW_DESC packedView{};
+        packedView.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        packedView.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        auto packedHandle = fixture.descriptors->GetCPUDescriptorHandleForHeapStart();
+        packedHandle.ptr += 7 * fixture.descriptorStride;
+        fixture.gpu.device->CreateUnorderedAccessView(packed.Get(), nullptr, &packedView, packedHandle);
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};
+        pipeline.pRootSignature = fixture.root.Get();
+        pipeline.CS = {g_xrfg_pack_flow_input_shader, sizeof(g_xrfg_pack_flow_input_shader)};
+        ComPtr<ID3D12PipelineState> pack;
+        success(fixture.gpu.device->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&pack)),
+                "FFX production pack PSO");
+        ComPtr<ID3D12CommandAllocator> allocator;
+        ComPtr<ID3D12GraphicsCommandList> list;
+        success(fixture.gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)),
+                "FFX pack allocator");
+        success(fixture.gpu.device->CreateCommandList(
+                    0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), pack.Get(), IID_PPV_ARGS(&list)),
+                "FFX pack list");
+        std::array<D3D12_RESOURCE_BARRIER, 2> barriers{};
+        for (UINT index = 0; index < barriers.size(); ++index) {
+            barriers[index].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barriers[index].Transition = {index ? packed.Get() : fixture.resources[1].Get(),
+                                          D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                          D3D12_RESOURCE_STATE_COMMON,
+                                          index ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                                                : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+        }
+        list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        list->SetComputeRootSignature(fixture.root.Get());
+        list->SetComputeRoot32BitConstants(0, 62, &parameters, 0);
+        ID3D12DescriptorHeap* heaps[]{fixture.descriptors.Get()};
+        list->SetDescriptorHeaps(1, heaps);
+        auto table = fixture.descriptors->GetGPUDescriptorHandleForHeapStart();
+        list->SetComputeRootDescriptorTable(1, table);
+        table.ptr += 7 * fixture.descriptorStride;
+        list->SetComputeRootDescriptorTable(2, table);
+        list->Dispatch((parameters.packedWidth + 7) / 8, (parameters.packedHeight + 7) / 8, 1);
+        for (auto& barrier : barriers)
+            std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        fixture.execute(list.Get());
+        auto output = fixture.transfer(packed.Get(), nullptr, 4);
+        size_t bad{};
+        double maximum{};
+        for (UINT y = 0; y < parameters.packedHeight; ++y)
+            for (UINT x = 0; x < parameters.packedWidth; ++x)
+                for (UINT c = 0; c < 4; ++c) {
+                    const UINT eye = y / parameters.eyeStride;
+                    const UINT localY = y - eye * parameters.eyeStride;
+                    const double sourceX = (x + 0.5) / nominalScale - 0.5;
+                    const double sourceY = (localY + 0.5) / nominalScale - 0.5;
+                    const bool active = eye < eyes && sourceX < parameters.width && sourceY < parameters.height;
+                    const double expected =
+                        c == 3   ? 255
+                        : active ? expectedPackPattern(sourceX, sourceY, parameters.width, parameters.height, eye)
+                                 : 0;
+                    const size_t offset = (y * parameters.packedWidth + x) * 4 + c;
+                    const double error = std::abs(double(output[offset]) - expected);
+                    if (!bad && error > 2.0)
+                        std::printf(
+                            "first pack mismatch pixel=(%u,%u) source=(%.6f,%.6f) channel=%u actual=%u expected=%.3f\n",
+                            x,
+                            y,
+                            sourceX,
+                            sourceY,
+                            c,
+                            output[offset],
+                            expected);
+                    maximum = std::max(maximum, error);
+                    bad += error > 2.0;
+                }
+        std::printf("%s both eyes/stride/right/bottom bad=%zu max=%.3f\n", scenario.c_str(), bad, maximum);
+        check(!bad, "FFX packing must preserve nominal-scale detail, both eyes, and black right/bottom padding");
+        std::puts("PASS: production FFX pack shader dispatch and readback");
+        return 0;
+    }
+
+    int runValidEdgeCenters() {
+        ShaderFixture fixture(false);
+        for (bool useNvidia : {true, false}) {
+            for (float requested : {0.3f, 1.0f / 3.0f, 0.5f, 2.0f / 3.0f, 0.7f}) {
+                Parameters parameters;
+                parameters.flags = static_cast<UINT>(std::lround(requested * 65535.0f)) << 8;
+                const double fraction = double(parameters.flags >> 8) / 65535.0;
+                for (auto& mapping : parameters.mappings) {
+                    mapping.sourceRect[0] = mapping.sourceRect[1] = 8;
+                    mapping.targetRect[0] = mapping.targetRect[1] = 8;
+                    mapping.sourceRect[2] = mapping.sourceRect[3] = 48;
+                    mapping.targetRect[2] = mapping.targetRect[3] = 48;
+                }
+                auto previous = flat(), current = flat();
+                for (UINT eye = 0; eye < eyes; ++eye)
+                    for (UINT y = 0; y < side; ++y)
+                        for (UINT x = 0; x < side; ++x) {
+                            pixel(previous, eye, x, y)[3] = eye ? 40 : 80;
+                            pixel(current, eye, x, y)[3] = eye ? 200 : 160;
+                        }
+                std::vector<int32_t> flow((side / block) * (side * eyes / block) * 2);
+                std::vector<uint32_t> auxiliary((side / block) * (side * eyes / block));
+                fixture.transfer(fixture.resources[0].Get(), previous.data(), 4);
+                fixture.transfer(fixture.resources[1].Get(), current.data(), 4);
+                fixture.transfer(fixture.resources[2].Get(), flow.data(), 8);
+                fixture.transfer(fixture.resources[3].Get(), auxiliary.data(), 4);
+                auto output = fixture.draw(parameters, useNvidia);
+                // Different alpha in each capture distinguishes interpolation from B fallback.
+                for (UINT eye = 0; eye < eyes; ++eye)
+                    for (UINT x : {8u, 55u})
+                        for (UINT y : {8u, 55u})
+                            for (UINT c = 0; c < 4; ++c)
+                                compareChannel(pixel(output, eye, x, y)[c],
+                                               pixel(previous, eye, x, y)[c] * (1 - fraction) +
+                                                   pixel(current, eye, x, y)[c] * fraction,
+                                               "valid first and last centers retain interpolation",
+                                               eye,
+                                               x,
+                                               y,
+                                               c,
+                                               2);
+                std::printf("verified valid edge centers backend=%s fraction=%.6f both eyes\n",
+                            useNvidia ? "NVIDIA" : "FidelityFX",
+                            fraction);
+            }
+        }
+        std::puts("PASS: production endpoint shader draw and readback");
+        return 0;
+    }
+
     int run(const std::string& scenario) {
+        if (scenario == "ffx-half-input-padding" || scenario == "ffx-full-input-padding" ||
+            scenario == "ffx-three-quarter-input-padding" || scenario == "ffx-small-half-input-padding")
+            return runFfxInputScale(scenario);
+        if (scenario == "nvidia-half-input-bottom" || scenario == "nvidia-full-input-padding" ||
+            scenario == "nvidia-three-quarter-input-padding" || scenario == "nvidia-small-half-input-padding" ||
+            scenario == "nvidia-half-input-cropped-view")
+            return runNvidiaInputScale(scenario);
+        if (scenario == "previous-camera-left" || scenario == "previous-camera-right" ||
+            scenario == "previous-camera-top" || scenario == "previous-camera-bottom")
+            return runPreviousCameraPadding(scenario == "previous-camera-right" || scenario == "previous-camera-bottom",
+                                            scenario == "previous-camera-top" || scenario == "previous-camera-bottom");
+        if (scenario == "valid-edge-centers")
+            return runValidEdgeCenters();
+        if (scenario == "half-pixel-left" || scenario == "half-pixel-right" || scenario == "half-pixel-top" ||
+            scenario == "half-pixel-bottom")
+            return runHalfPixelBoundary(scenario == "half-pixel-right" || scenario == "half-pixel-bottom",
+                                        scenario == "half-pixel-top" || scenario == "half-pixel-bottom");
+        if (scenario.rfind("stationary-alias", 0) == 0 || scenario.rfind("ghost-thin-motion", 0) == 0 ||
+            scenario == "ghost-alpha-motion" || scenario.rfind("ghost-large-motion", 0) == 0)
+            return runGhosting(scenario);
         const bool uniform = scenario == "uniform" || scenario == "uniform-srgb";
         const bool gradient = scenario == "nearwhite-gradient" || scenario == "nearwhite-gradient-srgb";
         const bool rotationCap = scenario == "rotation-cap";
         const bool rotation = scenario == "rotation-motion" || scenario == "rotation-static" || rotationCap;
         const bool falseMatch =
             scenario == "false-match" || scenario == "false-match-srgb" || scenario == "dark-false-match-srgb";
+        const bool periodic = scenario == "translated-detail";
+        const bool translated = periodic || scenario == "translated-detail-aperiodic";
         const bool srgb = scenario == "uniform-srgb" || scenario == "nearwhite-gradient-srgb" ||
                           scenario == "false-match-srgb" || scenario == "dark-false-match-srgb";
         side = rotationCap ? 1024 : 64;
         ShaderFixture fixture(srgb);
         for (bool useNvidia : {true, false}) {
-            if (useNvidia && !uniform && !gradient && !rotation)
+            if (useNvidia && !uniform && !gradient && !rotation && !translated)
                 continue;
             for (float requested : {0.3f, 1.0f / 3.0f, 0.5f, 2.0f / 3.0f, 0.7f}) {
                 Parameters parameters;
@@ -381,11 +1029,8 @@ namespace {
                 Pixels previous = flat(), current = flat();
                 std::vector<int32_t> flow((side / block) * (side * eyes / block) * 2);
                 std::vector<uint32_t> auxiliary((side / block) * (side * eyes / block));
-                const int displacement = gradient ? 0
-                                                  : (scenario == "translated-detail" || scenario == "border" ||
-                                                             scenario == "border-no-neighbors"
-                                                         ? 8
-                                                         : 16);
+                const int displacement =
+                    gradient ? 0 : (translated || scenario == "border" || scenario == "border-no-neighbors" ? 8 : 16);
                 for (size_t i = 0; i < flow.size(); i += 2)
                     flow[i] = displacement * (useNvidia ? 32 : 1);
                 if (rotationCap) {
@@ -534,11 +1179,15 @@ namespace {
                         mapping.targetRect[2] = mapping.targetRect[3] = 3;
                     }
                     band(previous, 39, 41, 0);
-                } else if (scenario == "translated-detail") {
+                } else if (translated) {
                     for (UINT eye = 0; eye < eyes; ++eye) {
                         for (UINT y = 0; y < side; ++y) {
                             for (UINT x = 0; x < side; ++x) {
-                                auto value = [](UINT p) { return static_cast<uint8_t>((p % 8) < 2 ? 230 : 35); };
+                                // Retain the original period-8/+8 motion oracle. The separate
+                                // aperiodic control adds two codes per +8 correspondence.
+                                const auto value = [periodic](UINT p) {
+                                    return static_cast<uint8_t>(((p % 8) < 2 ? 230 : 35) + (periodic ? 0 : p / 4));
+                                };
                                 auto* a = pixel(previous, eye, x, y);
                                 auto* b = pixel(current, eye, x, y);
                                 a[0] = a[1] = a[2] = value(x);
@@ -585,7 +1234,7 @@ namespace {
                                 if (scenario == "repeated")
                                     expected = previous[offset + channel] * (1 - fraction) +
                                                current[offset + channel] * fraction;
-                                if (scenario == "translated-detail") {
+                                if (translated) {
                                     if (x < 8 || x >= 48)
                                         continue;
                                     const double location = x + displacement * fraction;

@@ -98,8 +98,9 @@ void run(const char* modulePath, uint32_t multiplier, const std::string& scenari
     const auto s1 = gpu.transfer(outputs[pair.bank][0].Get(), nullptr);
     check(real == b, "real B stays bit-exact after generation");
     check(stationary || (s1 != a && s1 != b), "synthetic is not an endpoint repeat");
+    std::vector<uint8_t> s2;
     if (multiplier == 3) {
-        const auto s2 = gpu.transfer(outputs[pair.bank][1].Get(), nullptr);
+        s2 = gpu.transfer(outputs[pair.bank][1].Get(), nullptr);
         check(stationary || (s2 != s1 && s2 != a && s2 != b), "3X has two distinct intermediates");
     }
     size_t rightEyeChanges = 0;
@@ -145,6 +146,29 @@ void run(const char* modulePath, uint32_t multiplier, const std::string& scenari
         std::ofstream dump(path, std::ios::binary);
         dump.write(reinterpret_cast<const char*>(s1.data()), s1.size());
         check(dump.good(), "write stereo-control evidence");
+        if (!s2.empty()) {
+            const auto secondPath =
+                std::filesystem::path(outputDirectory) / (stationary ? "stationary-s2.rgba" : "moving-s2.rgba");
+            std::ofstream secondDump(secondPath, std::ios::binary);
+            secondDump.write(reinterpret_cast<const char*>(s2.data()), s2.size());
+            check(secondDump.good(), "write second stereo-control evidence");
+        }
+    }
+    if (stationary) {
+        for (const auto* synthetic : std::array<const std::vector<uint8_t>*, 2>{&s1, &s2}) {
+            if (synthetic->empty())
+                continue;
+            size_t bad{};
+            int maximum{};
+            for (size_t i = 0; i < b.size(); ++i) {
+                const int error = std::abs(int((*synthetic)[i]) - int(b[i]));
+                maximum = (std::max)(maximum, error);
+                bad += error > 2;
+            }
+            std::printf(
+                "Stationary role=%s channels-over-2=%zu max=%d\n", synthetic == &s1 ? "S1" : "S2", bad, maximum);
+            check(!bad, "real optical flow must preserve stationary RGBA in both eyes");
+        }
     }
     check(stationary || blendedPixels > 100, "synthetic contains motion compensation, not endpoint crossfade");
     size_t displaced = 0;
@@ -185,6 +209,40 @@ void run(const char* modulePath, uint32_t multiplier, const std::string& scenari
     success(api.GetStatistics(context, &second), "repeat statistics poll");
     check(second.last_gpu_us == statistics.last_gpu_us && second.flow_gpu_us == statistics.flow_gpu_us,
           "latest completed timing persists across polling");
+    if (stationary) {
+        // Move, hold, reverse, hold. Identical pairs after genuine movement
+        // must not retain the estimator's previous direction or displacement.
+        int previousOffset{};
+        uint64_t serial = 3;
+        for (int offset : {24, 48, 48, 48, 48, 24, 0, 0}) {
+            const auto next = scene(offset);
+            gpu.transfer(input.Get(), &next);
+            info.serial = serial++;
+            VDXRFG_TicketV1 held{};
+            success(api.Submit(context, &info, &held), "submit move-hold-reverse capture");
+            check(!held.prime && held.role_mask == (multiplier == 3 ? 7u : 5u), "warm capture role set");
+            gpu.wait(static_cast<ID3D12Fence*>(held.output_ready_fence), held.output_ready_value);
+            check(gpu.transfer(outputs[held.bank][2].Get(), nullptr) == next, "warm capture B is exact");
+            for (UINT role = 0; role < multiplier - 1; ++role) {
+                const auto synthetic = gpu.transfer(outputs[held.bank][role].Get(), nullptr);
+                if (offset == previousOffset) {
+                    size_t bad{};
+                    for (size_t i = 0; i < next.size(); ++i)
+                        bad += std::abs(int(synthetic[i]) - int(next[i])) > 2;
+                    std::printf("Stationary after motion serial=%llu role=S%u channels-over-2=%zu\n",
+                                info.serial,
+                                role + 1,
+                                bad);
+                    check(!bad, "stationary captures after motion discard stale displacement");
+                }
+            }
+            success(api.Retire(context, held.token), "retire move-hold-reverse capture");
+            previousOffset = offset;
+            info.display_time_ns += multiplier * info.display_period_ns;
+            for (UINT i = 0; i < multiplier - 1; ++i)
+                info.target_time_ns[i] += multiplier * info.display_period_ns;
+        }
+    }
     success(api.Reset(context, 1), "drained reset");
     // A deliberately parked producer must not make Submit block the CPU or
     // allow reuse/retirement of pixels which have not yet been captured.

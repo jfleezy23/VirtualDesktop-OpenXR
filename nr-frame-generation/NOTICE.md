@@ -9,7 +9,7 @@ with the companion full [GPL-3.0 text](vendor/LICENSE.GPL-3.0.txt). The runtime'
 these module terms. The optional module can be replaced separately from the runtime.
 
 Builds apply direct stereo-atlas history capture, initialization/lifetime ownership, GPU-state, diagnostic timing, FidelityFX endpoint-validation and
-camera-space motion corrections
+camera-space motion corrections, active-view sampling bounds, nominal optical-flow scaling and optional host-owned real-output copy elision
 in `scripts/prepare-fg-vendor.py`, using `src/ffx_endpoint_validation.hlsl`. The script generates corresponding
 patches and modified C++/HLSL sources. The unmodified source and upstream/retained hashes are recorded in
 [vendor/ofxr/manifest.json](vendor/ofxr/manifest.json).

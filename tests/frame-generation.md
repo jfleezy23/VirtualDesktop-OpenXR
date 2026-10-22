@@ -78,6 +78,12 @@ completed timing across repeated polls.
 
 V2 also negotiates host-owned real frames. The host already protects and copies
 the real stereo image, so the module omits its unused outer real-image repack.
+Ordinary host-owned pairs also skip the private backend real-image copy; prime
+and legacy output semantics, command-list submissions and fence ordering remain.
+The optical-flow pack carries its nominal scale separately from allocation
+padding. Both camera endpoints sample within the active view; reduced NVIDIA
+inputs use matching target-center coverage for cropped views. GPU fixtures
+check full/three-quarter/half scale, padded dimensions, both eyes and view edges.
 Synthetic pixels, input-consumption/output-readiness fences, retained banks and
 retirement remain unchanged. A prime ticket may advertise no packed roles while
 still owning GPU work and requiring retirement. The new host accepts older

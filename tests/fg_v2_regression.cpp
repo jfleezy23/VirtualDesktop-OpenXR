@@ -414,9 +414,10 @@ void directHistoryCapture(HMODULE module) {
                     const unsigned resets =
                         prime ? (fidelityFx ? (hostOwned ? 3u : 4u) : (hostOwned ? 4u : 5u)) : submits;
                     const unsigned copies = prime ? (hostOwned ? 2u : 4u) : (multiplier + (hostOwned ? 0u : 1u)) * 2u;
+                    const unsigned resourceCopies = hostOwned && !prime ? 0u : 1u;
                     reduced &= operations.submits == submits && operations.listResets == resets &&
                                operations.listCloses == resets && operations.copies == copies &&
-                               operations.resourceCopies == 1 && operations.captureRegionCopies == 2;
+                               operations.resourceCopies == resourceCopies && operations.captureRegionCopies == 2;
                 };
                 verify(result.primeOperations, true, "prime");
                 verify(result.operations, false, "pair");
@@ -426,8 +427,7 @@ void directHistoryCapture(HMODULE module) {
         }
     }
     check(reduced,
-          "direct owned history capture removes exactly one full copy and one submission/reset/close, preserving "
-          "both eye-region copies on initial, paired and reset captures");
+          "owned history retains capture and submission budgets while host-owned pairs skip the unused real copy");
 }
 
 void hostRealComparison(HMODULE module) {
