@@ -233,6 +233,14 @@ jobs:
             Invoke-Regression 'bin/tests/redirect/runtime_redirect_regression.exe' @($runtime, $target, $mode) "redirect-$mode"
             Invoke-Regression 'bin/tests/redirect/runtime_redirect_regression.exe' @($runtime, $target, $mode, 'wide') "redirect-$mode-wide"
           }
+          Invoke-Regression 'bin/tests/redirect/runtime_redirect_regression.exe' @($runtime, $runtime, 'self') 'redirect-self'
+          Invoke-Regression 'bin/tests/redirect/runtime_redirect_regression.exe' @($runtime, $runtime, 'self', 'wide') 'redirect-self-wide'
+          $externalDirectory = Join-Path (Get-Location) 'bin/community/redirect-target'
+          New-Item -ItemType Directory -Force -Path $externalDirectory | Out-Null
+          $externalRuntime = Join-Path $externalDirectory 'virtualdesktop-openxr.dll'
+          Copy-Item -LiteralPath $runtime -Destination $externalRuntime
+          Invoke-Regression 'bin/tests/redirect/runtime_redirect_regression.exe' @($runtime, $externalRuntime, 'chain') 'redirect-chain'
+          Invoke-Regression 'bin/tests/redirect/runtime_redirect_regression.exe' @($runtime, $externalRuntime, 'chain', 'wide') 'redirect-chain-wide'
 
   analyzer-comparison:
     needs: source-checks

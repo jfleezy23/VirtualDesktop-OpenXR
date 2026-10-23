@@ -82,6 +82,13 @@ process, verifies returned dispatch code belongs to that DLL, and never creates 
 Run the existing redirect success/failure controls separately to validate forwarding and dispatch lifetime.
 Append `wide` to either redirect command to test forwarding with the loader interface range `[1,2]`.
 
+For bundled side-by-side builds, pass the same guarded DLL as both paths with mode `self` to verify local dispatch
+and balanced self-load references. For mode `chain`, pass the official or another bundled DLL first and the guarded
+DLL at a different path second. It checks target-owned dispatch, retained target negotiation and event forwarding
+after unloading the caller. The registry detour bounds an unguarded baseline to three/five reads and fails the
+expected two/four-read check instead of allowing stack overflow. Both modes also accept `wide`; run each in a
+bounded child process. These are CPU negotiation tests and do not establish NR/FG or headset operation.
+
 Build `nonnr_input_regression.cpp` with `vr_input_build.cmd` and a fresh matching x64 ReleaseBundle object directory.
 `sync-set-paths` is CPU-only and checks that one action set cannot inherit another set's declared paths. `sync-scopes` and
 `sync-validation` require the explicit OVRNull backend directory as the second argument. They call the real runtime sync,

@@ -7,8 +7,9 @@ from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 import winreg
 
+import vdxr_runtime_selection as runtime_selection
 
-#REGISTRY_PATH = r"SOFTWARE\VirtualDesktop-OpenXR"
+
 REGISTRY_PATH = r"SOFTWARE\Virtual Desktop, Inc.\OpenXR"
 ENABLE_VALUE_NAME = "DLSSNR_Enabled"
 VALUE_NAMES = (
@@ -303,8 +304,31 @@ class VDXRRegistryApp:
             row=1, column=0, sticky="w", pady=(2, 12)
         )
 
+        runtime_panel = RoundedPanel(frame)
+        runtime_panel.grid(row=2, column=0, sticky="ew", pady=(0, 14))
+        runtime = runtime_panel.content
+        runtime.columnconfigure(0, weight=1)
+        ttk.Label(runtime, text="Runtime", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        try:
+            self.saved_runtime_selection = runtime_selection.read_selection()
+            if self.saved_runtime_selection == runtime_selection.OTHER_LABEL:
+                errors.append("Other/unknown runtime override selected for the next game launch.")
+        except (ValueError, OSError) as error:
+            self.saved_runtime_selection = runtime_selection.OTHER_LABEL
+            errors.append(f"Runtime selection error: {error}")
+        self.runtime_selection = tk.StringVar(value=self.saved_runtime_selection)
+        runtime_selector = ttk.Combobox(
+            runtime, textvariable=self.runtime_selection, values=runtime_selection.CHOICES,
+            state="readonly", width=25, style="Dark.TCombobox",
+        )
+        runtime_selector.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        runtime_selector.bind("<<ComboboxSelected>>", self.on_runtime_changed)
+        ttk.Label(runtime, text="For next game launch. Keep VDXR selected in Streamer.", style="Hint.TLabel").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(10, 0)
+        )
+
         nr_panel = RoundedPanel(frame)
-        nr_panel.grid(row=2, column=0, sticky="ew")
+        nr_panel.grid(row=3, column=0, sticky="ew")
         nr = nr_panel.content
         nr.columnconfigure(1, weight=1)
         nr_header = ttk.Frame(nr, style="Card.TFrame")
@@ -368,7 +392,7 @@ class VDXRRegistryApp:
         )
 
         fg_panel = RoundedPanel(frame)
-        fg_panel.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        fg_panel.grid(row=4, column=0, sticky="ew", pady=(14, 0))
         fg = fg_panel.content
         fg.columnconfigure(0, weight=1)
         fg.columnconfigure(1, weight=1)
@@ -412,14 +436,32 @@ class VDXRRegistryApp:
         )
         ttk.Button(
             frame, text="Reset NR settings", command=self.reset_defaults, style="Soft.TButton",
-        ).grid(row=4, column=0, sticky="w", pady=(14, 0))
+        ).grid(row=5, column=0, sticky="w", pady=(14, 0))
         self.status = tk.StringVar(value="; ".join(errors) or "Ready · changes save automatically")
         ttk.Label(frame, textvariable=self.status, style="Subtitle.TLabel", wraplength=592).grid(
-            row=5, column=0, sticky="w", pady=(8, 0)
+            row=6, column=0, sticky="w", pady=(8, 0)
         )
         root.bind("<Map>", lambda event: root.after_idle(dark_title_bar, root) if event.widget is root else None, add="+")
         self.set_slider_state()
         self.updating = False
+
+    def on_runtime_changed(self, _event=None):
+        selection = self.runtime_selection.get()
+        try:
+            runtime_selection.write_selection(selection)
+        except (OSError, ValueError) as error:
+            try:
+                self.saved_runtime_selection = runtime_selection.read_selection()
+            except (OSError, ValueError):
+                self.saved_runtime_selection = runtime_selection.OTHER_LABEL
+            self.runtime_selection.set(self.saved_runtime_selection)
+            if isinstance(error, PermissionError):
+                self.status.set("Runtime selection error: administrator access is required; selection not verified.")
+            else:
+                self.status.set(f"Runtime selection error: {error}")
+        else:
+            self.saved_runtime_selection = selection
+            self.status.set(f"Saved {selection} for the next game launch. Keep VDXR selected in Streamer.")
 
     def on_frame_generation_backend_changed(self, _event=None):
         selection = self.frame_generation_backend.get()
@@ -490,7 +532,7 @@ class VDXRRegistryApp:
             write_value(ENABLE_VALUE_NAME, 0)
             for name, default in zip(VALUE_NAMES, VALUE_DEFAULTS):
                 write_value(name, default)
-            self.status.set("NR reset: disabled, coverage 100%. FG selections retained.")
+            self.status.set("NR reset: disabled, coverage 100%. Runtime and FG selections retained.")
         except PermissionError:
             self.status.set("Administrator access is required to write HKLM.")
         except OSError as error:

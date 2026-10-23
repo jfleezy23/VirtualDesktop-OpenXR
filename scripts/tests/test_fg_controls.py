@@ -1,8 +1,11 @@
 """Exercise the real NR window callbacks against an isolated registry boundary."""
 
 import importlib.util
+import hashlib
+import json
 from pathlib import Path
 import subprocess
+import tempfile
 import tkinter as tk
 import unittest
 from unittest import mock
@@ -14,6 +17,9 @@ SPEC.loader.exec_module(gui)
 
 
 class Key:
+    def __init__(self, path):
+        self.path = path
+
     def __enter__(self):
         return self
 
@@ -31,31 +37,47 @@ class Registry:
 
     def __init__(self):
         self.values = {"FoveationSize": (100, self.REG_DWORD), "DLSSNR_Enabled": (1, self.REG_DWORD)}
+        self.keys = {gui.REGISTRY_PATH: self.values}
         self.writes = []
+        self.write_paths = []
         self.access = []
         self.paths = []
         self.denied = False
 
     def OpenKey(self, hive, path, reserved=0, access=2):
         self.paths.append(path)
-        self.access.append(("read", access))
-        return Key()
+        if access & self.KEY_SET_VALUE and self.denied:
+            raise PermissionError("fixture permission denial")
+        if path not in self.keys:
+            raise FileNotFoundError(path)
+        self.access.append(("write" if access & self.KEY_SET_VALUE else "read", access))
+        return Key(path)
 
     def CreateKeyEx(self, hive, path, reserved=0, access=4):
         self.paths.append(path)
         if self.denied:
             raise PermissionError("fixture permission denial")
         self.access.append(("write", access))
-        return Key()
+        self.keys.setdefault(path, {})
+        return Key(path)
 
     def QueryValueEx(self, key, name):
-        if name not in self.values:
+        values = self.keys[key.path]
+        if name not in values:
             raise FileNotFoundError(name)
-        return self.values[name]
+        return values[name]
 
     def SetValueEx(self, key, name, reserved, kind, value):
         self.writes.append((name, value, kind))
-        self.values[name] = (value, kind)
+        self.write_paths.append((key.path, name, value, kind))
+        self.keys[key.path][name] = (value, kind)
+
+    def DeleteValue(self, key, name):
+        if name not in self.keys[key.path]:
+            raise FileNotFoundError(name)
+        self.writes.append((name, None, None))
+        self.write_paths.append((key.path, name, None, None))
+        del self.keys[key.path][name]
 
 
 class FrameGenerationControlsTests(unittest.TestCase):
@@ -64,6 +86,10 @@ class FrameGenerationControlsTests(unittest.TestCase):
         self.patch = mock.patch.object(gui, "winreg", self.registry)
         self.patch.start()
         self.addCleanup(self.patch.stop)
+        if hasattr(gui, "runtime_selection"):
+            runtime_patch = mock.patch.object(gui.runtime_selection, "winreg", self.registry)
+            runtime_patch.start()
+            self.addCleanup(runtime_patch.stop)
         self.root = tk.Tk()
         self.root.withdraw()
         self.addCleanup(self.root.destroy)
@@ -84,7 +110,7 @@ class FrameGenerationControlsTests(unittest.TestCase):
         app = self.app()
         self.select(app, "OFXR 3×")
         self.assertTrue(self.registry.paths)
-        self.assertEqual(set(self.registry.paths), {r"SOFTWARE\Virtual Desktop, Inc.\OpenXR"})
+        self.assertEqual({path for path, *_ in self.registry.write_paths}, {r"SOFTWARE\Virtual Desktop, Inc.\OpenXR"})
 
     def test_nr_and_fg_use_same_64bit_registry_view(self):
         app = self.app()
@@ -337,6 +363,91 @@ class FrameGenerationControlsTests(unittest.TestCase):
             app.on_close()
         destroy.assert_not_called()
         self.assertIn("administrator", app.status.get().lower())
+
+    def runtime_fixture(self):
+        support = getattr(gui, "runtime_selection", None)
+        self.assertIsNotNone(support, "Missing runtime selector support")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        host = Path(temporary.name) / "virtualdesktop-openxr.dll"
+        host.write_bytes(b"controls runtime fixture; never loaded")
+        host.with_name("CUSTOM-RUNTIME.json").write_text(json.dumps({
+            "schema": 1, "self_redirect_guard": True,
+            "host_sha256": hashlib.sha256(host.read_bytes()).hexdigest(),
+            "source_revision": "test-fixture",
+        }))
+        values = {support.CUSTOM_PATH_VALUE_NAME: (str(host), 1), "unrelated": (73, 4)}
+        self.registry.keys[support.RUNTIME_REGISTRY_PATH] = values
+        return support, host, values
+
+    def test_runtime_selector_startup_is_stock_and_read_only(self):
+        app = self.app()
+        self.assertTrue(hasattr(app, "runtime_selection"), "Missing runtime selector")
+        self.assertEqual(app.runtime_selection.get(), "Stock VDXR")
+        self.assertEqual(self.registry.writes, [])
+
+    def test_runtime_selection_autosaves_only_redirect_and_stock_retains_custom_path(self):
+        support, host, values = self.runtime_fixture()
+        self.registry.values.update({"FrameGenerationMode": (3, 4), "FrameGenerationBackend": (1, 4)})
+        nr_fg = self.registry.values.copy()
+        app = self.app()
+        app.runtime_selection.set("Custom VDXR")
+        app.on_runtime_changed()
+        self.assertEqual(values[support.REDIRECT_VALUE_NAME], (str(host), 1))
+        self.assertIn("next game launch", app.status.get().lower())
+        self.assertNotIn("active", app.status.get().lower())
+        app.runtime_selection.set("Stock VDXR")
+        app.on_runtime_changed()
+        self.assertNotIn(support.REDIRECT_VALUE_NAME, values)
+        self.assertEqual(values[support.CUSTOM_PATH_VALUE_NAME], (str(host), 1))
+        self.assertEqual(self.registry.values, nr_fg)
+        self.assertEqual({path for path, *_ in self.registry.write_paths}, {support.RUNTIME_REGISTRY_PATH})
+
+    def test_unknown_runtime_override_is_reported_without_writing(self):
+        support, host, values = self.runtime_fixture()
+        values[support.REDIRECT_VALUE_NAME] = (str(host.with_name("unmanaged.dll")), 1)
+        app = self.app()
+        self.assertEqual(app.runtime_selection.get(), "Other/unknown override")
+        self.assertIn("unknown", app.status.get().lower())
+        self.assertEqual(self.registry.writes, [])
+
+    def test_runtime_permission_failure_restores_verified_choice(self):
+        _, _, values = self.runtime_fixture()
+        app = self.app()
+        self.registry.denied = True
+        app.runtime_selection.set("Custom VDXR")
+        app.on_runtime_changed()
+        self.assertEqual(app.runtime_selection.get(), "Stock VDXR")
+        self.assertIn("administrator", app.status.get().lower())
+        self.assertNotIn("redirect_to", values)
+
+    def test_runtime_readback_failure_does_not_claim_custom_saved(self):
+        self.runtime_fixture()
+        app = self.app()
+        with mock.patch.object(self.registry, "SetValueEx", return_value=None):
+            app.runtime_selection.set("Custom VDXR")
+            app.on_runtime_changed()
+        self.assertEqual(app.runtime_selection.get(), "Stock VDXR")
+        self.assertIn("error", app.status.get().lower())
+
+    def test_malformed_runtime_override_opens_without_writes(self):
+        support, _, values = self.runtime_fixture()
+        values[support.REDIRECT_VALUE_NAME] = (4, 4)
+        app = self.app()
+        self.assertEqual(app.runtime_selection.get(), "Other/unknown override")
+        self.assertIn("runtime", app.status.get().lower())
+        self.assertIn("invalid", app.status.get().lower())
+        self.assertEqual(self.registry.writes, [])
+
+    def test_nr_reset_preserves_runtime_selection(self):
+        support, host, values = self.runtime_fixture()
+        values[support.REDIRECT_VALUE_NAME] = (str(host), 1)
+        before = values.copy()
+        app = self.app()
+        app.reset_defaults()
+        self.assertEqual(values, before)
+        self.assertEqual(app.runtime_selection.get(), "Custom VDXR")
+        self.assertNotIn(support.REDIRECT_VALUE_NAME, [name for name, _, _ in self.registry.writes])
 
 
 class ElevationTests(unittest.TestCase):

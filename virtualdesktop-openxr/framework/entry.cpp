@@ -114,6 +114,8 @@ XrResult __declspec(dllexport) XRAPI_CALL xrNegotiateLoaderRuntimeInterface(cons
         if (standaloneLibraryPath && (standaloneLibrary = LoadLibraryW(standaloneLibraryPath.value().c_str())) &&
             (pfnNegotiateLoaderRuntimeInterface = (PFN_xrNegotiateLoaderRuntimeInterface)GetProcAddress(
                  standaloneLibrary, "xrNegotiateLoaderRuntimeInterface")) &&
+            // A redirected bundled build shares this setting; negotiate locally when it points back to us.
+            pfnNegotiateLoaderRuntimeInterface != &xrNegotiateLoaderRuntimeInterface &&
             (pfnGetVersion = (decltype(getVersion)*)GetProcAddress(standaloneLibrary, "getVersion"))) {
             if (pfnGetVersion() >= getVersion()) {
                 Log("Redirecting to standalone runtime (%ls)\n", standaloneLibraryPath.value().c_str());

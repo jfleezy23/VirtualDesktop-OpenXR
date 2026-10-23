@@ -80,17 +80,36 @@ class ControlsPackageTests(unittest.TestCase):
             bundle.mkdir()
             guide = b"![Controls](images/controls-overview.png)\n![Backend](images/controls-fg-only.png)\n"
             (snapshot / "docs/NR-FG-CONTROLS.md").write_bytes(guide)
+            runtime_guide = b"# Runtime selection\nUse the Runtime selector for the next game launch.\n"
+            (snapshot / "docs/SIDE-BY-SIDE-RUNTIME.md").write_bytes(runtime_guide)
             images = {"controls-overview.png": b"overview\r\nbytes", "controls-fg-only.png": b"backend\r\nbytes"}
             for name, data in images.items():
                 (snapshot / "docs/images" / name).write_bytes(data)
             module.copy_documentation(snapshot, bundle)
             self.assertEqual((bundle / "README.md").read_bytes(), guide)
+            self.assertTrue((bundle / "SIDE-BY-SIDE-RUNTIME.md").is_file(), "Missing linked offline runtime guide")
+            self.assertEqual((bundle / "SIDE-BY-SIDE-RUNTIME.md").read_bytes(), runtime_guide)
+            self.assertIn("docs/SIDE-BY-SIDE-RUNTIME.md", module.SOURCE_FILES)
             for name, data in images.items():
                 self.assertEqual((bundle / "images" / name).read_bytes(), data)
                 self.assertIn("docs/images/" + name, module.SOURCE_FILES)
             hashes = module.archive_bundle(bundle, root / "controls.zip")
             self.assertIn("images/controls-overview.png", hashes)
             self.assertIn("images/controls-fg-only.png", hashes)
+            self.assertIn("SIDE-BY-SIDE-RUNTIME.md", hashes)
+
+    def test_missing_runtime_guide_prevents_incomplete_offline_package(self):
+        module = self.builder()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            snapshot, bundle = root / "snapshot", root / "bundle"
+            (snapshot / "docs/images").mkdir(parents=True)
+            bundle.mkdir()
+            (snapshot / "docs/NR-FG-CONTROLS.md").write_text("[Runtime](SIDE-BY-SIDE-RUNTIME.md)")
+            for name in module.DOC_IMAGES:
+                (snapshot / name).write_bytes(b"image fixture")
+            with self.assertRaises(FileNotFoundError):
+                module.copy_documentation(snapshot, bundle)
 
     def test_revision_binding_compares_image_bytes_without_text_normalization(self):
         module = self.builder()

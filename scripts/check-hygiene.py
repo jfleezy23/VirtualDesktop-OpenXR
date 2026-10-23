@@ -31,8 +31,8 @@ MACHINE_PATH = re.compile(r"[A-Za-z]:[/\\](?:Users|Documents and Settings)[/\\]|
 VENDOR_ROOT = "nr-frame-generation/vendor/ofxr/"
 VENDOR_PIN = "07449429c139e5d2070b6f0855ed5323de7cee00"
 DOCUMENTATION_PNG_SHA256 = {
-    "docs/images/controls-overview.png": "07cca35b1694000bd9bbabab0ca5140e737bb2d9ddea3920231501d53cec4fd3",
-    "docs/images/controls-fg-only.png": "498f3214557d3d480631a4be6227a4e583e7e20d9dfc555d30646dda5c9717ed",
+    "docs/images/controls-overview.png": "e21576f198b0a8716ef188eaa62e72eefc8a4bed77ea6da8c6b416ea1d924c05",
+    "docs/images/controls-fg-only.png": "2a3ae8a4a04d4473b56d877523e94803a11c29280be301056205b4d86ca17d68",
 }
 
 

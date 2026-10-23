@@ -2,7 +2,8 @@
 
 A standalone Windows x64 settings app for this repository's experimental VDXR runtime.
 Adjust neural rendering (NR) during play, or select PC-side OFXR frame generation (FG)
-for the next game session. Frame generation also works with NR off.
+for the next game session. Frame generation also works with NR off. The Runtime
+selector chooses stock or custom VDXR for the next VR launch.
 
 ![VDXR Controls showing neural rendering enabled at 100% coverage, OFXR 3× and NVIDIA](images/controls-overview.png)
 
@@ -11,8 +12,10 @@ examples, not a preset applied by installation.*
 
 ## Get started
 
-1. Install the matching experimental NR/FG runtime in Virtual Desktop Streamer first.
-   This app changes settings; it does not install or select a runtime.
+1. Install the matching guarded NR/FG runtime using the
+   [side-by-side setup](SIDE-BY-SIDE-RUNTIME.md). That guide includes the protected
+   folder, supplied metadata and managed-path registration steps. Keep Streamer's
+   official runtime in place. This app does not install runtime DLLs.
 2. Extract the **entire** controls ZIP to a local folder. Open
    **VDXR-NR-FG-Controls.exe** and keep its `_internal` folder beside it.
    No Python installation is needed.
@@ -20,6 +23,10 @@ examples, not a preset applied by installation.*
    machine-wide, 64-bit OpenXR registry key. This is an unsigned community build.
 4. In Streamer, select **VDXR** as the OpenXR runtime. Turn **SSW Off** in Virtual
    Desktop when using OFXR, and disable any separate external FG layer.
+   For a [side-by-side installation](SIDE-BY-SIDE-RUNTIME.md), choose **Custom VDXR**
+   in this app's Runtime card. **Stock VDXR** returns to Streamer's official runtime.
+   Streamer and the Controls app can stay open; restart an already running game to
+   use the newly selected runtime.
 5. Choose **Off**, **OFXR 2×** or **OFXR 3×**, then an optical-flow backend.
    Start with **NVIDIA (default)**. Fully close and relaunch the game after changing
    either FG selector.
@@ -40,6 +47,7 @@ NR component.
 
 | Control | What it changes | When it applies |
 | --- | --- | --- |
+| Runtime | Stock VDXR or the installed custom runtime | At the next VR launch |
 | Enable NR | Neural processing on or off | During play |
 | NR style (0–2) | The NR component's numbered style selection | During play |
 | NR strength | Overall NR strength, 0–100 | During play |
@@ -57,6 +65,27 @@ flushes a pending coverage change and leaves the saved settings in place.
 **Reset NR settings** disables NR and saves its defaults, including 100% coverage.
 It replaces the saved NR appearance choices but preserves the FG mode and backend.
 Installing or upgrading the controls app does not reset your hair/face settings.
+
+## Switch between stock and custom VDXR
+
+Keep **VDXR** selected in Streamer's existing three-choice menu. The Runtime
+selector in this app controls the bundled runtime's development redirect; it does
+not add a fourth entry to Streamer's menu or replace a running game's DLL.
+
+Choose **Custom VDXR** to use the guarded, separately installed runtime, or
+**Stock VDXR** to remove the redirect. Changes save immediately; there is no Apply
+button. NR, FG and controller settings are preserved in either direction. Resetting
+NR settings does not change the selected runtime.
+
+Custom selection requires the side-by-side installer metadata and a matching host
+DLL. A missing or mismatched installation is reported instead of writing an
+unverified redirect. An unfamiliar existing override is shown separately rather
+than presented as stock. The displayed choice describes the saved request for the
+next VR launch, not proof of the runtime currently loaded by a running game.
+
+The runtime selector uses the 64-bit
+`HKEY_LOCAL_MACHINE\SOFTWARE\VirtualDesktop-OpenXR` key. NR/FG appearance settings
+continue to use `HKEY_LOCAL_MACHINE\SOFTWARE\Virtual Desktop, Inc.\OpenXR`.
 
 ## Frame generation without NR
 
