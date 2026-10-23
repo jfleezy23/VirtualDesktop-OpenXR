@@ -13,12 +13,13 @@ guard will recursively follow its own redirect. Do not enable the hook for an
 unguarded build. Switching to the standalone `Release` configuration also changes
 the settings registry key and is not equivalent to this setup.
 
-The local installation uses:
+The installation uses:
 
 ```text
 C:\Program Files\VDXR-NR-FG\OpenXR\
     virtualdesktop-openxr.dll
     vdxr-frame-generation.dll
+    CUSTOM-RUNTIME.json
     nvngx_dlssnr.dll            (separately supplied, licensed NR component)
 ```
 
@@ -26,6 +27,82 @@ Keep the matching host and FG module together. NR requires the compatible licens
 NR component beside them; it is not distributed by this project. Keep the folder
 protected by normal Program Files permissions. Do not redirect to a build directory
 that unprivileged programs can modify.
+
+## Install from the release
+
+The **2026.10.22 switcher update** supplies the guarded runtime and
+`CUSTOM-RUNTIME.json` together. Older runtime packages without this metadata are
+not the switcher package. Download the dated runtime ZIP and dated Controls ZIP
+from the release's current Downloads section, and verify their published SHA-256
+checksums before continuing.
+
+1. Close VR games. Keep Virtual Desktop Streamer's **official** runtime installed.
+   If you previously replaced its DLL with a community build, restore the original
+   vendor backup or reinstall/update Streamer first. Otherwise the Stock choice
+   would still run that replacement. Do not copy the new DLLs over Streamer's files.
+2. Extract the runtime ZIP. Its two DLLs and `CUSTOM-RUNTIME.json` are at the ZIP
+   root. Using File Explorer, create `%ProgramFiles%\VDXR-NR-FG\OpenXR` and copy
+   those **three files** into it, accepting administrator access. Keep the normal
+   Program Files permissions. For an existing managed installation, use the upgrade
+   procedure below instead of overwriting it while a game is running.
+3. If using NR, copy your separately supplied, compatible licensed
+   `nvngx_dlssnr.dll` beside them. No NR DLL is included or downloaded. FG with NR
+   off does not require it.
+4. Open **64-bit PowerShell as Administrator** and run the following block. It
+   verifies the copied host against the supplied metadata, then records its
+   location for Controls. It does not activate the redirect or change NR/FG
+   settings. Stop on any error.
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$hostPath = Join-Path $env:ProgramFiles 'VDXR-NR-FG\OpenXR\virtualdesktop-openxr.dll'
+$manifestPath = Join-Path (Split-Path $hostPath) 'CUSTOM-RUNTIME.json'
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+$hostHash = (Get-FileHash -LiteralPath $hostPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($manifest.schema -ne 1 -or $manifest.self_redirect_guard -ne $true -or
+    $manifest.host_sha256 -cne $hostHash) {
+    throw 'The host and guarded-runtime metadata do not match. Recheck the download.'
+}
+$base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+    [Microsoft.Win32.RegistryHive]::LocalMachine,
+    [Microsoft.Win32.RegistryView]::Registry64)
+$key = $null
+try {
+    $key = $base.CreateSubKey('SOFTWARE\VirtualDesktop-OpenXR')
+    $existing = $key.GetValue('custom_runtime_path')
+    if ($existing -and $existing -ine $hostPath) {
+        throw 'Another managed runtime is registered. Preserve it before changing this installation.'
+    }
+    $key.SetValue('custom_runtime_path', $hostPath, [Microsoft.Win32.RegistryValueKind]::String)
+} finally {
+    if ($key) { $key.Dispose() }
+    $base.Dispose()
+}
+```
+
+5. Extract the **whole** Controls ZIP and open `VDXR-NR-FG-Controls.exe`, keeping
+   `_internal` beside it. Accept the administrator prompt. Choose **Custom VDXR**
+   in the Runtime card, keep **VDXR** selected in Streamer, then launch a game
+   normally. For OFXR, turn VD's SSW off. Keep NR coverage at 100% when enabling NR.
+6. To compare with the official runtime, choose **Stock VDXR** and relaunch the
+   game. Neither Streamer nor Controls needs to restart.
+
+The packaged metadata has schema `1`, `self_redirect_guard: true`, the exact host
+`host_sha256`, and `source_revision`. It binds the guarded DLL to the supplied
+metadata; it is not a digital signature. Do not manufacture this marker for an
+older DLL or copy it from a different build. The Controls app checks the hash
+without loading runtime code. The source revision identifies the compiled host;
+the Controls app can have a later documentation/application revision.
+
+### Upgrade an existing managed installation
+
+Close all VR games and select **Stock VDXR** in Controls. Back up the existing
+external host, FG DLL and `CUSTOM-RUNTIME.json`. Replace only those three files
+with the matching new runtime package. Preserve the separately licensed NR DLL
+and the folder's permissions. Extract the new Controls app into a fresh folder
+and update your shortcut to its EXE. The saved `custom_runtime_path` remains valid
+when the installation path stays the same; rerunning the registration block is
+safe for that same path. Select Custom and launch a game again.
 
 ## Selection
 
@@ -37,6 +114,17 @@ Name:  redirect_to
 Type:  REG_SZ
 Value: C:\Program Files\VDXR-NR-FG\OpenXR\virtualdesktop-openxr.dll
 ```
+
+The setup above records `custom_runtime_path` at that key and places
+`CUSTOM-RUNTIME.json` beside the host DLL. The updated NR/FG Controls app uses
+that metadata to verify the guarded installation before enabling Custom VDXR.
+It retains this installation information when Stock VDXR removes `redirect_to`.
+
+For normal use, select **Stock VDXR** or **Custom VDXR** in the Controls app's
+Runtime card. Changes save immediately. Streamer and the Controls app can stay
+open; an already running game keeps its loaded runtime until it exits. The
+dropdown in Streamer remains Automatic / SteamVR / VDXR; no fourth menu entry is
+registered by this arrangement.
 
 Setting it requires administrator access. Close VR games before changing the
 selection. Keep **VDXR** selected in Streamer. Leave the official OpenXR DLLs,

@@ -14,21 +14,25 @@ End users do not need Visual Studio, a compiler, or Python for the standalone Co
 
 ## Install
 
-1. Install Virtual Desktop Streamer normally and connect the headset. Close all VR games before replacing runtime files.
-2. Download the Windows x64 NR/FG package from [Releases](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases)
-   and extract it. Keep the matching runtime and synthesis DLL together.
-3. Back up the existing files with these names from `%ProgramFiles%\Virtual Desktop Streamer\OpenXR`:
-   `virtualdesktop-openxr.dll` and `vdxr-frame-generation.dll`. Record any that were absent.
-4. Copy those two DLLs from the package into that OpenXR folder, accepting Windows administrator access when prompted.
-   Leave the runtime JSON, stock 32-bit DLL and other files intact. Keep your licensed `nvngx_dlssnr.dll` beside the runtime if you want NR. FG with NR off does not initialize NR or require this vendor DLL.
-5. In Streamer's Options, select **VDXR** as the OpenXR runtime. Fully restart the game after installation.
+1. Install Virtual Desktop Streamer normally and connect the headset. Close VR games.
+2. Download the **2026.10.22 switcher update's** dated runtime and Controls packages
+   from [Releases](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases).
+   Keep the matching guarded host, synthesis DLL and `CUSTOM-RUNTIME.json` together.
+3. Follow [the complete side-by-side setup](SIDE-BY-SIDE-RUNTIME.md): put the runtime
+   in the protected `%ProgramFiles%\VDXR-NR-FG\OpenXR` folder and register its managed
+   path. Keep Streamer's official files in place. Restore the official vendor DLL
+   first if an earlier installation replaced it.
+4. Open Controls, choose **Custom VDXR**, and keep **VDXR** selected in Streamer.
+   Launch games normally. Choose Stock and relaunch the game to compare with VD's
+   official runtime; Streamer can remain open.
 
-The files do not change runtime registration, existing NR settings, or the saved FG mode when copied.
-Streamer updates may replace a custom runtime; retain the package and backups.
+This setup preserves existing NR/FG settings and runtime registration. Streamer
+updates do not overwrite the separate folder, but a future vendor runtime may
+decline an older custom build under its existing version-compatibility check.
 
 ## Open NR Controls
 
-Download **VDXR-NR-FG-Controls-Windows-x64.zip** from the same release. Extract the entire folder and open
+Download the dated **VDXR-NR-FG-Controls-Windows-x64-2026.10.22.zip** from the release's current Downloads section. Extract the entire folder and open
 **VDXR-NR-FG-Controls.exe**, keeping `_internal` beside it. Python and Tk are bundled. The unsigned community app
 requests administrator access to save settings; opening it only reads existing settings and does not reset them.
 
@@ -37,15 +41,17 @@ See the [illustrated Controls guide](NR-FG-CONTROLS.md) for each setting, automa
 ![The standalone dark Controls app with NR at 100% and OFXR 3× selected](images/controls-overview.png)
 
 The runtime ZIP also retains the optional source script. If you prefer that route, install **64-bit Python 3.13**
-with Tcl/Tk and the Python launcher. Copy `vdxr_registry_gui.py` into the OpenXR folder, backing up an existing
-copy before replacing it, then run this from PowerShell in that folder:
+with Tcl/Tk and the Python launcher. Copy both `vdxr_registry_gui.py` and its adjacent
+`vdxr_runtime_selection.py` into the OpenXR folder, backing up existing copies before
+replacing them, then run this from PowerShell in that folder:
 
 ```powershell
 pyw -3.13 .\vdxr_registry_gui.py
 ```
 
-Both versions edit VD Streamer's same 64-bit runtime registry settings. The standalone app does not install or select
-the runtime, and its extracted folder can be stored outside the Streamer installation.
+Both versions edit VD Streamer's same 64-bit runtime registry settings. The standalone app does not install runtime
+DLLs, and its extracted folder can be stored outside the Streamer installation. Its Stock / Custom selector uses
+the separately verified [side-by-side installation](SIDE-BY-SIDE-RUNTIME.md) for the next VR launch.
 
 ## Choose a mode
 
@@ -96,12 +102,14 @@ Unsupported higher-precision or X8 formats retain the original real-frame path r
 slot, and whether a native submission was synthetic or a fallback repeat. These are software submissions, not a measurement
 of physical headset scanout. Regular gameplay telemetry remains off.
 
-## Restore the original files
+## Return to the official runtime
 
-With games closed, restore the backed-up DLLs. Remove only a package file that was absent before installation.
-If you also installed the optional Python script, restore or remove it using the same rule.
-Set FG Off before reverting if you want the saved setting cleared; restoring files by itself preserves registry settings.
-Do not replace the stock 32-bit runtime or proprietary NR DLL as part of this rollback.
+Close the game, choose **Stock VDXR** in Controls, and launch again. The switch
+removes only the development redirect and preserves NR/FG preferences. Keep the
+external files until no process is using them. See the side-by-side guide for
+manual recovery and upgrades. If reverting an older installation that overwrote
+Streamer's DLLs, restore the original vendor backup or reinstall/update Streamer;
+removing a redirect alone cannot restore a replaced file.
 
 ## Source and licenses
 
