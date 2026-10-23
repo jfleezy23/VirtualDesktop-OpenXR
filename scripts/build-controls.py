@@ -19,10 +19,10 @@ ALLOWED_DLLS = {"python3.dll", "python313.dll", "tcl86t.dll", "tk86t.dll", "libf
                 "vcruntime140.dll", "vcruntime140_1.dll", "libcrypto-3.dll", "zlib1.dll"}
 DOC_IMAGES = ("docs/images/controls-overview.png", "docs/images/controls-fg-only.png")
 SOURCE_FILES = (
-    "vdxr_registry_gui.py", "scripts/controls_entry.py", "scripts/controls_self_test.py",
+    "vdxr_registry_gui.py", "vdxr_runtime_selection.py", "scripts/controls_entry.py", "scripts/controls_self_test.py",
     "scripts/build-controls.py", "scripts/controls-build-requirements.txt",
-    "scripts/tests/test_fg_controls.py", "scripts/tests/test_controls_package.py",
-    "scripts/licenses/Tcl-8.6.15.txt", "docs/NR-FG-CONTROLS.md", "LICENSE",
+    "scripts/tests/test_fg_controls.py", "scripts/tests/test_runtime_selection.py", "scripts/tests/test_controls_package.py",
+    "scripts/licenses/Tcl-8.6.15.txt", "docs/NR-FG-CONTROLS.md", "docs/SIDE-BY-SIDE-RUNTIME.md", "LICENSE",
     "scripts/licenses/OpenSSL-3.0.16.txt", "scripts/licenses/zlib-1.3.1.txt",
 ) + DOC_IMAGES
 
@@ -68,6 +68,7 @@ def verify_recorded_payload(output, bundle):
 def copy_documentation(snapshot, bundle):
     """Keep the extracted guide and its relative screenshot links usable offline."""
     shutil.copyfile(snapshot / "docs/NR-FG-CONTROLS.md", bundle / "README.md")
+    shutil.copyfile(snapshot / "docs/SIDE-BY-SIDE-RUNTIME.md", bundle / "SIDE-BY-SIDE-RUNTIME.md")
     images = bundle / "images"
     images.mkdir()
     for name in DOC_IMAGES:
