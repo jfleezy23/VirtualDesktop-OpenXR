@@ -15,7 +15,7 @@ End users do not need Visual Studio, a compiler, or Python for the standalone Co
 ## Install
 
 1. Install Virtual Desktop Streamer normally and connect the headset. Close VR games.
-2. Download the **2026.10.22 switcher update's** dated runtime and Controls packages
+2. Download the **2026.10.24 release's** dated runtime and Controls packages
    from [Releases](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases).
    Keep the matching guarded host, synthesis DLL and `CUSTOM-RUNTIME.json` together.
 3. Follow [the complete side-by-side setup](SIDE-BY-SIDE-RUNTIME.md): put the runtime
@@ -32,7 +32,7 @@ decline an older custom build under its existing version-compatibility check.
 
 ## Open NR Controls
 
-Download the dated **VDXR-NR-FG-Controls-Windows-x64-2026.10.22.zip** from the release's current Downloads section. Extract the entire folder and open
+Download the dated **VDXR-NR-FG-Controls-Windows-x64-2026.10.24.zip** from the release's current Downloads section. Extract the entire folder and open
 **VDXR-NR-FG-Controls.exe**, keeping `_internal` beside it. Python and Tk are bundled. The unsigned community app
 requests administrator access to save settings; opening it only reads existing settings and does not reset them.
 
@@ -87,8 +87,8 @@ which component supplied the frames.
 Rapid head turns can still produce interpolation artifacts. This remains an experimental frame-generation path;
 the recovery and synchronization corrections do not establish artifact-free head motion in every title.
 The reported left-offset multiple-image issue and separate exposure-change artifact are not established as fixed by
-this release. The new bounds, scaling and copy corrections have automated coverage; combined headset testing of those
-latest changes remains pending.
+this release. The work-reduction changes preserve the tested image output; combined headset acceptance of this
+latest build remains pending. See the [release and validation notes](releases/2026.10.24.md) for measured scope.
 
 ### Automatic color handoff
 

@@ -30,7 +30,7 @@ that unprivileged programs can modify.
 
 ## Install from the release
 
-The **2026.10.22 switcher update** supplies the guarded runtime and
+The **2026.10.24 release** supplies the guarded runtime and
 `CUSTOM-RUNTIME.json` together. Older runtime packages without this metadata are
 not the switcher package. Download the dated runtime ZIP and dated Controls ZIP
 from the release's current Downloads section, and verify their published SHA-256
