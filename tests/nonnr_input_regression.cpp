@@ -17,6 +17,8 @@ namespace {
     std::optional<float> velocityAngularOverride;
     std::optional<float> velocityLinearOverride;
     unsigned inputStateCalls = 0;
+    unsigned connectedControllerCalls = 0;
+    unsigned connectedControllerTypes = ovrControllerType_Touch;
     void require(bool condition, const char* message) {
         if (!condition)
             throw std::runtime_error(message);
@@ -104,7 +106,8 @@ namespace {
         return ovrSuccess;
     }
     unsigned int OVR_CDECL fixtureConnectedControllers(ovrSession) {
-        return ovrControllerType_Touch;
+        ++connectedControllerCalls;
+        return connectedControllerTypes;
     }
     struct InputProvider {
         decltype(&ovr_GetInputState) input{};
@@ -1115,7 +1118,7 @@ namespace virtualdesktop_openxr {
             expect(reinterpret_cast<OpenXrRuntime::ActionSet*>(sets[0])->generation == oldGeneration + iterations,
                    "duplicate requests increment each active set once");
             if (!benchmark)
-                expect(total <= iterations * 4, "warmed input synchronization bounds allocations across scope changes");
+                expect(total == 0, "warmed input synchronization allocates nothing across scope changes");
             const auto tracker = path(runtime, "/user/vive_tracker_htcx/role/waist");
             auto& scope = *reinterpret_cast<OpenXrRuntime::ActionSet*>(sets[0]);
             scope.activeSubactionPaths = {tracker};
@@ -1136,6 +1139,239 @@ namespace virtualdesktop_openxr {
                 timeSync(runtime, sync, "sets=2");
             }
             require(runtime.xrDestroySession(session()) == XR_SUCCESS, "Allocation cleanup failed");
+        }
+
+        static void actionSpaceAllocations(const wchar_t* backendDirectory, bool benchmark) {
+            struct SuffixCase {
+                const char* value;
+                const char* suffix;
+                bool matches;
+            };
+            const SuffixCase suffixCases[] = {
+                {"", "", true},
+                {"controller", "", false},
+                {"pose", "/input/grip/pose", false},
+                {"/user/hand/right/input/grip/pose", "/input/grip/pose", true},
+                {"/input/grip/pose/input/grip/pose", "/input/grip/pose", false},
+                {"suffixsuffix", "suffix", false},
+                {"abc", "c", true},
+            };
+            for (const auto& item : suffixCases)
+                expect(utils::endsWith(item.value, item.suffix) == item.matches,
+                       "suffix classification preserves first-match semantics for empty, long and repeated inputs");
+            OpenXrRuntime runtime;
+            seed(runtime);
+            PoseProvider poses(backendDirectory);
+            runtime.m_supportsHandTracking = false;
+            const auto left = path(runtime, "/user/hand/left");
+            const auto right = path(runtime, "/user/hand/right");
+            const auto set = createSet(runtime);
+            const auto action = createAction(runtime, set, XR_ACTION_TYPE_POSE_INPUT, left, right);
+            runtime.m_attachedActionSets.insert(set);
+            runtime.m_activeActionSets.push_back(set);
+            auto& internal = *reinterpret_cast<OpenXrRuntime::Action*>(action);
+            for (const auto side : {0, 1}) {
+                OpenXrRuntime::ActionSource source{};
+                source.sourceIndex = OpenXrRuntime::ActionSourceIndex::Grip;
+                source.realPath = side == 0 ? "/user/hand/left/input/grip/pose" : "/user/hand/right/input/grip/pose";
+                internal.actionSources[source.realPath] = source;
+                runtime.m_controllerGripPose[side] = xr::math::Pose::Translation({1.f, 0.f, 0.f});
+            }
+            XrReferenceSpaceCreateInfo stageInfo{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+            stageInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+            stageInfo.poseInReferenceSpace.orientation.w = 1.f;
+            XrSpace stage{};
+            require(runtime.xrCreateReferenceSpace(session(), &stageInfo, &stage) == XR_SUCCESS,
+                    "Action-space allocation stage fixture failed");
+            struct Case {
+                const char* label;
+                XrPath path;
+                XrSpace space{};
+            };
+            Case cases[] = {{"left", left}, {"right", right}, {"null", XR_NULL_PATH}};
+            for (auto& item : cases) {
+                XrActionSpaceCreateInfo info{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+                info.action = action;
+                info.subactionPath = item.path;
+                info.poseInActionSpace.orientation.w = 1.f;
+                info.poseInActionSpace.position = {0.f, 1.f, 0.f};
+                require(runtime.xrCreateActionSpace(session(), &info, &item.space) == XR_SUCCESS,
+                        "Action-space allocation fixture failed");
+            }
+            const auto located = [&](XrSpace space) {
+                XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
+                XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+                location.next = &velocity;
+                const auto result = runtime.xrLocateSpace(space, stage, 1000000000, &location);
+                constexpr auto poseFlags =
+                    XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+                    XR_SPACE_LOCATION_POSITION_TRACKED_BIT | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+                constexpr auto velocityFlags = XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+                // p=(1,2,3), total offset=(1,1,0), omega x offset=(-6,6,-1).
+                return result == XR_SUCCESS && location.locationFlags == poseFlags &&
+                       closeVector(location.pose.position, {2.f, 3.f, 3.f}) &&
+                       std::abs(location.pose.orientation.w - 1.f) < 0.0001f &&
+                       closeVector(
+                           {location.pose.orientation.x, location.pose.orientation.y, location.pose.orientation.z},
+                           {}) &&
+                       velocity.velocityFlags == velocityFlags &&
+                       closeVector(velocity.linearVelocity, {-5.f, 8.f, 2.f}) &&
+                       closeVector(velocity.angularVelocity, {4.f, 5.f, 6.f});
+            };
+            for (const auto& item : cases)
+                require(located(item.space), "Action-space allocation pose/velocity warmup failed");
+            AllocationObserver observer;
+            heapAllocations = 0;
+            countHeapAllocations = true;
+            auto* control = HeapAlloc(GetProcessHeap(), 0, 256);
+            countHeapAllocations = false;
+            require(control != nullptr, "Action-space allocation positive control failed");
+            HeapFree(GetProcessHeap(), 0, control);
+            expect(heapAllocations > 0, "action-space heap observer positive control");
+            constexpr unsigned iterations = 3000;
+            for (const auto& item : cases) {
+                std::array<double, iterations> durations{};
+                heapAllocations = 0;
+                bool unchanged = true;
+                for (unsigned i = 0; i < iterations; ++i) {
+                    countHeapAllocations = true;
+                    const auto started = std::chrono::steady_clock::now();
+                    unchanged &= located(item.space);
+                    const auto elapsed = std::chrono::steady_clock::now() - started;
+                    countHeapAllocations = false;
+                    durations[i] = std::chrono::duration<double, std::micro>(elapsed).count();
+                }
+                const auto total = heapAllocations;
+                std::sort(durations.begin(), durations.end());
+                std::cout << "MEASURE: action-space hand=" << item.label << " iterations=" << iterations
+                          << " allocations=" << total << " median_us=" << durations[iterations / 2]
+                          << " p95_us=" << durations[iterations * 95 / 100] << '\n';
+                expect(unchanged, "warmed action-space location preserves pose and velocity");
+                if (!benchmark)
+                    expect(total == 0, "warmed action-space location allocates no subaction path strings");
+            }
+            observer.detach();
+            if (benchmark) {
+                for (const auto& item : cases) {
+                    std::array<double, iterations> durations{};
+                    for (auto& duration : durations) {
+                        const auto started = std::chrono::steady_clock::now();
+                        const bool valid = located(item.space);
+                        duration = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started)
+                                       .count();
+                        require(valid, "Uninstrumented action-space location failed");
+                    }
+                    std::sort(durations.begin(), durations.end());
+                    std::cout << "MEASURE: uninstrumented action-space hand=" << item.label
+                              << " median_us=" << durations[iterations / 2]
+                              << " p95_us=" << durations[iterations * 95 / 100] << '\n';
+                }
+            }
+            // The general getter retains ownership; borrowing is local to locked space location.
+            const std::string& ownedPath = runtime.getXrPath(right);
+            runtime.m_strings.at(right) = "/user/hand/replaced";
+            expect(ownedPath == "/user/hand/right", "general path getter retains an independent string lifetime");
+            runtime.m_strings.at(right) = "/user/hand/right";
+            for (unsigned i = 0; i < 128; ++i) {
+                const auto extra = "/user/path_lifetime_" + std::to_string(i);
+                path(runtime, extra.c_str());
+            }
+            expect(located(cases[1].space), "action-space lookup survives path table growth between calls");
+            auto& nullSpace = *reinterpret_cast<OpenXrRuntime::Space*>(cases[2].space);
+            nullSpace.subActionPath = XrPath(0xdeadbeef);
+            XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
+            XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+            location.next = &velocity;
+            const auto unknown = runtime.xrLocateSpace(cases[2].space, stage, 1000000000, &location);
+            expect(unknown == XR_SUCCESS && location.locationFlags == 0 && velocity.velocityFlags == 0,
+                   "unknown internal subaction path matches no pose source");
+            expect(runtime.getXrPath(XR_NULL_PATH).empty() && runtime.getXrPath(XrPath(0xdeadbeef)) == "<unknown>",
+                   "null and unknown general path fallback strings remain distinct");
+            nullSpace.subActionPath = XR_NULL_PATH;
+            require(runtime.xrDestroyAction(action) == XR_SUCCESS, "Action-space lifetime action cleanup failed");
+            expect(located(cases[1].space), "existing action space retains its action after public action destruction");
+            for (const auto& item : cases)
+                require(runtime.xrDestroySpace(item.space) == XR_SUCCESS, "Action-space allocation cleanup failed");
+            require(runtime.xrDestroySpace(stage) == XR_SUCCESS, "Action-space stage cleanup failed");
+            require(runtime.xrDestroySession(session()) == XR_SUCCESS,
+                    "Action-space allocation session cleanup failed");
+        }
+
+        static void syncControllerTransitions(const wchar_t* backendDirectory) {
+            OpenXrRuntime runtime;
+            seed(runtime);
+            PoseProvider poses(backendDirectory);
+            InputProvider inputs;
+            runtime.m_sessionState = XR_SESSION_STATE_FOCUSED;
+            runtime.m_supportsHandTracking = false;
+            runtime.m_controllerLingerTimeout.store(15'000'000'000, std::memory_order_relaxed);
+            runtime.m_cachedControllerType[0] = runtime.m_cachedControllerType[1] = "touch_controller";
+            runtime.m_isControllerActive[0] = runtime.m_isControllerActive[1] = true;
+            const auto left = path(runtime, "/user/hand/left");
+            const auto right = path(runtime, "/user/hand/right");
+            const auto set = createSet(runtime);
+            const auto action = createAction(runtime, set, XR_ACTION_TYPE_POSE_INPUT, left, right);
+            XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+            attach.countActionSets = 1;
+            attach.actionSets = &set;
+            require(runtime.xrAttachSessionActionSets(session(), &attach) == XR_SUCCESS,
+                    "Controller transition fixture attach failed");
+            auto& internal = *reinterpret_cast<OpenXrRuntime::Action*>(action);
+            const std::string leftSource = "/user/hand/left/input/grip/pose";
+            const std::string rightSource = "/user/hand/right/input/grip/pose";
+            internal.actionSources[leftSource] = {};
+            internal.actionSources[rightSource] = {};
+            const XrActiveActionSet active{set, left};
+            XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
+            sync.countActiveActionSets = 1;
+            sync.activeActionSets = &active;
+            const auto synchronize = [&] {
+                inputStateCalls = connectedControllerCalls = 0;
+                const auto result = runtime.xrSyncActions(session(), &sync);
+                std::cout << "controller transition sync result=" << result << '\n';
+                require(result == XR_SUCCESS, "Controller transition sync failed");
+                expect(inputStateCalls == 1 && connectedControllerCalls == 1,
+                       "left-only sync samples input once and preserves per-hand connection sampling");
+                expect(runtime.m_cachedControllerType[1] == "touch_controller" && runtime.m_isControllerActive[1] &&
+                           internal.actionSources.count(rightSource) == 1,
+                       "left-only controller transitions leave the right hand and its binding intact");
+            };
+            connectedControllerTypes = ovrControllerType_Touch;
+            synchronize();
+            expect(internal.actionSources.count(leftSource) == 1 &&
+                       runtime.m_cachedControllerType[0] == "touch_controller" && runtime.m_isControllerActive[0],
+                   "unchanged connected controller keeps existing bindings");
+            connectedControllerTypes = ovrControllerType_Touch | ovrControllerType_Index;
+            synchronize();
+            expect(internal.actionSources.count(leftSource) == 0 && runtime.m_cachedControllerType[0] == "knuckles" &&
+                       runtime.m_isControllerActive[0],
+                   "controller type transition rebinds after updating its cached type");
+            internal.actionSources[leftSource] = {};
+            connectedControllerTypes = 0;
+            const auto lingeringSeen = std::chrono::high_resolution_clock::now() - std::chrono::seconds(10);
+            runtime.m_lastControllerSeenTime[0] = lingeringSeen;
+            runtime.m_lastValidControllerPose[0] = xr::math::Pose::Identity();
+            synchronize();
+            expect(runtime.m_cachedControllerType[0] == "knuckles" && runtime.m_isControllerActive[0] &&
+                       internal.actionSources.count(leftSource) == 1 && runtime.m_lastValidControllerPose[0] &&
+                       runtime.m_lastControllerSeenTime[0] == lingeringSeen,
+                   "disconnected controller within fifteen-second linger keeps type, bindings, pose and seen time");
+            const auto expiredSeen = std::chrono::high_resolution_clock::now() - std::chrono::seconds(16);
+            runtime.m_lastControllerSeenTime[0] = expiredSeen;
+            synchronize();
+            expect(runtime.m_cachedControllerType[0].empty() && !runtime.m_isControllerActive[0] &&
+                       internal.actionSources.count(leftSource) == 0 && !runtime.m_lastValidControllerPose[0] &&
+                       runtime.m_lastControllerSeenTime[0] == expiredSeen,
+                   "expired controller clears type, active state and fallback pose and rebinds");
+            internal.actionSources[leftSource] = {};
+            connectedControllerTypes = ovrControllerType_Touch;
+            const auto beforeReconnect = std::chrono::high_resolution_clock::now();
+            synchronize();
+            expect(runtime.m_cachedControllerType[0] == "touch_controller" && runtime.m_isControllerActive[0] &&
+                       internal.actionSources.count(leftSource) == 0 &&
+                       runtime.m_lastControllerSeenTime[0] >= beforeReconnect,
+                   "reconnected controller refreshes seen time and rebinds");
+            require(runtime.xrDestroySession(session()) == XR_SUCCESS, "Controller transition cleanup failed");
         }
 
         static void syncManySets(const wchar_t* backendDirectory) {
@@ -1628,9 +1864,15 @@ namespace virtualdesktop_openxr {
             } else if (mode == L"sync-allocations" || mode == L"sync-benchmark") {
                 require(argc == 3, "allocation modes require the explicit OVRNull directory");
                 syncAllocations(argv[2], mode == L"sync-benchmark");
+            } else if (mode == L"action-space-allocations" || mode == L"action-space-benchmark") {
+                require(argc == 3, "action-space allocation modes require the explicit OVRNull directory");
+                actionSpaceAllocations(argv[2], mode == L"action-space-benchmark");
             } else if (mode == L"sync-scopes") {
                 require(argc == 3, "sync-scopes requires the explicit OVRNull directory");
                 syncScopes(argv[2]);
+            } else if (mode == L"sync-controller-transitions") {
+                require(argc == 3, "sync-controller-transitions requires the explicit OVRNull directory");
+                syncControllerTransitions(argv[2]);
             } else if (mode == L"sync-validation" || mode == L"pinch-velocity") {
                 require(argc == 3, "sync-validation and pinch-velocity require the explicit OVRNull directory");
                 if (mode == L"sync-validation")

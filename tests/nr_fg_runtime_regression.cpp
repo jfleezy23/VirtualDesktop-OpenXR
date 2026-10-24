@@ -331,6 +331,9 @@ namespace virtualdesktop_openxr {
             require(!value.m_frameGeneration && !value.m_fgDevice && !value.m_fgSourceFence11 &&
                         !value.m_fgSourceFence12 && !value.m_dlssnrResourcesInitialized,
                     "session cleanup retires FG devices, imported source fences and lazy NR readiness");
+            require(!value.m_dlssnrOutputSwapchain && value.m_dlssnrOutputSwapchainImages.empty() &&
+                        value.m_dlssnrOutputSwapchainTextures.empty() && value.m_dlssnrOutputSwapchainSrvs.empty(),
+                    "session cleanup releases the NR output swapchain and its resource rings");
         }
         static void verifyInternalChains() {
             auto& value = runtime();
@@ -358,10 +361,15 @@ namespace virtualdesktop_openxr {
         }
         static void verifyLookupResult(bool postprocess) {
             const auto& value = runtime();
+            require(value.m_dlssnrOutputSwapchainTextures.size() == value.m_dlssnrOutputSwapchainImages.size() &&
+                        value.m_dlssnrOutputSwapchainTextures.size() == value.m_dlssnrOutputSwapchainSrvs.size(),
+                    "retained NR texture, D3D12 image and SRV rings stay aligned");
             ComPtr<ID3D11Resource> packed;
             value.m_dlssnrOutputSwapchainSrvs[value.m_dlssnrOutputSwapchainLastWrittenIndex]->GetResource(&packed);
             ComPtr<ID3D11Texture2D> texture;
             checkHr(packed.As(&texture));
+            require(value.m_dlssnrOutputSwapchainTextures[value.m_dlssnrOutputSwapchainLastWrittenIndex] == texture,
+                    "the retained current bank matches its independently resolved SRV texture");
             for (unsigned eye = 0; eye < 2; ++eye) {
                 if (!postprocess) {
                     require(value.m_precompositor.finalColour[eye] == texture,
@@ -877,7 +885,7 @@ int main(int argc, char** argv) {
                     Regression::verifyRecoveryCadence(state, false, previousTarget);
                 }
                 if (measureLookups)
-                    lookupProbe.finish(upscaled || sharpenOnly);
+                    lookupProbe.finish();
                 if (measureLookups)
                     Regression::verifyLookupResult(upscaled || sharpenOnly);
                 if (fallback && frame == 2) {

@@ -15,8 +15,10 @@ static XrResult XRAPI_CALL getProc(XrInstance, const char*, PFN_xrVoidFunction* 
 extern "C" __declspec(dllexport) XrVersion XRAPI_CALL getVersion() {
     return ~XrVersion(0);
 }
-extern "C" __declspec(dllexport) XrResult XRAPI_CALL
-xrNegotiateLoaderRuntimeInterface(const XrNegotiateLoaderInfo*, XrNegotiateRuntimeRequest* request) {
+#ifndef REDIRECT_TEST_MISSING_NEGOTIATION
+extern "C"
+    __declspec(dllexport) XrResult XRAPI_CALL xrNegotiateLoaderRuntimeInterface(const XrNegotiateLoaderInfo*,
+                                                                                XrNegotiateRuntimeRequest* request) {
 #ifdef REDIRECT_TEST_SUCCESS
     request->getInstanceProcAddr = getProc;
     request->runtimeInterfaceVersion = 1;
@@ -27,3 +29,4 @@ xrNegotiateLoaderRuntimeInterface(const XrNegotiateLoaderInfo*, XrNegotiateRunti
     return XR_ERROR_INITIALIZATION_FAILED;
 #endif
 }
+#endif

@@ -8,6 +8,7 @@ struct FgOperationCounts {
     unsigned submits{}, waits{}, copies{}, queries{}, resolves{}, maps{}, failedMaps{}, uninitializedResolves{};
     unsigned listResets{}, listCloses{}, outerBarrierCalls{}, outerTransitions{}, outerCopies{};
     unsigned resourceCopies{}, captureRegionCopies{};
+    unsigned syntheticRepackCopies{}, syntheticRenderTransitions{}, renderTargetClears{};
 };
 
 class FgOperationProbe {
@@ -19,6 +20,8 @@ class FgOperationProbe {
                                               ID3D12PipelineState*);
     using Close = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*);
     using Barrier = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, UINT, const D3D12_RESOURCE_BARRIER*);
+    using Clear = void(STDMETHODCALLTYPE*)(
+        ID3D12GraphicsCommandList*, D3D12_CPU_DESCRIPTOR_HANDLE, const FLOAT[4], UINT, const D3D12_RECT*);
     using Copy = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,
                                           const D3D12_TEXTURE_COPY_LOCATION*,
                                           UINT,
@@ -40,6 +43,7 @@ class FgOperationProbe {
     Reset reset{};
     Close close{};
     Barrier barrier{};
+    Clear clear{};
     Copy copy{};
     CopyResource copyResource{};
     Query query{};
@@ -142,6 +146,15 @@ class FgOperationProbe {
         }
         active->barrier(list, count, barriers);
     }
+    static void STDMETHODCALLTYPE onClear(ID3D12GraphicsCommandList* list,
+                                          D3D12_CPU_DESCRIPTOR_HANDLE target,
+                                          const FLOAT color[4],
+                                          UINT count,
+                                          const D3D12_RECT* rects) {
+        if (active->watches())
+            ++active->counts.renderTargetClears;
+        active->clear(list, target, color, count, rects);
+    }
     static void STDMETHODCALLTYPE onCopy(ID3D12GraphicsCommandList* list,
                                          const D3D12_TEXTURE_COPY_LOCATION* dst,
                                          UINT x,
@@ -152,6 +165,9 @@ class FgOperationProbe {
         if (active->watches()) {
             ++active->counts.copies;
             active->record({list, {}, src->pResource, dst->pResource});
+            for (const size_t output : {1u, 2u, 4u, 5u})
+                if (active->atlases[output] && dst->pResource == active->atlases[output])
+                    ++active->counts.syntheticRepackCopies;
             if (src->pResource == active->atlases[0]) {
                 const auto input = src->pResource->GetDesc();
                 const auto output = dst->pResource->GetDesc();
@@ -268,6 +284,8 @@ class FgOperationProbe {
         if (!hr)
             hr = operation(reinterpret_cast<PVOID*>(&barrier), onBarrier);
         if (!hr)
+            hr = operation(reinterpret_cast<PVOID*>(&clear), onClear);
+        if (!hr)
             hr = operation(reinterpret_cast<PVOID*>(&copy), onCopy);
         if (!hr)
             hr = operation(reinterpret_cast<PVOID*>(&copyResource), onCopyResource);
@@ -305,6 +323,7 @@ class FgOperationProbe {
         close = reinterpret_cast<Close>(l[9]);
         reset = reinterpret_cast<Reset>(l[10]);
         barrier = reinterpret_cast<Barrier>(l[26]);
+        clear = reinterpret_cast<Clear>(l[48]);
         copy = reinterpret_cast<Copy>(l[16]);
         copyResource = reinterpret_cast<CopyResource>(l[17]);
         query = reinterpret_cast<Query>(l[53]);
@@ -377,6 +396,43 @@ class FgOperationProbe {
         check(consumedSignals == 1 && readySignals == 1 && firstExecuteOrder && firstExecuteOrder < consumedOrder &&
                   consumedOrder < readyOrder && lastExecuteOrder < readyOrder && readyOrder == queueOrder,
               "consumed follows unpack and ready is signaled after all submitted backend/pack work");
+        for (const size_t output : {1u, 2u, 4u, 5u}) {
+            if (!atlases[output])
+                continue;
+            auto current = D3D12_RESOURCE_STATE_COMMON;
+            unsigned renderTransitions{};
+            ID3D12CommandList* composition{};
+            for (size_t i = 0; i < eventCount; ++i) {
+                const auto& event = events[i];
+                const auto& value = event.transition;
+                if (event.source || value.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION ||
+                    value.Transition.pResource != atlases[output] ||
+                    (value.Transition.StateBefore != D3D12_RESOURCE_STATE_RENDER_TARGET &&
+                     value.Transition.StateAfter != D3D12_RESOURCE_STATE_RENDER_TARGET))
+                    continue;
+                check(value.Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE &&
+                          value.Transition.Subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES &&
+                          value.Transition.StateBefore == current &&
+                          value.Transition.StateAfter == (current == D3D12_RESOURCE_STATE_COMMON
+                                                              ? D3D12_RESOURCE_STATE_RENDER_TARGET
+                                                              : D3D12_RESOURCE_STATE_COMMON),
+                      "direct synthetic atlas has one whole-resource COMMON/RT state pair");
+                current = value.Transition.StateAfter;
+                ++renderTransitions;
+                if (composition)
+                    check(composition == event.list, "synthetic atlas transitions bracket the same composition list");
+                composition = event.list;
+            }
+            if (renderTransitions) {
+                check(renderTransitions == 2 && current == D3D12_RESOURCE_STATE_COMMON,
+                      "direct synthetic atlas is restored to COMMON exactly once");
+                unsigned submissions{};
+                for (size_t i = 0; i < executedCount; ++i)
+                    submissions += executed[i] == composition;
+                check(submissions == 1, "synthetic atlas state transitions execute once before output ready");
+                counts.syntheticRenderTransitions += renderTransitions;
+            }
+        }
         // Outer copies are on their own lists. Replay their real transition/copy
         // order, including descriptors that precede the first observed copy.
         // Infer private render targets from copy roles, never from a barrier's

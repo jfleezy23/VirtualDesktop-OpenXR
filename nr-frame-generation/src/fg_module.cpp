@@ -20,7 +20,7 @@ namespace {
         ComPtr<ID3D12CommandQueue> queue;
         ComPtr<ID3D12Resource> input;
         std::array<std::array<ComPtr<ID3D12Resource>, 3>, 2> outputs;
-        std::array<std::array<ComPtr<ID3D12Resource>, 3>, 2> isolatedOutputs;
+        std::array<ComPtr<ID3D12Resource>, 2> isolatedCurrent;
         std::array<ComPtr<ID3D12CommandAllocator>, 2> copyAllocators;
         std::array<ComPtr<ID3D12GraphicsCommandList>, 2> packLists;
         std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
@@ -126,7 +126,6 @@ namespace {
             D3D12_HEAP_PROPERTIES heap{};
             heap.Type = D3D12_HEAP_TYPE_DEFAULT;
             HRESULT hr = S_OK;
-            syntheticCount = 0;
             for (uint32_t bank = 0; bank < 2; ++bank) {
                 hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                                     IID_PPV_ARGS(&context->copyAllocators[bank]));
@@ -145,25 +144,16 @@ namespace {
                 if (FAILED(hr)) {
                     return hr;
                 }
-                for (uint32_t role = 0; role < 3; ++role) {
-                    if (role == 1 && info->multiplier == 2) {
-                        continue;
-                    }
-                    hr = device->CreateCommittedResource(&heap,
-                                                         D3D12_HEAP_FLAG_NONE,
-                                                         &isolatedDescription,
-                                                         D3D12_RESOURCE_STATE_RENDER_TARGET,
-                                                         nullptr,
-                                                         IID_PPV_ARGS(&context->isolatedOutputs[bank][role]));
-                    if (FAILED(hr)) {
-                        return hr;
-                    }
-                    if (role == 2) {
-                        current[bank] = context->isolatedOutputs[bank][role].Get();
-                    } else {
-                        synthetic[syntheticCount++] = context->isolatedOutputs[bank][role].Get();
-                    }
+                hr = device->CreateCommittedResource(&heap,
+                                                     D3D12_HEAP_FLAG_NONE,
+                                                     &isolatedDescription,
+                                                     D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                                     nullptr,
+                                                     IID_PPV_ARGS(&context->isolatedCurrent[bank]));
+                if (FAILED(hr)) {
+                    return hr;
                 }
+                current[bank] = context->isolatedCurrent[bank].Get();
             }
             context->history = std::make_shared<xrfg::D3D12SwapchainHistory>();
             ID3D12Resource* input[] = {context->input.Get()};
@@ -191,7 +181,9 @@ namespace {
                                                                 : xrfg::D3D12OpticalFlowBackend::nvidia,
                                                  opticalFlowOptions,
                                                  (flags & VDXRFG_CREATE_GPU_TIMING) != 0,
-                                                 !context->hostOwnsReal);
+                                                 !context->hostOwnsReal,
+                                                 xrfg::D3D12SyntheticOutputLayout::shared_stereo_atlas,
+                                                 true);
             if (FAILED(hr)) {
                 if (hr == HRESULT_FROM_WIN32(ERROR_IO_INCOMPLETE)) {
                     context->initializationPoisoned = context->poisoned = true;
@@ -421,15 +413,12 @@ namespace {
             std::array<D3D12_RESOURCE_BARRIER, 6> packBarriers{};
             UINT packBarrierCount = 0;
             for (uint32_t role = 0; role < 3; ++role) {
-                if (role == 2 && context->hostOwnsReal) {
-                    continue;
-                }
-                if (role != 2 && (lease->ticket.prime || (role == 1 && context->multiplier == 2))) {
+                if (role != 2 || context->hostOwnsReal) {
                     continue;
                 }
                 packBarriers[packBarrierCount++] = transition(
                     context->outputs[bank][role].Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
-                packBarriers[packBarrierCount++] = transition(context->isolatedOutputs[bank][role].Get(),
+                packBarriers[packBarrierCount++] = transition(context->isolatedCurrent[bank].Get(),
                                                               D3D12_RESOURCE_STATE_RENDER_TARGET,
                                                               D3D12_RESOURCE_STATE_COPY_SOURCE);
             }

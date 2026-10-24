@@ -13,20 +13,29 @@
 
 decltype(&RegGetValueW) originalReadRegistry = RegGetValueW;
 std::wstring redirectPath;
+std::wstring bundledInstallPath;
+bool overrideBundledPath{};
 unsigned redirectReads{};
 unsigned redirectReadLimit{2};
 LSTATUS WINAPI
 readRegistry(HKEY key, LPCWSTR subkey, LPCWSTR value, DWORD flags, LPDWORD type, PVOID data, LPDWORD bytes) {
-    if (key != HKEY_LOCAL_MACHINE || !value || _wcsicmp(value, L"redirect_to"))
+    const bool bundledPath = overrideBundledPath && key == HKEY_LOCAL_MACHINE && subkey && value &&
+                             !_wcsicmp(subkey, L"SOFTWARE\\Virtual Desktop, Inc.\\Virtual Desktop Streamer") &&
+                             !_wcsicmp(value, L"Path");
+    if (!bundledPath && (key != HKEY_LOCAL_MACHINE || !value || _wcsicmp(value, L"redirect_to")))
         return originalReadRegistry(key, subkey, value, flags, type, data, bytes);
-    ++redirectReads;
+    if (!bundledPath)
+        ++redirectReads;
     // Bound a missing self-redirect guard without overflowing the process stack.
     // The first recursive lookup is suppressed after one (self) or two (chain) hops.
-    if (redirectReads > redirectReadLimit)
+    if (!bundledPath && redirectReads > redirectReadLimit)
+        return ERROR_FILE_NOT_FOUND;
+    const auto& resultPath = bundledPath ? bundledInstallPath : redirectPath;
+    if (resultPath.empty())
         return ERROR_FILE_NOT_FOUND;
     if (!bytes)
         return ERROR_INVALID_PARAMETER;
-    const DWORD required = static_cast<DWORD>((redirectPath.size() + 1) * sizeof(wchar_t));
+    const DWORD required = static_cast<DWORD>((resultPath.size() + 1) * sizeof(wchar_t));
     if (type)
         *type = REG_SZ;
     const DWORD capacity = *bytes;
@@ -35,7 +44,7 @@ readRegistry(HKEY key, LPCWSTR subkey, LPCWSTR value, DWORD flags, LPDWORD type,
         return ERROR_SUCCESS;
     if (capacity < required)
         return ERROR_MORE_DATA;
-    memcpy(data, redirectPath.c_str(), required);
+    memcpy(data, resultPath.c_str(), required);
     return ERROR_SUCCESS;
 }
 void checkDetour(LONG result) {
@@ -62,22 +71,42 @@ int wmain(int argc, wchar_t** argv) {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     std::cout << std::unitbuf;
     HMODULE runtime{};
+    HMODULE unrelated{};
     HANDLE event{};
     bool attached = false;
     try {
         if (argc != 4 && argc != 5)
-            throw std::runtime_error("Usage: <actual-runtime.dll> <target.dll> failure|success|self|chain|live [wide]");
+            throw std::runtime_error("Usage: <actual-runtime.dll> <target.dll> "
+                                     "failure|success|self|chain|bundled|bundled-self|bundled-unrelated|bundled-"
+                                     "failure|bundled-standalone|live [wide]");
         if (argc == 5 && std::wstring(argv[4]) != L"wide")
             throw std::runtime_error("Unknown interface range option");
         const std::wstring mode = argv[3];
-        const bool self = mode == L"self";
+        const bool unrelatedMode = mode == L"bundled-unrelated";
+        const bool self = mode == L"self" || mode == L"bundled-self" || unrelatedMode;
         const bool live = mode == L"live";
-        const bool chain = mode == L"chain" || live;
+        const bool standalone = mode == L"bundled-standalone";
+        const bool bundled = mode == L"bundled" || mode == L"bundled-failure" || standalone;
+        const bool chain = mode == L"chain" || live || bundled;
         const bool actualTarget = self || chain;
-        const bool success = mode == L"success" || actualTarget;
-        if (!success && mode != L"failure")
+        const bool success = mode != L"bundled-failure" && (mode == L"success" || actualTarget);
+        if (!success && mode != L"failure" && mode != L"bundled-failure")
             throw std::runtime_error("Unknown mode");
-        redirectReadLimit = chain ? 4u : 2u;
+        overrideBundledPath = !live;
+        if (bundled || mode == L"bundled-self" || unrelatedMode) {
+            const auto forwarder = std::filesystem::absolute(argv[1]);
+            if (forwarder.filename() != L"virtualdesktop-openxr.dll" ||
+                (!unrelatedMode && forwarder.parent_path().filename() != L"OpenXR"))
+                throw std::runtime_error("Bundled mode requires <fixture-install>/OpenXR/virtualdesktop-openxr.dll");
+            bundledInstallPath = forwarder.parent_path().parent_path().wstring();
+            if (unrelatedMode) {
+                const auto path = std::filesystem::path(bundledInstallPath) / L"OpenXR" / L"virtualdesktop-openxr.dll";
+                unrelated = LoadLibraryW(path.c_str());
+                if (!unrelated || GetProcAddress(unrelated, "xrNegotiateLoaderRuntimeInterface"))
+                    throw std::runtime_error("Unrelated fixture must be loaded and lack negotiation");
+            }
+        }
+        redirectReadLimit = chain && !standalone ? 4u : 2u;
         const std::wstring eventName = L"Local\\VDXRRedirectRegression-" + std::to_wstring(GetCurrentProcessId()) +
                                        L"-" + std::to_wstring(GetTickCount64());
         if (chain) {
@@ -112,6 +141,8 @@ int wmain(int argc, wchar_t** argv) {
         XrNegotiateRuntimeRequest request{XR_LOADER_INTERFACE_STRUCT_RUNTIME_REQUEST,
                                           XR_RUNTIME_INFO_STRUCT_VERSION,
                                           sizeof(XrNegotiateRuntimeRequest)};
+        if (mode == L"bundled-failure")
+            loader.minInterfaceVersion = loader.maxInterfaceVersion = 2;
         const auto result = negotiate(&loader, &request);
         if (attached) {
             detour(false);
@@ -141,7 +172,7 @@ int wmain(int argc, wchar_t** argv) {
             const auto localResult = localNegotiate(&loader, &localRequest);
             detour(false);
             attached = false;
-            if (redirectReads != previousReads + 1 || localResult != XR_SUCCESS ||
+            if (redirectReads != previousReads + (standalone ? 0u : 1u) || localResult != XR_SUCCESS ||
                 localRequest.getInstanceProcAddr != request.getInstanceProcAddr ||
                 localRequest.runtimeInterfaceVersion != request.runtimeInterfaceVersion ||
                 localRequest.runtimeApiVersion != request.runtimeApiVersion)
@@ -173,7 +204,7 @@ int wmain(int argc, wchar_t** argv) {
         } else if (result != XR_ERROR_INITIALIZATION_FAILED || mapped || request.getInstanceProcAddr) {
             throw std::runtime_error("Failed redirect retained a module reference or changed the target error");
         }
-        if (chain) {
+        if (chain && success) {
             std::cout << "Checking private event with both runtime modules mapped\n";
             checkEvent(event, eventName);
         }
@@ -182,13 +213,30 @@ int wmain(int argc, wchar_t** argv) {
         runtime = nullptr;
         if (self && GetModuleHandleW(redirectPath.c_str()))
             throw std::runtime_error("Self redirect retained an extra module reference");
-        if (chain) {
-            if (GetModuleHandleW(argv[1]) || GetModuleHandleW(redirectPath.c_str()) != target)
-                throw std::runtime_error("Caller unload must retain only the distinct target runtime");
+        if (chain && success) {
+            const bool retained = GetModuleHandleW(argv[1]) != nullptr;
+            if (retained != (bundled || live) || GetModuleHandleW(redirectPath.c_str()) != target)
+                throw std::runtime_error(
+                    bundled || live ? "Registered bundled forwarder must survive caller reference release"
+                                    : "Unregistered caller unload must retain only the distinct target runtime");
             std::cout << "Checking private event after caller unload\n";
             checkEvent(event, eventName);
             std::cout << "Checking direct target negotiation after caller unload\n";
             checkLocalNegotiation();
+            CloseHandle(event);
+            event = nullptr;
+        }
+        if (!success && GetModuleHandleW(argv[1]))
+            throw std::runtime_error("Failed negotiation retained the caller runtime");
+        if (unrelated) {
+            const auto path = std::filesystem::path(bundledInstallPath) / L"OpenXR" / L"virtualdesktop-openxr.dll";
+            if (!FreeLibrary(unrelated))
+                throw std::runtime_error("Unrelated fixture unload failed");
+            unrelated = nullptr;
+            if (GetModuleHandleW(path.c_str()))
+                throw std::runtime_error("Missing-export fixture was pinned or retained");
+        }
+        if (event) {
             CloseHandle(event);
             event = nullptr;
         }
@@ -210,6 +258,8 @@ int wmain(int argc, wchar_t** argv) {
         }
         if (runtime)
             FreeLibrary(runtime);
+        if (unrelated)
+            FreeLibrary(unrelated);
         if (event)
             CloseHandle(event);
         return 1;

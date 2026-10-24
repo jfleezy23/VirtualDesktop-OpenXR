@@ -1011,6 +1011,7 @@ namespace virtualdesktop_openxr {
         ovrTextureFormat m_dlssnrOutputSwapchainFormat{OVR_FORMAT_UNKNOWN};
         ovrTextureSwapChain m_dlssnrOutputSwapchain{nullptr};
         std::vector<ComPtr<ID3D12Resource>> m_dlssnrOutputSwapchainImages;
+        std::vector<ComPtr<ID3D11Texture2D>> m_dlssnrOutputSwapchainTextures;
         std::vector<ComPtr<ID3D11ShaderResourceView>> m_dlssnrOutputSwapchainSrvs;
         int m_dlssnrOutputSwapchainLastWrittenIndex{-1};
         NVSDK_NGX_Parameter* m_ngxParameters{nullptr};

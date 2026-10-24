@@ -9,14 +9,27 @@ namespace {
         using CopyFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*);
         using RegionFn = void(STDMETHODCALLTYPE*)(
             ID3D11DeviceContext*, ID3D11Resource*, UINT, UINT, UINT, UINT, ID3D11Resource*, UINT, const D3D11_BOX*);
+        using DispatchFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT);
+        using WaitFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11DeviceContext4*, ID3D11Fence*, UINT64);
+        using CompletedFn = UINT64(STDMETHODCALLTYPE*)(ID3D11Fence*);
         inline static CaptureProbe* active{};
         CopyFn original{};
         RegionFn originalRegion{};
+        DispatchFn originalDispatch{};
+        WaitFn originalWait{};
+        CompletedFn originalCompleted{};
+        ComPtr<ID3D11Fence> sampleFence;
         ComPtr<ID3D11Texture2D> packed;
         ID3D11DeviceContext* context{};
         bool armed{};
+        unsigned copies{}, dispatches{}, waits{};
+        unsigned completionReads{};
+        bool forceCompletion{};
+        UINT64 completionValue{};
+        DWORD thread = GetCurrentThreadId();
         static void observe(ID3D11DeviceContext* ctx, ID3D11Resource* dst) {
-            if (active->armed && ctx == active->context) {
+            if (GetCurrentThreadId() == active->thread && ctx == active->context && active->armed) {
+                ++active->copies;
                 ComPtr<ID3D11Texture2D> image;
                 if (SUCCEEDED(dst->QueryInterface(IID_PPV_ARGS(&image)))) {
                     D3D11_TEXTURE2D_DESC desc{};
@@ -27,6 +40,24 @@ namespace {
                     }
                 }
             }
+        }
+        static void STDMETHODCALLTYPE dispatch(ID3D11DeviceContext* ctx, UINT x, UINT y, UINT z) {
+            if (GetCurrentThreadId() == active->thread && ctx == active->context && active->armed)
+                ++active->dispatches;
+            active->originalDispatch(ctx, x, y, z);
+        }
+        static HRESULT STDMETHODCALLTYPE wait(ID3D11DeviceContext4* ctx, ID3D11Fence* fence, UINT64 value) {
+            if (GetCurrentThreadId() == active->thread && ctx == active->context && active->armed)
+                ++active->waits;
+            return active->originalWait(ctx, fence, value);
+        }
+        static UINT64 STDMETHODCALLTYPE completed(ID3D11Fence* fence) {
+            if (GetCurrentThreadId() == active->thread && active->armed && fence != active->sampleFence.Get()) {
+                ++active->completionReads;
+                if (active->forceCompletion)
+                    return active->completionValue;
+            }
+            return active->originalCompleted(fence);
         }
         static void STDMETHODCALLTYPE copy(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D11Resource* src) {
             observe(ctx, dst);
@@ -44,24 +75,56 @@ namespace {
             observe(ctx, dst);
             active->originalRegion(ctx, dst, sub, x, y, z, src, srcSub, box);
         }
-        explicit CaptureProbe(ID3D11DeviceContext* ctx) : context(ctx) {
+        explicit CaptureProbe(Interop& hw) : context(hw.context.Get()) {
             check(!active, "one capture probe");
+            auto ctx = hw.context.Get();
+            success(hw.device->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&sampleFence)), "probe fence");
             active = this;
             original = reinterpret_cast<CopyFn>((*reinterpret_cast<void***>(ctx))[47]);
             originalRegion = reinterpret_cast<RegionFn>((*reinterpret_cast<void***>(ctx))[46]);
+            originalDispatch = reinterpret_cast<DispatchFn>((*reinterpret_cast<void***>(ctx))[41]);
+            originalWait = reinterpret_cast<WaitFn>((*reinterpret_cast<void***>(ctx))[148]);
+            originalCompleted = reinterpret_cast<CompletedFn>((*reinterpret_cast<void***>(sampleFence.Get()))[8]);
             success(HRESULT_FROM_WIN32(DetourTransactionBegin()), "copy probe begin");
             success(HRESULT_FROM_WIN32(DetourUpdateThread(GetCurrentThread())), "copy probe thread");
             success(HRESULT_FROM_WIN32(DetourAttach(reinterpret_cast<PVOID*>(&original), copy)), "copy probe attach");
             success(HRESULT_FROM_WIN32(DetourAttach(reinterpret_cast<PVOID*>(&originalRegion), region)),
                     "region probe attach");
+            success(HRESULT_FROM_WIN32(DetourAttach(reinterpret_cast<PVOID*>(&originalDispatch), dispatch)),
+                    "dispatch probe attach");
+            success(HRESULT_FROM_WIN32(DetourAttach(reinterpret_cast<PVOID*>(&originalWait), wait)),
+                    "wait probe attach");
+            success(HRESULT_FROM_WIN32(DetourAttach(reinterpret_cast<PVOID*>(&originalCompleted), completed)),
+                    "fence completion probe attach");
             success(HRESULT_FROM_WIN32(DetourTransactionCommit()), "copy probe commit");
         }
         ~CaptureProbe() {
             if (DetourTransactionBegin() || DetourUpdateThread(GetCurrentThread()) ||
                 DetourDetach(reinterpret_cast<PVOID*>(&original), copy) ||
-                DetourDetach(reinterpret_cast<PVOID*>(&originalRegion), region) || DetourTransactionCommit())
+                DetourDetach(reinterpret_cast<PVOID*>(&originalRegion), region) ||
+                DetourDetach(reinterpret_cast<PVOID*>(&originalDispatch), dispatch) ||
+                DetourDetach(reinterpret_cast<PVOID*>(&originalWait), wait) ||
+                DetourDetach(reinterpret_cast<PVOID*>(&originalCompleted), completed) || DetourTransactionCommit())
                 std::_Exit(2);
             active = nullptr;
+        }
+        void begin(bool force = false, UINT64 value = 0) {
+            copies = dispatches = waits = completionReads = 0;
+            forceCompletion = force;
+            completionValue = value;
+            armed = true;
+        }
+        void verify(const char* label, unsigned expectedCopies, unsigned expectedDispatches) const {
+            std::printf("%s: copies=%u dispatches=%u waits=%u fenceReads=%u expected=%u/%u/0\n",
+                        label,
+                        copies,
+                        dispatches,
+                        waits,
+                        completionReads,
+                        expectedCopies,
+                        expectedDispatches);
+            check(copies == expectedCopies && dispatches == expectedDispatches && waits == 0,
+                  "BGRA real-copy operation budget preserves the no-added-wait contract");
         }
     };
 
@@ -156,8 +219,15 @@ namespace {
         const bool unsupported = mode == "unsupported-right";
         const bool invalid = mode == "invalid-right";
         const bool twoLive = mode == "two-live";
+        const bool staleOwner = mode == "reuse-stale-submit";
+        const bool reset = mode == "reuse-reset";
+        const bool pending = mode == "reuse-pending";
+        const bool removed = mode == "reuse-removed";
+        const bool poisoned = mode == "reuse-poisoned-capture";
+        const bool reuse = mode == "reuse-completed" || pending || removed || reset;
         check(mode == "typeless" || mode == "unorm" || srgb || motion || rgba || separate || mixed || invalid ||
-                  unsupported || mode == "array-mip" || mode == "source-reuse" || twoLive,
+                  unsupported || mode == "array-mip" || mode == "source-reuse" || reuse || staleOwner || poisoned ||
+                  twoLive,
               "known BGRA mode");
         Interop hw;
         FrameGeneration fg;
@@ -205,7 +275,7 @@ namespace {
         FrameGenerationCadence cadence;
         input.slots =
             cadence.plan(cadence.reserve(input.time - 30000000, input.time - 20000000, input.period, 3, 0), 0, false);
-        CaptureProbe probe(hw.context.Get());
+        CaptureProbe probe(hw);
         ContextSentinel sentinel(hw);
         OwnedFrameTransaction prime;
         probe.armed = true;
@@ -234,10 +304,33 @@ namespace {
             return image;
         };
         auto output = outputTexture();
-        if (!twoLive) {
+        if (poisoned) {
+            OwnedFrameTransaction rejected;
+            probe.begin(true, UINT64_MAX);
+            const auto poisonedCapture = fg.capture(input, rejected);
+            probe.armed = false;
+            check(poisonedCapture == VDXRFG_E_POISONED && !rejected.ticket.token && probe.completionReads == 1,
+                  "actual producer-fence device failure poisons a capture before any new packing");
+            probe.verify("poisoned capture writes no new input", 0, 0);
+            check(fg.copyOutput(prime, FrameGenerationRole::real, output.Get()) == VDXRFG_E_REJECTED,
+                  "poisoned input ownership cannot prepare a retained real ticket");
+            check(fg.shutdown() == VDXRFG_E_POISONED, "unknown host completion retains the poisoned graph");
+            return;
+        }
+        if (reset)
+            check(fg.reset(0) == VDXRFG_E_BUSY, "busy reset retains the live ticket but invalidates input reuse");
+        if (!twoLive && !staleOwner) {
+            if (reuse)
+                probe.begin(pending || removed, removed ? UINT64_MAX : 0);
             success(fg.copyOutput(prime, FrameGenerationRole::real, output.Get()), "BGRA real copy");
+            probe.armed = false;
             sentinel.verify();
             check(hw.read(output.Get()) == a, "independent real B preserves every canonical RGBA byte");
+            if (reuse) {
+                probe.verify(mode.c_str(), pending || removed || reset ? 4 : 1, pending || removed || reset ? 2 : 0);
+                if (pending || removed)
+                    check(probe.completionReads == 1, "one actual consumed-fence query selects immediate fallback");
+            }
         }
         if (mode == "source-reuse") {
             auto replacement = source(hw, format, false, b);
@@ -245,34 +338,86 @@ namespace {
             success(fg.copyOutput(prime, FrameGenerationRole::real, output.Get()), "reuse already prepared B");
             check(hw.read(output.Get()) == a, "prepared real output survives source reuse");
         }
-        if (!twoLive)
+        auto stale = prime;
+        if (!twoLive && !staleOwner)
             hw.retire(fg, prime);
+        if (reset)
+            success(fg.reset(0), "settled reset clears input ownership and history");
         input.colour[0] = input.colour[1] = source(hw, format, mode == "array-mip", b);
         for (unsigned eye = 0; eye < 2; ++eye)
             input.views[eye].rect = {16 + eye * eyeWidth, 8, eyeWidth, height};
-        ++input.serial;
+        if (!staleOwner)
+            ++input.serial;
         const auto previous = input.time;
         input.time += input.period * 3;
         input.slots = cadence.plan(
             cadence.reserve(input.time - 30000000, input.time - 20000000, input.period, 3, 1), previous, true);
         OwnedFrameTransaction pair;
-        success(fg.capture(input, pair), "BGRA pair capture");
+        const auto pairResult = fg.capture(input, pair);
+        if (staleOwner) {
+            check(pairResult == VDXRFG_E_REJECTED && !pair.ticket.token,
+                  "duplicate serial rejects after the new BGRA input has been packed");
+            check(hw.read(probe.packed.Get()) == b, "failed Submit really overwrote the shared input with newer B");
+            probe.begin();
+            success(fg.copyOutput(prime, FrameGenerationRole::real, output.Get()), "late A after rejected B submit");
+            probe.armed = false;
+            check(hw.read(output.Get()) == a, "failed newer capture cannot make old A reuse newer B pixels");
+            probe.verify("rejected-newer-submit old A fallback", 4, 2);
+            sentinel.verify();
+            hw.retire(fg, prime);
+            success(fg.shutdown(), "settled rejected-submit ownership");
+            return;
+        }
+        success(pairResult, "BGRA pair capture");
         hw.await(fg, pair);
+        if (reset) {
+            check(pair.ticket.prime, "successful reset makes the next ticket a genuine prime");
+            probe.begin();
+            success(fg.copyOutput(pair, FrameGenerationRole::real, output.Get()), "new owner after reset");
+            probe.armed = false;
+            check(hw.read(output.Get()) == b, "reset reuse preserves new B bytes");
+            probe.verify("completed new owner after reset", 1, 0);
+            hw.retire(fg, pair);
+            success(fg.shutdown(), "shutdown before host reinitialization");
+            success(fg.initialize(init), "reinitialize independent input-owner generation");
+            check(fg.copyOutput(stale, FrameGenerationRole::real, output.Get()) == VDXRFG_E_REJECTED,
+                  "retired prior host generation cannot reuse the new input atlas");
+            input.serial = 1;
+            OwnedFrameTransaction fresh;
+            success(fg.capture(input, fresh), "capture first ticket after reinitialization");
+            hw.await(fg, fresh);
+            probe.begin();
+            success(fg.copyOutput(fresh, FrameGenerationRole::real, output.Get()), "fresh owner after reinit");
+            probe.armed = false;
+            check(hw.read(output.Get()) == b, "new host input ownership preserves canonical bytes");
+            probe.verify("completed owner after host reinit", 1, 0);
+            hw.retire(fg, fresh);
+            success(fg.shutdown(), "settled reinitialized host");
+            return;
+        }
         check(!pair.ticket.prime && pair.slots.count == 3, "BGRA pair produces genuine three-role generation");
         auto s1 = outputTexture(), s2 = outputTexture(), real = outputTexture();
         success(fg.copyOutput(pair, FrameGenerationRole::synthetic1, s1.Get()), "BGRA S1 output");
         success(fg.copyOutput(pair, FrameGenerationRole::synthetic2, s2.Get()), "BGRA S2 output");
+        if (twoLive)
+            probe.begin();
         success(fg.copyOutput(pair, FrameGenerationRole::real, real.Get()), "BGRA B output");
+        probe.armed = false;
         sentinel.verify();
         check(hw.read(real.Get()) == b, "current BGRA B stays exact after both synthetic copies");
+        if (twoLive)
+            probe.verify("newer live B reuses current input", 1, 0);
         const auto first = hw.read(s1.Get()), second = hw.read(s2.Get());
         check(first.size() == a.size() && second.size() == a.size(), "both GPU role images cover both eyes");
         if (motion)
             check(first != a && first != b && second != a && second != b && first != second,
                   "known moving scene produces two intermediates distinct from both endpoints and each other");
         if (twoLive) {
+            probe.begin();
             success(fg.copyOutput(prime, FrameGenerationRole::real, output.Get()), "older live bank real copy");
+            probe.armed = false;
             check(hw.read(output.Get()) == a, "older retained bank survives newer BGRA scratch writes");
+            probe.verify("older live A retains original-source fallback", 4, 2);
             check(hw.read(real.Get()) == b, "newer prepared real image survives older bank conversion");
             hw.retire(fg, prime);
         }

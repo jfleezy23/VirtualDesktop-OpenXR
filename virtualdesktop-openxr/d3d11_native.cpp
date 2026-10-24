@@ -348,6 +348,7 @@ namespace virtualdesktop_openxr {
             m_dlssnrContext->Flush();
         }
         m_dlssnrOutputSwapchainImages.clear();
+        m_dlssnrOutputSwapchainTextures.clear();
         m_dlssnrOutputSwapchainSrvs.clear();
         m_dlssnrOutputSwapchainLastWrittenIndex = -1;
         if (m_dlssnrOutputSwapchain) {

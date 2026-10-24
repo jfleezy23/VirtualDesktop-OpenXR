@@ -38,6 +38,7 @@ set(SHADER_RECIPES
     "nvidia_pack_flow_input|cs_5_1|PackNvidiaFlowInput"
     "nvidia_pack_luma_input|cs_5_1|PackNvidiaFlowInput"
     "nvidia_synthesize_midpoint_pixel|ps_5_1|SynthesizeNvidiaMidpointPS"
+    "nvidia_shared_3x_synthesize_pixel|ps_5_1|SynthesizeNvidiaShared3xPS"
     "nvidia_bidirectional_synthesize_midpoint_pixel|ps_5_1|SynthesizeNvidiaBidirectionalMidpointPS"
     "nvidia_fast_synthesize_midpoint_pixel|ps_5_1|SynthesizeNvidiaFastMidpointPS"
     "nvidia_fast_bidirectional_synthesize_midpoint_pixel|ps_5_1|SynthesizeNvidiaFastBidirectionalMidpointPS")
@@ -81,7 +82,7 @@ if(BUILD_TESTING)
     target_compile_definitions(nr_fg_bgra_regression PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(nr_fg_bgra_regression PRIVATE d3d11 d3d12 dxgi
         "${CMAKE_CURRENT_SOURCE_DIR}/../packages/Detours.4.0.1/lib/native/libs/x64/detours.lib")
-    foreach(SCENARIO typeless unorm srgb rgba rgba-srgb motion motion-srgb separate array-mip source-reuse two-live mixed mixed-reverse unsupported-right invalid-right)
+    foreach(SCENARIO typeless unorm srgb rgba rgba-srgb motion motion-srgb separate array-mip source-reuse two-live mixed mixed-reverse unsupported-right invalid-right reuse-completed reuse-pending reuse-removed reuse-stale-submit reuse-reset reuse-poisoned-capture)
         add_test(NAME fg_bgra_${SCENARIO} COMMAND nr_fg_bgra_regression "$<TARGET_FILE:vdxr_frame_generation>" ${SCENARIO})
         set_tests_properties(fg_bgra_${SCENARIO} PROPERTIES TIMEOUT 60 PASS_REGULAR_EXPRESSION "PASS:")
     endforeach()
@@ -140,6 +141,75 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/../packages/Detours.4.0.1/lib/native/libs/x64/detours.lib")
     add_test(NAME fg_v2 COMMAND fg_v2_regression "$<TARGET_FILE:vdxr_frame_generation>")
     set_tests_properties(fg_v2 PROPERTIES TIMEOUT 120 PASS_REGULAR_EXPRESSION "PASS:")
+    add_test(NAME fg_direct_synthetic_output COMMAND fg_v2_regression "$<TARGET_FILE:vdxr_frame_generation>" direct-output)
+    set_tests_properties(fg_direct_synthetic_output PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "PASS:")
+    set(FG_MRT_LEGACY_SHADERS "${GENERATED}" CACHE PATH "Frozen legacy shader headers for MRT differential fixtures")
+    add_executable(fg_mrt_operation_regression ../tests/fg_mrt_operation_regression.cpp ${SHADER_HEADERS})
+    target_compile_features(fg_mrt_operation_regression PRIVATE cxx_std_20)
+    target_compile_options(fg_mrt_operation_regression PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    target_compile_definitions(fg_mrt_operation_regression PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN VDXR_FG_MRT_SHADER_AVAILABLE=1)
+    target_include_directories(fg_mrt_operation_regression PRIVATE include "${FG_MRT_LEGACY_SHADERS}" "${GENERATED}"
+        ../packages/Detours.4.0.1/lib/native/include)
+    target_link_libraries(fg_mrt_operation_regression PRIVATE d3d12 dxgi
+        "${CMAKE_CURRENT_SOURCE_DIR}/../packages/Detours.4.0.1/lib/native/libs/x64/detours.lib")
+    add_test(NAME fg_mrt_native_3x COMMAND fg_mrt_operation_regression "$<TARGET_FILE:vdxr_frame_generation>")
+    set_tests_properties(fg_mrt_native_3x PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+    add_test(NAME fg_mrt_native_pso_fallback COMMAND fg_mrt_operation_regression "$<TARGET_FILE:vdxr_frame_generation>" mrt-pso-failure)
+    set_tests_properties(fg_mrt_native_pso_fallback PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+    add_executable(fg_mrt_shader_regression ../tests/fg_mrt_shader_regression.cpp ${SHADER_HEADERS})
+    set_source_files_properties(../tests/fg_mrt_operation_regression.cpp ../tests/fg_mrt_shader_regression.cpp
+        PROPERTIES OBJECT_DEPENDS "${GENERATED}/nvidia_shared_3x_synthesize_pixel_shader.hpp")
+    target_compile_features(fg_mrt_shader_regression PRIVATE cxx_std_20)
+    target_compile_options(fg_mrt_shader_regression PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    target_compile_definitions(fg_mrt_shader_regression PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN VDXR_FG_MRT_SHADER_AVAILABLE=1)
+    target_include_directories(fg_mrt_shader_regression PRIVATE include "${FG_MRT_LEGACY_SHADERS}" "${GENERATED}")
+    target_link_libraries(fg_mrt_shader_regression PRIVATE d3d12 dxgi)
+    add_test(NAME fg_mrt_shader_exact COMMAND fg_mrt_shader_regression)
+    set_tests_properties(fg_mrt_shader_exact PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "PASS:")
+    add_executable(fg_atlas_regression ../tests/fg_atlas_regression.cpp)
+    target_include_directories(fg_atlas_regression PRIVATE include)
+    target_compile_features(fg_atlas_regression PRIVATE cxx_std_20)
+    target_compile_definitions(fg_atlas_regression PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(fg_atlas_regression PRIVATE d3d12 dxgi)
+    add_executable(fg_atlas_backend_regression ../tests/fg_atlas_backend_regression.cpp
+        "${DERIVATIVE}/d3d12_history.cpp" "${DERIVATIVE}/d3d12_frame_synthesizer.cpp"
+        "${OFXR}/src/common/dlss_motion_vectors.cpp" "${OFXR}/src/core/pose.cpp"
+        "${OFXR}/src/layer/bridge_flight_logger.cpp" ${SHADER_HEADERS})
+    target_compile_features(fg_atlas_backend_regression PRIVATE cxx_std_20)
+    target_compile_options(fg_atlas_backend_regression PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    target_compile_definitions(fg_atlas_backend_regression PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
+    target_include_directories(fg_atlas_backend_regression PRIVATE include "${DERIVATIVE}" "${OFXR}/include"
+        "${GENERATED}" "${FFX}/include"
+        "${OFXR}/external/NVIDIA-Optical-Flow-SDK-5.0.7/Optical_Flow_SDK_5.0.7/NvOFInterface")
+    target_link_libraries(fg_atlas_backend_regression PRIVATE d3d12 dxgi
+        "${FFX}/bin/ffx_sdk/ffx_opticalflow_x64.lib" "${FFX}/bin/ffx_sdk/ffx_backend_dx12_x64.lib")
+    foreach(CONTROL shared-3x shared-3x-slow shared-3x-fast shared-3x-bidir)
+        add_test(NAME fg_mrt_backend_${CONTROL}
+            COMMAND fg_atlas_backend_regression nvidia 3 srgb-crop-marker ${CONTROL})
+        set_tests_properties(fg_mrt_backend_${CONTROL} PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "PASS:")
+    endforeach()
+    foreach(SCENARIO full reversed-crop-marker)
+        add_test(NAME fg_mrt_backend_${SCENARIO}
+            COMMAND fg_atlas_backend_regression nvidia 3 ${SCENARIO} shared-3x)
+        set_tests_properties(fg_mrt_backend_${SCENARIO} PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "PASS:")
+    endforeach()
+    add_test(NAME fg_mrt_backend_nvidia_2x COMMAND fg_atlas_backend_regression nvidia 2 srgb-crop-marker shared-3x)
+    set_tests_properties(fg_mrt_backend_nvidia_2x PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "PASS:")
+    foreach(MULTIPLIER 2 3)
+        add_test(NAME fg_mrt_backend_ffx_${MULTIPLIER}x
+            COMMAND fg_atlas_backend_regression fidelityfx-full ${MULTIPLIER} srgb-crop-marker shared-3x)
+        set_tests_properties(fg_mrt_backend_ffx_${MULTIPLIER}x PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "PASS:")
+    endforeach()
+    foreach(BACKEND nvidia fidelityfx-full)
+        foreach(MULTIPLIER 2 3)
+            foreach(SCENARIO full srgb-crop-marker reversed-crop-marker)
+                add_test(NAME fg_atlas_backend_${BACKEND}_${MULTIPLIER}x_${SCENARIO}
+                    COMMAND fg_atlas_backend_regression ${BACKEND} ${MULTIPLIER} ${SCENARIO})
+                set_tests_properties(fg_atlas_backend_${BACKEND}_${MULTIPLIER}x_${SCENARIO}
+                    PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE PASS_REGULAR_EXPRESSION "PASS:")
+            endforeach()
+        endforeach()
+    endforeach()
 
     add_executable(fg_history_consumed_regression ../tests/fg_history_consumed_regression.cpp)
     target_compile_features(fg_history_consumed_regression PRIVATE cxx_std_20)
@@ -305,6 +375,19 @@ if(BUILD_TESTING)
     target_compile_definitions(fg_endpoint_regression PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(fg_endpoint_regression PRIVATE d3d12 dxgi)
     add_dependencies(fg_endpoint_regression vdxr_frame_generation)
+    foreach(SCENARIO nvidia-current-warp nvidia-current-warp-srgb
+            nvidia-edge-fold nvidia-edge-fold-srgb nvidia-edge-motion nvidia-edge-motion-srgb
+            nvidia-nearby-motion nvidia-nearby-motion-srgb nvidia-relative-motion nvidia-relative-motion-srgb
+            nvidia-dark-edge-fold-srgb nvidia-dark-edge-motion-srgb
+            nvidia-vector-confidence nvidia-vector-confidence-srgb
+            nvidia-vector-unequal nvidia-vector-unequal-srgb
+            nvidia-vector-controls nvidia-vector-controls-srgb
+            nvidia-vector-boundaries nvidia-vector-boundaries-srgb
+            nvidia-vector-uniform nvidia-vector-uniform-srgb)
+        add_test(NAME fg_endpoint_${SCENARIO} COMMAND fg_endpoint_regression ${SCENARIO})
+        set_tests_properties(fg_endpoint_${SCENARIO} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+            PASS_REGULAR_EXPRESSION "PASS: production endpoint shader")
+    endforeach()
     foreach(SCENARIO uniform uniform-srgb nearwhite-gradient nearwhite-gradient-srgb false-match false-match-srgb dark-false-match-srgb translated-detail translated-detail-aperiodic half-pixel-left half-pixel-right half-pixel-top half-pixel-bottom valid-edge-centers previous-camera-left previous-camera-right previous-camera-top previous-camera-bottom nvidia-half-input-bottom nvidia-half-input-cropped-view nvidia-full-input-padding nvidia-three-quarter-input-padding nvidia-small-half-input-padding ffx-half-input-padding ffx-full-input-padding ffx-three-quarter-input-padding ffx-small-half-input-padding center-detail isolated-detail border border-no-neighbors scene-change repeated raw-endpoint rotation-motion rotation-static rotation-cap stationary-alias stationary-alias-srgb stationary-alias-reverse stationary-alias-rotation stationary-alias-asymmetric ghost-thin-motion ghost-thin-motion-srgb ghost-thin-motion-reverse ghost-alpha-motion ghost-large-motion ghost-large-motion-reverse)
         if(SCENARIO MATCHES "^stationary-alias" AND NOT VDXR_FG_DIAGNOSTIC_TESTS)
             continue()

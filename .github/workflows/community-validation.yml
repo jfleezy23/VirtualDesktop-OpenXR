@@ -241,6 +241,28 @@ jobs:
           Copy-Item -LiteralPath $runtime -Destination $externalRuntime
           Invoke-Regression 'bin/tests/redirect/runtime_redirect_regression.exe' @($runtime, $externalRuntime, 'chain') 'redirect-chain'
           Invoke-Regression 'bin/tests/redirect/runtime_redirect_regression.exe' @($runtime, $externalRuntime, 'chain', 'wide') 'redirect-chain-wide'
+          $bundledDirectory = Join-Path (Get-Location) 'bin/community/registered-forwarder/OpenXR'
+          New-Item -ItemType Directory -Force -Path $bundledDirectory | Out-Null
+          $bundledRuntime = Join-Path $bundledDirectory 'virtualdesktop-openxr.dll'
+          Copy-Item -LiteralPath $runtime -Destination $bundledRuntime
+          foreach ($mode in @('bundled', 'bundled-failure')) {
+            Invoke-Regression 'bin/tests/redirect/runtime_redirect_regression.exe' @($bundledRuntime, $externalRuntime, $mode) "redirect-$mode"
+          }
+          Invoke-Regression 'bin/tests/redirect/runtime_redirect_regression.exe' @($bundledRuntime, $externalRuntime, 'bundled', 'wide') 'redirect-bundled-wide'
+          Invoke-Regression 'bin/tests/redirect/runtime_redirect_regression.exe' @($bundledRuntime, $bundledRuntime, 'bundled-self') 'redirect-bundled-self'
+          $standaloneOutput = Join-Path (Get-Location) 'bin/community/retention-standalone'
+          & scripts/Build-CommunityRuntime.ps1 -Configuration Release -Platform x64 -Toolset $env:VDXR_TOOLSET -VCToolsVersion $env:VDXR_VCTOOLS_VERSION -OutputDirectory $standaloneOutput
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $standaloneRuntime = Join-Path $standaloneOutput 'virtualdesktop-openxr.dll'
+          Invoke-Regression 'bin/tests/redirect/runtime_redirect_regression.exe' @($bundledRuntime, $standaloneRuntime, 'bundled-standalone') 'redirect-bundled-standalone'
+          $unrelatedDirectory = Join-Path (Get-Location) 'bin/community/registered-nonruntime/OpenXR'
+          New-Item -ItemType Directory -Force -Path $unrelatedDirectory | Out-Null
+          Copy-Item -LiteralPath 'bin/tests/redirect/vdxr_redirect_non_runtime_test.dll' -Destination (Join-Path $unrelatedDirectory 'virtualdesktop-openxr.dll')
+          $unrelatedTargetDirectory = Join-Path (Split-Path $unrelatedDirectory) 'Custom'
+          New-Item -ItemType Directory -Force -Path $unrelatedTargetDirectory | Out-Null
+          $unrelatedTarget = Join-Path $unrelatedTargetDirectory 'virtualdesktop-openxr.dll'
+          Copy-Item -LiteralPath $runtime -Destination $unrelatedTarget
+          Invoke-Regression 'bin/tests/redirect/runtime_redirect_regression.exe' @($unrelatedTarget, $unrelatedTarget, 'bundled-unrelated') 'redirect-bundled-unrelated'
 
   analyzer-comparison:
     needs: source-checks

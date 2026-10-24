@@ -48,6 +48,42 @@ namespace RUNTIME_NAMESPACE {
 using namespace RUNTIME_NAMESPACE;
 using namespace RUNTIME_NAMESPACE::log;
 
+namespace {
+    bool retainBundledHookOwner() {
+#if defined(_WIN64)
+        const auto installedPath =
+            RegGetString(HKEY_LOCAL_MACHINE, "SOFTWARE\\Virtual Desktop, Inc.\\Virtual Desktop Streamer", "Path");
+        if (!installedPath) {
+            return true;
+        }
+        const auto bundledPath = std::filesystem::path(*installedPath) / L"OpenXR" / L"virtualdesktop-openxr.dll";
+        wil::unique_hmodule bundled;
+        // This acquires only an already loaded module; direct loading must not introduce the stock runtime.
+        if (!GetModuleHandleExW(0, bundledPath.c_str(), bundled.put())) {
+            return true;
+        }
+        HMODULE current{};
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCWSTR>(&dllHome),
+                                &current)) {
+            return false;
+        }
+        if (bundled.get() == current || !GetProcAddress(bundled.get(), "xrNegotiateLoaderRuntimeInterface") ||
+            !GetProcAddress(bundled.get(), "getVersion")) {
+            return true;
+        }
+        // Stock owns a process-wide detour even after forwarding. Its unload can remove Revive's newer hook.
+        // Pin the retained module's base, since an exported function can itself forward into another module.
+        HMODULE pinned{};
+        return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                                  reinterpret_cast<LPCWSTR>(bundled.get()),
+                                  &pinned) != FALSE;
+#else
+        return true;
+#endif
+    }
+} // namespace
+
 extern "C" {
 
 XrVersion __declspec(dllexport) XRAPI_CALL getVersion() {
@@ -119,7 +155,15 @@ XrResult __declspec(dllexport) XRAPI_CALL xrNegotiateLoaderRuntimeInterface(cons
             (pfnGetVersion = (decltype(getVersion)*)GetProcAddress(standaloneLibrary, "getVersion"))) {
             if (pfnGetVersion() >= getVersion()) {
                 Log("Redirecting to standalone runtime (%ls)\n", standaloneLibraryPath.value().c_str());
-                const auto result = pfnNegotiateLoaderRuntimeInterface(loaderInfo, runtimeRequest);
+                auto result = pfnNegotiateLoaderRuntimeInterface(loaderInfo, runtimeRequest);
+                if (XR_SUCCEEDED(result) && !retainBundledHookOwner()) {
+                    if (runtimeRequest) {
+                        runtimeRequest->getInstanceProcAddr = nullptr;
+                        runtimeRequest->runtimeInterfaceVersion = 0;
+                        runtimeRequest->runtimeApiVersion = 0;
+                    }
+                    result = XR_ERROR_INITIALIZATION_FAILED;
+                }
                 // Successful dispatch pointers need the module for the process lifetime; failed negotiation does not.
                 if (XR_FAILED(result)) {
                     FreeLibrary(standaloneLibrary);
@@ -145,6 +189,11 @@ XrResult __declspec(dllexport) XRAPI_CALL xrNegotiateLoaderRuntimeInterface(cons
         loaderInfo->maxInterfaceVersion < XR_CURRENT_LOADER_RUNTIME_VERSION ||
         loaderInfo->maxApiVersion < XR_CURRENT_API_VERSION || loaderInfo->minApiVersion > XR_CURRENT_API_VERSION) {
         Log("xrNegotiateLoaderRuntimeInterface validation failed\n");
+        return XR_ERROR_INITIALIZATION_FAILED;
+    }
+
+    if (!retainBundledHookOwner()) {
+        Log("Failed to retain the bundled runtime hook owner\n");
         return XR_ERROR_INITIALIZATION_FAILED;
     }
 

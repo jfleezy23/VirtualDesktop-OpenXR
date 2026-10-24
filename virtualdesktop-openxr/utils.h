@@ -23,6 +23,7 @@
 #pragma once
 
 #include <exception>
+#include <string_view>
 
 #include "pch.h"
 
@@ -709,7 +710,7 @@ namespace virtualdesktop_openxr::utils {
         return str.find(substr) == 0;
     }
 
-    static inline bool endsWith(const std::string& str, const std::string& substr) {
+    static inline bool endsWith(const std::string& str, std::string_view substr) {
         const auto pos = str.find(substr);
         return pos != std::string::npos && pos == str.size() - substr.size();
     }
