@@ -66,7 +66,7 @@ namespace {
         std::array<ComPtr<ID3D12Resource>, 5> resources;
         UINT descriptorStride{}, targetStride{};
 
-        explicit ShaderFixture(bool srgb) {
+        explicit ShaderFixture(bool srgb, UINT allocationBlock = block) {
             const auto imageFormat = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
             const auto allocationFormat = srgb ? DXGI_FORMAT_R8G8B8A8_TYPELESS : imageFormat;
             D3D12_DESCRIPTOR_RANGE ranges[2]{};
@@ -127,8 +127,8 @@ namespace {
             targetStride = gpu.device->GetDescriptorHandleIncrementSize(heap.Type);
             resources[0] = texture(side, side, eyes, allocationFormat);
             resources[1] = texture(side, side, eyes, allocationFormat);
-            resources[2] = texture(side / block, side * eyes / block, 1, DXGI_FORMAT_R32G32_SINT);
-            resources[3] = texture(side / block, side * eyes / block, 1, DXGI_FORMAT_R32_UINT);
+            resources[2] = texture(side / allocationBlock, side * eyes / allocationBlock, 1, DXGI_FORMAT_R32G32_SINT);
+            resources[3] = texture(side / allocationBlock, side * eyes / allocationBlock, 1, DXGI_FORMAT_R32_UINT);
             resources[4] = texture(side, side, eyes, allocationFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
             for (UINT index = 0; index < 7; ++index) {
                 const UINT resource = std::min(index, 3u);
@@ -361,6 +361,639 @@ namespace {
                       expected);
             throw std::runtime_error(message);
         }
+    }
+
+    int runNvidiaVectorConfidence(bool srgb, bool unequal) {
+        side = 64;
+        ShaderFixture fixture(srgb);
+        const auto decode = [srgb](double code) {
+            const double v = code / 255;
+            return !srgb ? v : v <= .04045 ? v / 12.92 : std::pow((v + .055) / 1.055, 2.4);
+        };
+        const auto encode = [srgb](double value) {
+            return 255 * (!srgb ? value : value <= .0031308 ? value * 12.92 : 1.055 * std::pow(value, 1 / 2.4) - .055);
+        };
+        // Literal half/block4 weights at pixel(22,22): fractions5/16 each.
+        constexpr double rejectedWeight[4]{121.0 / 256, 55.0 / 256, 55.0 / 256, 25.0 / 256};
+        for (UINT corner = 0; corner < (unequal ? 1u : 4u); ++corner) {
+            for (int direction : {-1, 1}) {
+                for (float requested : {1.0f / 3.0f, .5f, 2.0f / 3.0f}) {
+                    Parameters parameters;
+                    parameters.packedWidth = side / 2;
+                    parameters.packedHeight = side * eyes / 2;
+                    parameters.eyeStride = side / 2;
+                    parameters.flowBlock = 4;
+                    const UINT phase = requested == .5f ? 0 : static_cast<UINT>(std::lround(requested * 65535));
+                    const double fraction = phase ? double(phase) / 65535 : .5;
+                    parameters.flags = (phase << 8) | (3u << 2) | (srgb ? 2u : 0u);
+                    Pixels previous(side * side * eyes * 4), current(previous.size());
+                    std::vector<int32_t> flow((side / block) * (side * eyes / block) * 2);
+                    std::vector<uint32_t> cost((side / block) * (side * eyes / block));
+                    for (UINT eye = 0; eye < eyes; ++eye) {
+                        const int sign = eye ? -direction : direction;
+                        for (UINT y = 0; y < side; ++y) {
+                            for (UINT x = 0; x < side; ++x) {
+                                auto* a = pixel(previous, eye, x, y);
+                                auto* b = pixel(current, eye, x, y);
+                                const int local = (int(x) - 22) * sign;
+                                // A(x)=B(x-2*sign), a genuine two-pixel translation.
+                                const int av = unequal                    ? std::clamp(120 + 12 * (local - 2), 0, 255)
+                                               : local == 0 || local == 1 ? 200
+                                                                          : 0;
+                                const int bv = unequal                      ? std::clamp(120 + 12 * local, 0, 255)
+                                               : local == -1 || local == -2 ? 200
+                                                                            : 0;
+                                std::fill_n(a, 3, static_cast<uint8_t>(av));
+                                std::fill_n(b, 3, static_cast<uint8_t>(bv));
+                                a[3] = b[3] = 255;
+                            }
+                        }
+                        for (UINT y = 0; y < side / block; ++y) {
+                            for (UINT x = 0; x < side / block; ++x)
+                                flow[((eye * side / block + y) * (side / block) + x) * 2] = sign * 32;
+                        }
+                        if (unequal) {
+                            constexpr int values[4]{32, 96, -416, 416};
+                            constexpr UINT costs[4]{0, 170, 255, 255};
+                            for (UINT k = 0; k < 4; ++k) {
+                                const size_t cell = (eye * side / block + 2 + (k >> 1)) * (side / block) + 2 + (k & 1);
+                                flow[cell * 2] = sign * values[k];
+                                cost[cell] = costs[k];
+                            }
+                        } else {
+                            const size_t bad =
+                                (eye * side / block + 2 + (corner >> 1)) * (side / block) + 2 + (corner & 1);
+                            flow[bad * 2] = sign * 416;
+                            cost[bad] = 511; // Mask the upper cost bits exactly as AAF7.
+                        }
+                    }
+                    fixture.transfer(fixture.resources[0].Get(), previous.data(), 4);
+                    fixture.transfer(fixture.resources[1].Get(), current.data(), 4);
+                    fixture.transfer(fixture.resources[2].Get(), flow.data(), 8);
+                    fixture.transfer(fixture.resources[3].Get(), cost.data(), 4);
+                    auto output = fixture.draw(parameters, true);
+                    double expected;
+                    if (unequal) {
+                        // q=(1,1/3,0,0), so v=528/209px and S=209/384.
+                        // In UNORM, the literal phase outputs are109,111.75,114.5.
+                        // For sRGB, interpolate source texels in linear light.
+                        const double local = -(1 - fraction) * (528.0 / 209);
+                        const double lower = std::floor(local);
+                        const double blend = local - lower;
+                        const double warped = (1 - blend) * decode(120 + 12 * lower) + blend * decode(132 + 12 * lower);
+                        expected = encode(decode(120) + (warped - decode(120)) * (209.0 / 384));
+                    } else {
+                        // The rejected26px cell leaves2px and support1-w_bad.
+                        // BR gives S231/256, rather than AAF7's139/32px vector
+                        // or a worst-cell veto, which would return black B(p).
+                        expected =
+                            encode(decode(200) * std::min(1.0, 2 * (1 - fraction)) * (1 - rejectedWeight[corner]));
+                    }
+                    std::printf("vector-confidence unequal=%u corner=%u sign=%d fraction=%.6f expectedRGB=%.6f\n",
+                                unequal,
+                                corner,
+                                direction,
+                                fraction,
+                                expected);
+                    for (UINT eye = 0; eye < eyes; ++eye) {
+                        for (UINT c = 0; c < 4; ++c)
+                            compareChannel(pixel(output, eye, 22, 22)[c],
+                                           c < 3 ? expected : 255,
+                                           "nvidia-vector-confidence",
+                                           eye,
+                                           22,
+                                           22,
+                                           c,
+                                           1.0);
+                    }
+                }
+            }
+        }
+        std::puts("PASS: production endpoint shader reconstructs reliable motion and applies spatial support");
+        return 0;
+    }
+
+    int runNvidiaVectorControls(bool srgb, bool boundaries, bool uniformOnly) {
+        side = 64;
+        ShaderFixture fixture(srgb, 1);
+        struct Case {
+            const char* name;
+            double scale;
+            UINT nominal, gridBlock, minimum, extent, px, py, mode;
+            double support;
+            bool stacked;
+        };
+        // Supports are independently derived literal grid fractions, not an
+        // implementation of the shader's confidence reconstruction.
+        const std::vector<Case> cases =
+            boundaries ? std::vector<Case>{{"left-clamp", .5, 3, 4, 0, 64, 3, 22, 9, 1, false},
+                                           {"right-clamp", .5, 3, 4, 0, 64, 60, 22, 9, 1, false},
+                                           {"crop-left", .5, 3, 4, 8, 48, 11, 22, 9, 1, false},
+                                           {"crop-right", .5, 3, 4, 8, 48, 52, 22, 9, 1, false},
+                                           {"crop-top", .5, 3, 4, 8, 48, 22, 11, 9, 1, false},
+                                           {"crop-bottom", .5, 3, 4, 8, 48, 22, 52, 9, 1, false},
+                                           {"single-cell", .5, 3, 4, 16, 8, 20, 20, 9, 1, false},
+                                           {"full-scale", 1, 1, 4, 0, 64, 10, 10, 9, 1, false},
+                                           {"three-quarter", .75, 2, 4, 0, 64, 14, 14, 9, 1, false},
+                                           {"stacked-eyes", .5, 3, 4, 0, 64, 22, 22, 10, 1, true}}
+                       : std::vector<Case>{{"uniform-zero", .5, 3, 4, 0, 64, 22, 22, 0, 1, true},
+                                           {"uniform128", .5, 3, 4, 0, 64, 22, 22, 1, 127.0 / 255, true},
+                                           {"uniform255-valid", .5, 3, 4, 0, 64, 22, 22, 2, 0, true},
+                                           {"mixed-support", .5, 3, 4, 0, 64, 22, 22, 3, 44215.0 / 65280, true},
+                                           {"tiny-support", .75, 2, 4, 0, 64, 13, 13, 4, 1.0 / 1024, true},
+                                           {"zero-weight", 1, 1, 1, 0, 64, 22, 22, 5, 1, true},
+                                           {"uniform255-invalid", .5, 3, 4, 0, 64, 22, 22, 6, 0, true},
+                                           {"uniform255-invalid-crop", .5, 3, 4, 8, 48, 22, 22, 7, 0, true},
+                                           {"masked-zero", .5, 3, 4, 0, 64, 22, 22, 8, 1, true}};
+        const auto decode = [srgb](double code) {
+            const double v = code / 255;
+            return !srgb ? v : v <= .04045 ? v / 12.92 : std::pow((v + .055) / 1.055, 2.4);
+        };
+        const auto encode = [srgb](double value) {
+            return 255 * (!srgb ? value : value <= .0031308 ? value * 12.92 : 1.055 * std::pow(value, 1 / 2.4) - .055);
+        };
+        size_t outputPathLength{};
+        check(getenv_s(&outputPathLength, nullptr, 0, "VDXR_FG_TEST_OUTPUT") == 0, "query vector-output directory");
+        std::vector<char> outputDirectory(outputPathLength);
+        if (outputPathLength)
+            check(getenv_s(&outputPathLength, outputDirectory.data(), outputDirectory.size(), "VDXR_FG_TEST_OUTPUT") ==
+                      0,
+                  "read vector-output directory");
+        for (int direction : {-1, 1}) {
+            for (float requested : {1.0f / 3.0f, .5f, 2.0f / 3.0f}) {
+                const UINT phase = requested == .5f ? 0 : static_cast<UINT>(std::lround(requested * 65535));
+                const double fraction = phase ? double(phase) / 65535 : .5;
+                Pixels zeroCostOutput;
+                for (auto item : cases) {
+                    if (uniformOnly) {
+                        if (item.mode != 0 && item.mode != 1 && item.mode != 2 && item.mode != 6 && item.mode != 7 &&
+                            item.mode != 8)
+                            continue;
+                        item.stacked = false; // Actual normal NVIDIA uses separate mono flow resources.
+                    }
+                    Parameters parameters;
+                    parameters.packedWidth = static_cast<UINT>(side * item.scale);
+                    parameters.eyeStride = item.stacked ? parameters.packedWidth : 0;
+                    parameters.packedHeight = parameters.packedWidth * (item.stacked ? eyes : 1);
+                    parameters.flowBlock = item.gridBlock;
+                    parameters.flowWidth = parameters.packedWidth / item.gridBlock;
+                    parameters.flowHeight = parameters.packedHeight / item.gridBlock;
+                    parameters.flags = (phase << 8) | (item.nominal << 2) | (srgb ? 2u : 0u);
+                    for (auto& mapping : parameters.mappings) {
+                        mapping.sourceRect[0] = mapping.sourceRect[1] = static_cast<float>(item.minimum);
+                        mapping.targetRect[0] = mapping.targetRect[1] = static_cast<float>(item.minimum);
+                        mapping.sourceRect[2] = mapping.sourceRect[3] = static_cast<float>(item.extent);
+                        mapping.targetRect[2] = mapping.targetRect[3] = static_cast<float>(item.extent);
+                    }
+                    Pixels previous(side * side * eyes * 4), current(previous.size());
+                    constexpr UINT allocationWidth = 64, allocationHeight = 128;
+                    std::vector<int32_t> flow(allocationWidth * allocationHeight * 2, 416);
+                    std::vector<uint32_t> cost(allocationWidth * allocationHeight, 511);
+                    const UINT minimum = static_cast<UINT>(std::floor(item.minimum * item.scale)) / item.gridBlock;
+                    const UINT maximum =
+                        static_cast<UINT>(std::ceil((item.minimum + item.extent) * item.scale) - 1) / item.gridBlock;
+                    const UINT uniform = item.mode == 1                                                         ? 384
+                                         : item.mode == 2 || item.mode == 4 || item.mode == 6 || item.mode == 7 ? 511
+                                         : item.mode == 8                                                       ? 256
+                                                                                                                : 0;
+                    for (UINT eye = 0; eye < eyes; ++eye) {
+                        const int sign = item.stacked && eye ? -direction : direction;
+                        for (UINT y = 0; y < side; ++y) {
+                            for (UINT x = 0; x < side; ++x) {
+                                auto* a = pixel(previous, eye, x, y);
+                                auto* b = pixel(current, eye, x, y);
+                                const int local = (int(x) - int(item.px)) * sign;
+                                const bool bandPixel = local == -1 || local == -2;
+                                std::fill_n(a, 3, static_cast<uint8_t>(local == 0 || local == 1 ? 200 : 0));
+                                std::fill_n(b, 3, static_cast<uint8_t>(bandPixel ? 200 : 0));
+                                a[3] = 90;
+                                b[3] = static_cast<uint8_t>(bandPixel ? 220 : 51);
+                            }
+                        }
+                        const UINT offset = eye * parameters.eyeStride / item.gridBlock;
+                        const int displacement = item.mode == 6 || item.mode == 7 ? 80 : item.mode == 4 ? 26 : 2;
+                        const int raw = static_cast<int>(std::lround(sign * displacement * item.scale * 32));
+                        for (UINT y = minimum; y <= maximum; ++y) {
+                            for (UINT x = minimum; x <= maximum; ++x) {
+                                const size_t cell = (y + offset) * allocationWidth + x;
+                                flow[cell * 2] = raw;
+                                flow[cell * 2 + 1] = 0;
+                                cost[cell] = item.mode == 10 && eye == 0 ? 384 : uniform;
+                            }
+                        }
+                        // These three fixtures have literal cell coordinates.
+                        if (item.mode == 3) {
+                            cost[(2 + offset) * allocationWidth + 3] = 384;
+                            cost[(3 + offset) * allocationWidth + 2] = 511;
+                        } else if (item.mode == 4) {
+                            const size_t cell = (3 + offset) * allocationWidth + 3;
+                            flow[cell * 2] = static_cast<int>(sign * 48); // 2px at nominal3/4.
+                            cost[cell] = 0;                               // Sole support is BR spatial weight1/1024.
+                        } else if (item.mode == 5) {
+                            for (UINT k : {1u, 2u, 3u}) {
+                                const size_t cell = (22 + (k >> 1) + offset) * allocationWidth + 22 + (k & 1);
+                                flow[cell * 2] = sign * 832;
+                                cost[cell] = 511; // Exactly zero spatial weights.
+                            }
+                        } else if (item.mode == 10 && eye == 1) {
+                            // The old unstrided cost lookup clamps to this row;
+                            // the actual second-eye flow footprint is rows10,11.
+                            for (UINT x = minimum; x <= maximum; ++x)
+                                cost[offset * allocationWidth + x] = 511;
+                        }
+                    }
+                    fixture.transfer(fixture.resources[0].Get(), previous.data(), 4);
+                    fixture.transfer(fixture.resources[1].Get(), current.data(), 4);
+                    fixture.transfer(fixture.resources[2].Get(), flow.data(), 8);
+                    fixture.transfer(fixture.resources[3].Get(), cost.data(), 4);
+                    auto output = fixture.draw(parameters, true);
+                    if (item.mode == 0)
+                        zeroCostOutput = output;
+                    if (item.mode == 8)
+                        check(output == zeroCostOutput, "masked-zero and zero costs preserve exact complete RGBA");
+                    if (!outputDirectory.empty() && (item.mode <= 2 || (item.mode >= 6 && item.mode <= 8))) {
+                        std::filesystem::create_directories(outputDirectory.data());
+                        const auto filename = std::string("vector-") + item.name + (srgb ? "-srgb-" : "-unorm-") +
+                                              std::to_string(direction) + "-" + std::to_string(phase) + ".rgba";
+                        std::ofstream dump(std::filesystem::path(outputDirectory.data()) / filename, std::ios::binary);
+                        dump.write(reinterpret_cast<const char*>(output.data()), output.size());
+                        check(dump.good(), "write complete uniform-cost output for exact AAF7/candidate comparison");
+                    }
+                    std::printf("vector-control case=%s sign=%d fraction=%.6f\n", item.name, direction, fraction);
+                    for (UINT eye = 0; eye < eyes; ++eye) {
+                        const double support = item.mode == 10 && eye == 0 ? 127.0 / 255 : item.support;
+                        const double coverage = std::min(1.0, 2 * (1 - fraction));
+                        const double stableAlpha = (1 - fraction) * 90 + fraction * 51;
+                        const double expectedAlpha =
+                            item.mode == 6 || item.mode == 7 ? 51 : stableAlpha + fraction * 169 * coverage * support;
+                        for (UINT c = 0; c < 4; ++c) {
+                            const double expected = c < 3 ? encode(decode(200) * coverage * support) : expectedAlpha;
+                            compareChannel(pixel(output, eye, item.px, item.py)[c],
+                                           expected,
+                                           "nvidia-vector-control",
+                                           eye,
+                                           item.px,
+                                           item.py,
+                                           c,
+                                           1.0);
+                        }
+                    }
+                }
+            }
+        }
+        std::puts("PASS: production endpoint shader preserves uniform confidence, alpha, and bounded reliable support");
+        return 0;
+    }
+
+    int runNvidiaRelativeMotion(bool srgb) {
+        side = 64;
+        ShaderFixture fixture(srgb);
+        for (bool reverse : {false, true}) {
+            for (float requested : {1.0f / 3.0f, 0.5f, 2.0f / 3.0f}) {
+                Parameters parameters;
+                parameters.packedWidth = side / 2;
+                parameters.packedHeight = side * eyes / 2;
+                parameters.eyeStride = side / 2;
+                parameters.flowBlock = 4;
+                parameters.flags =
+                    (static_cast<UINT>(std::lround(requested * 65535.0f)) << 8) | (3u << 2) | (srgb ? 2u : 0u);
+                Pixels previous(side * side * eyes * 4), current(previous.size());
+                std::vector<int32_t> flow((side / block) * (side * eyes / block) * 2);
+                std::vector<uint32_t> cost((side / block) * (side * eyes / block));
+                for (UINT eye = 0; eye < eyes; ++eye) {
+                    const bool mirrored = (eye != 0) != reverse;
+                    for (UINT y = 0; y < side; ++y) {
+                        for (UINT x = 0; x < side; ++x) {
+                            const UINT local = mirrored ? side - 1 - x : x;
+                            auto* a = pixel(previous, eye, x, y);
+                            auto* b = pixel(current, eye, x, y);
+                            std::fill_n(a, 3, static_cast<uint8_t>(local >= 16 && local <= 31 ? 180 : 20));
+                            std::fill_n(b, 3, static_cast<uint8_t>(local >= 24 && local <= 39 ? 200 : 20));
+                            a[3] = b[3] = 255;
+                        }
+                    }
+                    for (UINT y = 0; y < side / block; ++y) {
+                        for (UINT x = 0; x < side / block; ++x) {
+                            const size_t offset = ((eye * side / block + y) * (side / block) + x) * 2;
+                            flow[offset] = mirrored ? 128 : -128; // +/-8 source pixels at half resolution.
+                        }
+                    }
+                }
+                fixture.transfer(fixture.resources[0].Get(), previous.data(), 4);
+                fixture.transfer(fixture.resources[1].Get(), current.data(), 4);
+                fixture.transfer(fixture.resources[2].Get(), flow.data(), 8);
+                fixture.transfer(fixture.resources[3].Get(), cost.data(), 4);
+                auto output = fixture.draw(parameters, true);
+                for (UINT eye = 0; eye < eyes; ++eye) {
+                    const bool mirrored = (eye != 0) != reverse;
+                    const UINT x = mirrored ? side - 1 - 22 : 22;
+                    // The moving surface changes shading slightly: warped
+                    // A/B are 180/200, while camera-only A/B at p22 are
+                    // 180/20. Motion explains the pair much better in both
+                    // linear UNORM and sRGB views, so retain newest warped B.
+                    // An absolute disagreement gate instead mixes in B(p)=20.
+                    for (UINT y = 2; y + 2 < side; ++y) {
+                        for (UINT c = 0; c < 4; ++c)
+                            compareChannel(pixel(output, eye, x, y)[c],
+                                           c == 3 ? 255 : 200,
+                                           "nvidia-relative-motion",
+                                           eye,
+                                           x,
+                                           y,
+                                           c,
+                                           1.0);
+                    }
+                }
+            }
+        }
+        std::puts("PASS: production endpoint shader prefers better nonzero-error motion correspondence");
+        return 0;
+    }
+
+    int runNvidiaNearbyMotion(bool srgb) {
+        side = 64;
+        ShaderFixture fixture(srgb);
+        const char* scenario = "nvidia-nearby-motion";
+        constexpr UINT targets[3]{30, 31, 31};
+        constexpr double coverages[3]{1.0 / 3.0, 1.0, 2.0 / 3.0};
+        const auto decode = [srgb](double code) {
+            const double value = code / 255.0;
+            return !srgb ? value : value <= 0.04045 ? value / 12.92 : std::pow((value + 0.055) / 1.055, 2.4);
+        };
+        const auto encode = [srgb](double value) {
+            return 255.0 * (!srgb                ? value
+                            : value <= 0.0031308 ? value * 12.92
+                                                 : 1.055 * std::pow(value, 1.0 / 2.4) - 0.055);
+        };
+        for (bool reverse : {false, true}) {
+            UINT phase = 0;
+            for (float requested : {1.0f / 3.0f, 0.5f, 2.0f / 3.0f}) {
+                Parameters parameters;
+                parameters.packedWidth = side / 2;
+                parameters.packedHeight = side * eyes / 2;
+                parameters.eyeStride = side / 2;
+                parameters.flowBlock = 4;
+                parameters.flags =
+                    (static_cast<UINT>(std::lround(requested * 65535.0f)) << 8) | (3u << 2) | (srgb ? 2u : 0u);
+                Pixels previous(side * side * eyes * 4), current(previous.size());
+                std::vector<int32_t> flow((side / block) * (side * eyes / block) * 2);
+                std::vector<uint32_t> cost((side / block) * (side * eyes / block));
+                for (UINT eye = 0; eye < eyes; ++eye) {
+                    const bool mirrored = (eye != 0) != reverse;
+                    for (UINT y = 0; y < side; ++y) {
+                        for (UINT x = 0; x < side; ++x) {
+                            const UINT local = mirrored ? side - 1 - x : x;
+                            auto* a = pixel(previous, eye, x, y);
+                            auto* b = pixel(current, eye, x, y);
+                            std::fill_n(a, 3, static_cast<uint8_t>(local == 30 ? 200 : local == 33 ? 240 : 0));
+                            std::fill_n(b, 3, static_cast<uint8_t>(local == 32 ? 200 : local == 33 ? 240 : 0));
+                            a[3] = b[3] = 255;
+                        }
+                    }
+                    for (UINT y = 0; y < side / block; ++y) {
+                        for (UINT x = 0; x < side / block; ++x) {
+                            const size_t offset = ((eye * side / block + y) * (side / block) + x) * 2;
+                            flow[offset] = mirrored ? 32 : -32; // +/-2 source pixels at half resolution.
+                        }
+                    }
+                }
+                fixture.transfer(fixture.resources[0].Get(), previous.data(), 4);
+                fixture.transfer(fixture.resources[1].Get(), current.data(), 4);
+                fixture.transfer(fixture.resources[2].Get(), flow.data(), 8);
+                fixture.transfer(fixture.resources[3].Get(), cost.data(), 4);
+                auto output = fixture.draw(parameters, true);
+                for (UINT eye = 0; eye < eyes; ++eye) {
+                    const bool mirrored = (eye != 0) != reverse;
+                    const UINT x = mirrored ? side - 1 - targets[phase] : targets[phase];
+                    // At midpoint p31, unchanged A/B samples at p31 and
+                    // its +/-2 neighbors include a nonflat fixed line at33.
+                    // A local static-patch shortcut would erase the moving
+                    // stroke, whose independently rendered coverage is one.
+                    const double expected = encode(decode(200) * coverages[phase]);
+                    for (UINT y = 2; y + 2 < side; ++y) {
+                        for (UINT c = 0; c < 4; ++c)
+                            compareChannel(
+                                pixel(output, eye, x, y)[c], c == 3 ? 255 : expected, scenario, eye, x, y, c, 2.0);
+                    }
+                }
+                ++phase;
+            }
+        }
+        std::puts("PASS: production endpoint shader retains narrow motion beside static detail");
+        return 0;
+    }
+
+    int runNvidiaEdgeMotion(bool srgb, bool stationary, bool dark = false) {
+        side = 64;
+        ShaderFixture fixture(srgb);
+        const std::array<uint8_t, 7> glyph = dark ? std::array<uint8_t, 7>{60, 40, 0, 55, 25, 0, 45}
+                                                  : std::array<uint8_t, 7>{240, 160, 0, 220, 80, 0, 200};
+        constexpr UINT targetShifts[3]{8, 12, 16};
+        constexpr UINT darkFalseStrokes[3]{25, 26, 28};
+        const char* scenario = stationary ? (dark ? "nvidia-dark-edge-fold" : "nvidia-edge-fold")
+                                          : (dark ? "nvidia-dark-edge-motion" : "nvidia-edge-motion");
+        for (bool reverse : {false, true}) {
+            for (UINT rejectedCost : {0u, 255u}) {
+                UINT phase = 0;
+                for (float requested : {1.0f / 3.0f, 0.5f, 2.0f / 3.0f}) {
+                    Parameters parameters;
+                    // Four input pixels at half resolution span eight source
+                    // pixels. These dimensions match the active NVIDIA geometry.
+                    parameters.packedWidth = side / 2;
+                    parameters.packedHeight = side * eyes / 2;
+                    parameters.eyeStride = side / 2;
+                    parameters.flowBlock = 4;
+                    parameters.flags =
+                        (static_cast<UINT>(std::lround(requested * 65535.0f)) << 8) | (3u << 2) | (srgb ? 2u : 0u);
+                    Pixels previous(side * side * eyes * 4), current(previous.size());
+                    std::vector<int32_t> flow((side / block) * (side * eyes / block) * 2);
+                    std::vector<uint32_t> cost((side / block) * (side * eyes / block), rejectedCost);
+                    for (UINT eye = 0; eye < eyes; ++eye) {
+                        const bool mirrored = (eye != 0) != reverse;
+                        for (UINT y = 0; y < side; ++y) {
+                            for (UINT x = 0; x < side; ++x) {
+                                const UINT local = mirrored ? side - 1 - x : x;
+                                auto* a = pixel(previous, eye, x, y);
+                                auto* b = pixel(current, eye, x, y);
+                                if (stationary) {
+                                    // Identical opaque text must not acquire new
+                                    // strokes when one background cell has bad flow.
+                                    const auto value = static_cast<uint8_t>(
+                                        local >= 36 && local <= 38 ? (dark ? 60 : 255 - 18 * eye) : 0);
+                                    std::fill_n(a, 3, value);
+                                    std::fill_n(b, 3, value);
+                                } else {
+                                    // A unique seven-column glyph moves +24 local
+                                    // pixels. The correct vector matches A and B
+                                    // photometrically, including the narrow strokes.
+                                    std::fill_n(a, 3, local >= 12 && local < 19 ? glyph[local - 12] : uint8_t{});
+                                    std::fill_n(b, 3, local >= 36 && local < 43 ? glyph[local - 36] : uint8_t{});
+                                }
+                                a[3] = b[3] = 255;
+                            }
+                        }
+                        for (UINT y = 0; y < side / block; ++y) {
+                            for (UINT x = 0; x < side / block; ++x) {
+                                const UINT local = mirrored ? side / block - 1 - x : x;
+                                // S10.5 vectors are measured at half resolution:
+                                // -12 input pixels is -24 source pixels. Cell 3
+                                // is centered at source x=27.5; its neighbors
+                                // at 19.5 and 35.5 stay zero in the static case.
+                                if (!stationary || local == 3) {
+                                    const size_t offset = ((eye * side / block + y) * (side / block) + x) * 2;
+                                    flow[offset] = mirrored ? 384 : -384;
+                                }
+                            }
+                        }
+                    }
+                    fixture.transfer(fixture.resources[0].Get(), previous.data(), 4);
+                    fixture.transfer(fixture.resources[1].Get(), current.data(), 4);
+                    fixture.transfer(fixture.resources[2].Get(), flow.data(), 8);
+                    fixture.transfer(fixture.resources[3].Get(), cost.data(), 4);
+                    auto output = fixture.draw(parameters, true);
+                    std::printf("edge-control=%s srgb=%u reverse=%u cost=%u fraction=%.6f\n",
+                                scenario,
+                                srgb,
+                                reverse,
+                                rejectedCost,
+                                requested);
+                    for (UINT eye = 0; eye < eyes; ++eye) {
+                        const bool mirrored = (eye != 0) != reverse;
+                        for (UINT y = 0; y < side; ++y) {
+                            for (UINT x = 0; x < side; ++x) {
+                                const UINT local = mirrored ? side - 1 - x : x;
+                                // These strong false roots sample 100%, 75%,
+                                // 50% of the 60-code glyph. Their encoded error
+                                // exceeds 1/8, while linear-light error does not.
+                                // Weaker subpixel tails remain a separate limit;
+                                // the white-fold oracle still checks every pixel.
+                                if (dark && stationary && rejectedCost == 0 && local != darkFalseStrokes[phase])
+                                    continue;
+                                const UINT start = 12 + targetShifts[phase];
+                                for (UINT c = 0; c < 4; ++c) {
+                                    // Independently render integer motion at
+                                    // 1/3, 1/2, 2/3: shifts 8, 12, 16. Midpoint
+                                    // flag quantization moves less than .001px.
+                                    const double expected = stationary || rejectedCost == 255
+                                                                ? pixel(current, eye, x, y)[c]
+                                                            : c == 3                              ? 255
+                                                            : local >= start && local < start + 7 ? glyph[local - start]
+                                                                                                  : 0;
+                                    compareChannel(pixel(output, eye, x, y)[c], expected, scenario, eye, x, y, c, 2.0);
+                                }
+                            }
+                        }
+                    }
+                    ++phase;
+                }
+            }
+        }
+        std::puts("PASS: production endpoint shader opaque edge controls");
+        return 0;
+    }
+
+    int runNvidiaCurrentWarp(bool srgb) {
+        side = 64;
+        ShaderFixture fixture(srgb);
+        const auto decode = [srgb](double code) {
+            const double value = code / 255.0;
+            return !srgb ? value : value <= 0.04045 ? value / 12.92 : std::pow((value + 0.055) / 1.055, 2.4);
+        };
+        const auto encode = [srgb](double value) {
+            return 255.0 * (!srgb                ? value
+                            : value <= 0.0031308 ? value * 12.92
+                                                 : 1.055 * std::pow(value, 1.0 / 2.4) - 0.055);
+        };
+        for (bool repeated : {false, true}) {
+            for (UINT rejectedCost : {0u, 255u}) {
+                for (float requested : {1.0f / 3.0f, 0.5f, 2.0f / 3.0f}) {
+                    Parameters parameters;
+                    parameters.flags = (static_cast<UINT>(std::lround(requested * 65535.0f)) << 8) | (srgb ? 2u : 0u) |
+                                       (repeated ? 1u : 0u);
+                    const double fraction = double(parameters.flags >> 8) / 65535.0;
+                    Pixels previous = flat(), current = flat();
+                    for (UINT eye = 0; eye < eyes; ++eye) {
+                        for (UINT y = 0; y < side; ++y) {
+                            for (UINT x = 0; x < side; ++x) {
+                                const UINT local = eye ? side - 1 - x : x;
+                                auto* a = pixel(previous, eye, x, y);
+                                auto* b = pixel(current, eye, x, y);
+                                std::fill_n(a, 3, uint8_t{96});
+                                std::fill_n(
+                                    b,
+                                    3,
+                                    static_cast<uint8_t>(local >= 44 && local <= 48 ? 200 + 10 * (local - 44) : 30));
+                                a[3] = 90;
+                                b[3] = static_cast<uint8_t>(local >= 44 && local <= 48 ? 201 : 51);
+                            }
+                        }
+                    }
+                    std::vector<int32_t> flow((side / block) * (side * eyes / block) * 2);
+                    std::vector<uint32_t> cost((side / block) * (side * eyes / block), rejectedCost);
+                    for (UINT eye = 0; eye < eyes; ++eye)
+                        for (UINT y = 0; y < side / block; ++y)
+                            for (UINT x = 0; x < side / block; ++x)
+                                flow[((eye * side / block + y) * (side / block) + x) * 2] = (eye ? 12 : -12) * 32;
+                    fixture.transfer(fixture.resources[0].Get(), previous.data(), 4);
+                    fixture.transfer(fixture.resources[1].Get(), current.data(), 4);
+                    fixture.transfer(fixture.resources[2].Get(), flow.data(), 8);
+                    fixture.transfer(fixture.resources[3].Get(), cost.data(), 4);
+                    auto output = fixture.draw(parameters, true);
+                    for (UINT eye = 0; eye < eyes; ++eye) {
+                        const UINT p = eye ? 23 : 40;
+                        const UINT invalid = eye ? 1 : 62;
+                        for (UINT c = 0; c < 3; ++c) {
+                            // A is constant 96 while warped B is 200..240:
+                            // these are inconsistent endpoints, not a valid
+                            // motion correspondence. Reject to B(p), even at
+                            // cost zero. nvidia-edge-motion separately checks
+                            // genuine paired motion at all three fractions.
+                            const double expected =
+                                repeated ? encode((1.0 - fraction) * decode(96) + fraction * decode(30)) : 30.0;
+                            compareChannel(pixel(output, eye, p, 32)[c], expected, "current-warp", eye, p, 32, c, 1.0);
+                            if (!repeated)
+                                compareChannel(pixel(output, eye, invalid, 32)[c],
+                                               30,
+                                               "invalid-current-warp",
+                                               eye,
+                                               invalid,
+                                               32,
+                                               c,
+                                               0);
+                        }
+                        // RGB disagreement rejects the warp for opacity, as in
+                        // the original policy: B(p).a=51, warped B.a=201.
+                        compareChannel(pixel(output, eye, p, 32)[3],
+                                       (1.0 - fraction) * 90.0 + fraction * 51.0,
+                                       "current-warp-alpha",
+                                       eye,
+                                       p,
+                                       32,
+                                       3,
+                                       1.0);
+                    }
+                    if (!repeated && rejectedCost == 0) {
+                        // The previous camera faces away while current B remains
+                        // valid. Preserve the original current-image fallback.
+                        for (auto& mapping : parameters.mappings) {
+                            mapping.rotation[1] = 1;
+                            mapping.rotation[3] = 0;
+                        }
+                        auto noPrevious = fixture.draw(parameters, true);
+                        for (UINT eye = 0; eye < eyes; ++eye) {
+                            const UINT p = eye ? 23 : 40;
+                            for (UINT c = 0; c < 3; ++c)
+                                compareChannel(
+                                    pixel(noPrevious, eye, p, 32)[c], 30, "invalid-previous-warp", eye, p, 32, c, 0);
+                            compareChannel(
+                                pixel(noPrevious, eye, p, 32)[3], 51, "invalid-previous-alpha", eye, p, 32, 3, 0);
+                        }
+                    }
+                }
+            }
+        }
+        std::puts("PASS: production endpoint shader newest-image rejection and alpha policy");
+        return 0;
     }
 
     int runGhosting(const std::string& scenario) {
@@ -1004,6 +1637,27 @@ namespace {
             scenario == "half-pixel-bottom")
             return runHalfPixelBoundary(scenario == "half-pixel-right" || scenario == "half-pixel-bottom",
                                         scenario == "half-pixel-top" || scenario == "half-pixel-bottom");
+        if (scenario == "nvidia-dark-edge-fold-srgb" || scenario == "nvidia-dark-edge-motion-srgb")
+            return runNvidiaEdgeMotion(true, scenario == "nvidia-dark-edge-fold-srgb", true);
+        if (scenario.rfind("nvidia-vector-", 0) == 0) {
+            const bool srgb = scenario.find("srgb") != std::string::npos;
+            if (scenario.rfind("nvidia-vector-controls", 0) == 0 ||
+                scenario.rfind("nvidia-vector-boundaries", 0) == 0 || scenario.rfind("nvidia-vector-uniform", 0) == 0)
+                return runNvidiaVectorControls(srgb,
+                                               scenario.rfind("nvidia-vector-boundaries", 0) == 0,
+                                               scenario.rfind("nvidia-vector-uniform", 0) == 0);
+            return runNvidiaVectorConfidence(srgb, scenario.rfind("nvidia-vector-unequal", 0) == 0);
+        }
+        if (scenario == "nvidia-relative-motion" || scenario == "nvidia-relative-motion-srgb")
+            return runNvidiaRelativeMotion(scenario == "nvidia-relative-motion-srgb");
+        if (scenario == "nvidia-nearby-motion" || scenario == "nvidia-nearby-motion-srgb")
+            return runNvidiaNearbyMotion(scenario == "nvidia-nearby-motion-srgb");
+        if (scenario == "nvidia-edge-fold" || scenario == "nvidia-edge-fold-srgb" || scenario == "nvidia-edge-motion" ||
+            scenario == "nvidia-edge-motion-srgb")
+            return runNvidiaEdgeMotion(scenario.find("srgb") != std::string::npos,
+                                       scenario.rfind("nvidia-edge-fold", 0) == 0);
+        if (scenario == "nvidia-current-warp" || scenario == "nvidia-current-warp-srgb")
+            return runNvidiaCurrentWarp(scenario == "nvidia-current-warp-srgb");
         if (scenario.rfind("stationary-alias", 0) == 0 || scenario.rfind("ghost-thin-motion", 0) == 0 ||
             scenario == "ghost-alpha-motion" || scenario.rfind("ghost-large-motion", 0) == 0)
             return runGhosting(scenario);

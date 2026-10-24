@@ -186,6 +186,406 @@ def prepare_pair_real_output(source: Path, output: Path, modified: str) -> str:
     return modified
 
 
+def prepare_synthetic_atlas_output(output: Path, modified: str) -> str:
+    """Opt in to shared wide synthetic destinations; keep current arrays native."""
+    header_path = output / "xrfg/d3d12_frame_synthesizer.hpp"
+    original_header = header_path.read_text(encoding="utf-8")
+    header = original_header
+    header_changes = [
+        ("class D3D12FrameSynthesizer final {",
+         "// Shared atlases require two logical array slices and 2W x H x 1\n"
+         "// synthetic destinations. Only those destinations enter/leave COMMON;\n"
+         "// current destinations retain the explicit release_state contract.\n"
+         "enum class D3D12SyntheticOutputLayout : std::uint32_t {\n"
+         "    native,\n"
+         "    shared_stereo_atlas,\n"
+         "};\n\nclass D3D12FrameSynthesizer final {"),
+        ("        bool copy_current_output = true) noexcept;",
+         "        bool copy_current_output = true,\n"
+         "        D3D12SyntheticOutputLayout synthetic_output_layout =\n"
+         "            D3D12SyntheticOutputLayout::native) noexcept;"),
+    ]
+    for old, new in header_changes:
+        if header.count(old) != 1:
+            raise ValueError("Pinned synthetic-atlas header context does not match uniquely")
+        header = header.replace(old, new)
+    changes = [
+        ("    bool copy_current_output{true};",
+         "    bool copy_current_output{true};\n"
+         "    D3D12SyntheticOutputLayout synthetic_output_layout{};"),
+        ("        bool input_copy_current_output) {",
+         "        bool input_copy_current_output,\n"
+         "        D3D12SyntheticOutputLayout input_synthetic_output_layout) {"),
+        ("        if (input_device == nullptr || input_queue == nullptr ||",
+         "        if ((input_synthetic_output_layout != D3D12SyntheticOutputLayout::native &&\n"
+         "             input_synthetic_output_layout != D3D12SyntheticOutputLayout::shared_stereo_atlas) ||\n"
+         "            input_device == nullptr || input_queue == nullptr ||"),
+        ("        synthetic_destinations.reserve(input_synthetic_images.size());",
+         "        auto synthetic_description = description;\n"
+         "        if (input_synthetic_output_layout == D3D12SyntheticOutputLayout::shared_stereo_atlas) {\n"
+         "            if (description.DepthOrArraySize != 2 ||\n"
+         "                description.Width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION / 2U) {\n"
+         "                return E_INVALIDARG;\n"
+         "            }\n"
+         "            synthetic_description.Width *= 2;\n"
+         "            synthetic_description.DepthOrArraySize = 1;\n"
+         "        }\n"
+         "        synthetic_destinations.reserve(input_synthetic_images.size());"),
+        ("        copy_current_output = input_copy_current_output;",
+         "        copy_current_output = input_copy_current_output;\n"
+         "        synthetic_output_layout = input_synthetic_output_layout;"),
+        ("    bool copy_current_output) noexcept {",
+         "    bool copy_current_output,\n"
+         "    D3D12SyntheticOutputLayout synthetic_output_layout) noexcept {"),
+        ("            copy_current_output);\n        if (FAILED(result)) {",
+         "            copy_current_output,\n            synthetic_output_layout);\n        if (FAILED(result)) {"),
+        ("            backend, options, impl_->nvidia_gpu_timing_enabled, impl_->copy_current_output);",
+         "            backend, options, impl_->nvidia_gpu_timing_enabled, impl_->copy_current_output,\n"
+         "            impl_->synthetic_output_layout);"),
+        ("            impl_->backend, impl_->nvidia_options, enabled, impl_->copy_current_output);",
+         "            impl_->backend, impl_->nvidia_options, enabled, impl_->copy_current_output,\n"
+         "            impl_->synthetic_output_layout);"),
+    ]
+    for old, new in changes:
+        if modified.count(old) != 1:
+            raise ValueError(f"Pinned synthetic-atlas context does not match uniquely: {old!r}")
+        modified = modified.replace(old, new)
+    start = modified.index("        synthetic_destinations.reserve(input_synthetic_images.size());")
+    end = modified.index("        const UINT width =", start)
+    block = modified[start:end]
+    old = "!copy_compatible(description, image->GetDesc())"
+    if block.count(old) != 1:
+        raise ValueError("Pinned synthetic-atlas destination validation differs")
+    modified = modified[:start] + block.replace(old, "!copy_compatible(synthetic_description, image->GetDesc())") + modified[end:]
+
+    marker = "    [[nodiscard]] HRESULT create_rtv_heap(UINT node_mask) noexcept {"
+    helpers = """    [[nodiscard]] bool shared_synthetic_atlas() const noexcept {
+        return synthetic_output_layout == D3D12SyntheticOutputLayout::shared_stereo_atlas;
+    }
+
+    void transition_synthetic_atlas(ID3D12GraphicsCommandList* commands,
+        UINT destination_index, bool begin) const noexcept {
+        if (!shared_synthetic_atlas()) return;
+        const auto barrier = transition_barrier(
+            synthetic_destinations[destination_index].resource.Get(),
+            begin ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_RENDER_TARGET,
+            begin ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_COMMON);
+        commands->ResourceBarrier(1, &barrier);
+    }
+
+    [[nodiscard]] D3D12ReprojectionView synthetic_output_view(
+        const D3D12ReprojectionView& view, UINT slice) const noexcept {
+        if (!shared_synthetic_atlas()) return view;
+        auto output = view;
+        output.image_rect = resolved_rect(view.image_rect,
+            static_cast<UINT>(image_description.Width), image_description.Height);
+        output.image_rect.offset_x += slice * static_cast<UINT>(image_description.Width);
+        return output;
+    }
+
+"""
+    if modified.count(marker) != 1:
+        raise ValueError("Pinned synthetic-atlas helper location differs")
+    modified = modified.replace(marker, helpers + marker)
+    start = modified.index("        for (const Destination& destination : synthetic_destinations) {")
+    end = modified.index("        current_rtv_base = descriptor_index;", start)
+    block = modified[start:end]
+    old = "                rtv_description.Texture2DArray.FirstArraySlice = slice;"
+    if block.count(old) != 1:
+        raise ValueError("Pinned synthetic-atlas RTV context differs")
+    block = block.replace("        for (const Destination& destination : synthetic_destinations) {",
+                          "        if (shared_synthetic_atlas()) {\n"
+                          "            rtv_description = {};\n"
+                          "            rtv_description.Format = view_format;\n"
+                          "            rtv_description.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;\n"
+                          "        }\n"
+                          "        for (const Destination& destination : synthetic_destinations) {")
+    block = block.replace(old, "                if (!shared_synthetic_atlas())\n" + old + "\n")
+    block += ("        rtv_description = {};\n"
+              "        rtv_description.Format = view_format;\n"
+              "        rtv_description.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;\n"
+              "        rtv_description.Texture2DArray.ArraySize = 1;\n")
+    modified = modified[:start] + block + modified[end:]
+
+    marker = "        for (UINT output = 0; output < synthetic_output_count(); ++output) {"
+    if modified.count(marker) != 4:
+        raise ValueError("Pinned synthetic-atlas draw loop count differs")
+    offset = 0
+    for _ in range(4):
+        start = modified.index(marker, offset)
+        opening = modified.index("{", start)
+        end, depth = opening + 1, 1
+        while depth:
+            depth += (modified[end] == "{") - (modified[end] == "}")
+            end += 1
+        block = modified[start:end]
+        commands = "synthesis" if "synthesis->OMSetRenderTargets" in block else "slot.command_list.Get()"
+        block = block.replace(marker, marker + "\n"
+                              "            const UINT atlas_destination =\n"
+                              "                synthetic_output_destination(output, synthetic_destination_index);\n"
+                              f"            transition_synthetic_atlas({commands}, atlas_destination, true);")
+        old = "packed_synthesis_fraction(synthetic_output_fraction(output));"
+        if block.count(old) != 1 or block.count("                parameters.slice = slice;") != 1:
+            raise ValueError("Pinned synthetic-atlas draw parameters differ")
+        block = block.replace(old, "packed_synthesis_fraction(synthetic_output_fraction(output)) |\n"
+                              "                (shared_synthetic_atlas() ? 0x10U : 0U);")
+        block = block.replace("                parameters.slice = slice;",
+                              "                const auto output_view = synthetic_output_view(target_views[view_index], slice);\n"
+                              "                parameters.slice = slice;")
+        block = block.replace("target_views[view_index].image_rect", "output_view.image_rect")
+        block = block.replace("rtv, target_views[view_index]", "rtv, output_view")
+        block = block[:-1] + f"    transition_synthetic_atlas({commands}, atlas_destination, false);\n        }}"
+        modified = modified[:start] + block + modified[end:]
+        offset = start + len(block)
+    header_path.write_text(header, encoding="utf-8")
+    (output / "synthetic-atlas-header.patch").write_text("".join(difflib.unified_diff(
+        original_header.splitlines(keepends=True), header.splitlines(keepends=True),
+        fromfile="current-output/include/xrfg/d3d12_frame_synthesizer.hpp",
+        tofile="compiled/include/xrfg/d3d12_frame_synthesizer.hpp")), encoding="utf-8")
+    return modified
+
+
+def prepare_shared_nvidia_3x(output: Path, modified: str) -> str:
+    """Private medium-NVIDIA atlas opt-in; every legacy composition stays available."""
+    header_path = output / "xrfg/d3d12_frame_synthesizer.hpp"
+    original_header = header_path.read_text(encoding="utf-8")
+    old = "            D3D12SyntheticOutputLayout::native) noexcept;"
+    if original_header.count(old) != 1:
+        raise ValueError("Pinned shared-NVIDIA header context differs")
+    header = original_header.replace(old,
+        "            D3D12SyntheticOutputLayout::native,\n"
+        "        // Private derivative opt-in; medium NVIDIA 3x atlases only.\n"
+        "        bool enable_shared_nvidia_3x = false) noexcept;")
+    changes = [
+        ('#include "nvidia_synthesize_midpoint_pixel_shader.hpp"',
+         '#include "nvidia_synthesize_midpoint_pixel_shader.hpp"\n'
+         '#include "nvidia_shared_3x_synthesize_pixel_shader.hpp"'),
+        ("    ComPtr<ID3D12PipelineState> nvidia_graphics_pipeline;",
+         "    ComPtr<ID3D12PipelineState> nvidia_graphics_pipeline;\n"
+         "    ComPtr<ID3D12PipelineState> nvidia_shared_3x_graphics_pipeline;"),
+        ("    D3D12SyntheticOutputLayout synthetic_output_layout{};",
+         "    D3D12SyntheticOutputLayout synthetic_output_layout{};\n"
+         "    bool enable_shared_nvidia_3x{};"),
+        ("        D3D12SyntheticOutputLayout input_synthetic_output_layout) {",
+         "        D3D12SyntheticOutputLayout input_synthetic_output_layout,\n"
+         "        bool input_enable_shared_nvidia_3x) {"),
+        ("        synthetic_output_layout = input_synthetic_output_layout;",
+         "        synthetic_output_layout = input_synthetic_output_layout;\n"
+         "        enable_shared_nvidia_3x = input_enable_shared_nvidia_3x;"),
+        ("    D3D12SyntheticOutputLayout synthetic_output_layout) noexcept {",
+         "    D3D12SyntheticOutputLayout synthetic_output_layout,\n"
+         "    bool enable_shared_nvidia_3x) noexcept {"),
+        ("            synthetic_output_layout);\n        if (FAILED(result)) {",
+         "            synthetic_output_layout,\n            enable_shared_nvidia_3x);\n        if (FAILED(result)) {"),
+    ]
+    for old, new in changes:
+        if modified.count(old) != 1:
+            raise ValueError(f"Pinned shared-NVIDIA context differs: {old!r}")
+        modified = modified.replace(old, new)
+    old = "            impl_->synthetic_output_layout);"
+    if modified.count(old) != 2:
+        raise ValueError("Pinned shared-NVIDIA reconfiguration contexts differ")
+    modified = modified.replace(old,
+        "            impl_->synthetic_output_layout, impl_->enable_shared_nvidia_3x);")
+    old = """        return device->CreateGraphicsPipelineState(
+            &graphics_description,
+            IID_PPV_ARGS(
+                nvidia_bidirectional_graphics_pipeline.GetAddressOf()));"""
+    new = """        result = device->CreateGraphicsPipelineState(
+            &graphics_description,
+            IID_PPV_ARGS(
+                nvidia_bidirectional_graphics_pipeline.GetAddressOf()));
+        if (FAILED(result)) return result;
+        if (enable_shared_nvidia_3x && shared_synthetic_atlas() &&
+            backend == D3D12OpticalFlowBackend::nvidia &&
+            nvidia_options.preset == D3D12NvidiaPerformancePreset::medium &&
+            !nvidia_options.bidirectional) {
+            graphics_description.PS = {
+                g_xrfg_nvidia_shared_3x_synthesize_pixel_shader,
+                sizeof(g_xrfg_nvidia_shared_3x_synthesize_pixel_shader),
+            };
+            graphics_description.NumRenderTargets = 2;
+            graphics_description.RTVFormats[1] = view_format;
+            graphics_description.BlendState.RenderTarget[1] = target_blend;
+            // This is optional. Unsupported MRT creation keeps the already
+            // validated single-output PSO and the ordinary submission path.
+            if (FAILED(device->CreateGraphicsPipelineState(
+                    &graphics_description,
+                    IID_PPV_ARGS(nvidia_shared_3x_graphics_pipeline.GetAddressOf())))) {
+                nvidia_shared_3x_graphics_pipeline.Reset();
+            }
+        }
+        return S_OK;"""
+    if modified.count(old) != 1:
+        raise ValueError("Pinned shared-NVIDIA PSO context differs")
+    modified = modified.replace(old, new)
+    old = """        synthesis->SetPipelineState(
+            nvidia_options.bidirectional
+                ? nvidia_bidirectional_graphics_pipeline.Get()
+                : nvidia_graphics_pipeline.Get());"""
+    new = """        const bool shared_3x = enable_shared_nvidia_3x && shared_synthetic_atlas() &&
+            backend == D3D12OpticalFlowBackend::nvidia &&
+            nvidia_options.preset == D3D12NvidiaPerformancePreset::medium &&
+            !nvidia_options.bidirectional && nvidia_shared_3x_graphics_pipeline &&
+            (parameters.synthesis_flags & 1U) == 0U && parameters.use_game_motion == 0U &&
+            synthetic_output_count() == 2U &&
+            synthetic_destinations[synthetic_destination_index].resource.Get() !=
+                synthetic_destinations[*extra_synthetic_destination].resource.Get();
+        synthesis->SetPipelineState(shared_3x
+            ? nvidia_shared_3x_graphics_pipeline.Get()
+            : (nvidia_options.bidirectional
+                ? nvidia_bidirectional_graphics_pipeline.Get()
+                : nvidia_graphics_pipeline.Get()));"""
+    if modified.count(old) != 1:
+        raise ValueError("Pinned shared-NVIDIA pipeline selection differs")
+    modified = modified.replace(old, new)
+    start = modified.index('        dred_marker(synthesis, "OFXR NVIDIA composition draw");')
+    start = modified.index("        for (UINT output = 0; output < synthetic_output_count(); ++output) {", start)
+    end = modified.index("\n\n        std::array<D3D12_RESOURCE_BARRIER,", start)
+    legacy = modified[start:end]
+    shared = """        if (shared_3x) {
+            const UINT destinations[2] = {
+                synthetic_destination_index, *extra_synthetic_destination,
+            };
+            // Both atlases must be RT before either eye writes either target.
+            transition_synthetic_atlas(synthesis, destinations[0], true);
+            transition_synthetic_atlas(synthesis, destinations[1], true);
+            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
+                packed_synthesis_fraction(synthetic_output_fraction(0)) | 0x10U;
+            // This slot is unused by normal NVIDIA. Preserve the exact
+            // independent packing/zero-sentinel rules for the second phase.
+            parameters.game_motion_padding = packed_synthesis_fraction(synthetic_output_fraction(1));
+            for (UINT view_index = 0;
+                 view_index < static_cast<UINT>(target_views.size()); ++view_index) {
+                const UINT slice = resolved_array_slice(target_views[view_index], view_index,
+                    target_views.size(), image_description.DepthOrArraySize);
+                const auto output_view = synthetic_output_view(target_views[view_index], slice);
+                parameters.slice = slice;
+                parameters.view_index = view_index;
+                const auto block = offset_gpu_handle(gpu_start,
+                    slice * kDescriptorBlockSize, descriptor_increment);
+                synthesis->SetGraphicsRootDescriptorTable(0, block);
+                synthesis->SetGraphicsRootDescriptorTable(1,
+                    offset_gpu_handle(block, kSrvDescriptorCount, descriptor_increment));
+                synthesis->SetGraphicsRoot32BitConstants(2, kSynthesisConstantCount, &parameters, 0);
+                const D3D12_CPU_DESCRIPTOR_HANDLE rtvs[2] = {
+                    offset_cpu_handle(rtv_start,
+                        destinations[0] * image_description.DepthOrArraySize + slice, rtv_increment),
+                    offset_cpu_handle(rtv_start,
+                        destinations[1] * image_description.DepthOrArraySize + slice, rtv_increment),
+                };
+                synthesis->OMSetRenderTargets(2, rtvs, FALSE, nullptr);
+                set_viewport_and_scissor(synthesis, output_view.image_rect,
+                    static_cast<UINT>(image_description.Width), image_description.Height);
+                synthesis->DrawInstanced(3, 1, 0, 0);
+                for (const auto rtv : rtvs) {
+                    clear_synthetic_marker(synthesis, rtv, output_view,
+                        static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
+                }
+            }
+            transition_synthetic_atlas(synthesis, destinations[0], false);
+            transition_synthetic_atlas(synthesis, destinations[1], false);
+        } else {
+""" + "\n".join("    " + line for line in legacy.split("\n")) + "\n        }"
+    modified = modified[:start] + shared + modified[end:]
+    header_path.write_text(header, encoding="utf-8")
+    (output / "shared-nvidia-3x-header.patch").write_text("".join(difflib.unified_diff(
+        original_header.splitlines(keepends=True), header.splitlines(keepends=True),
+        fromfile="synthetic-atlas/include/xrfg/d3d12_frame_synthesizer.hpp",
+        tofile="compiled/include/xrfg/d3d12_frame_synthesizer.hpp")), encoding="utf-8")
+    return modified
+
+
+def shared_nvidia_3x_shader() -> str:
+    """Separate entry point: retain the trusted single-output shader verbatim."""
+    return """
+// Only the private medium-NVIDIA, nonrepeated atlas path selects this PS.
+// Keep the single-output entry points above unchanged for differential replay.
+struct NvidiaSharedSynthesisCommon {
+    float2 pixel;
+    CameraSample current_fallback;
+    CameraSample previous_fallback;
+    float2 raw_backward;
+    float backward_flow_support;
+    float camera_only_error;
+    bool valid;
+};
+
+NvidiaSharedSynthesisCommon prepare_nvidia_shared_synthesis(FullscreenVertex input) {
+    NvidiaSharedSynthesisCommon common = (NvidiaSharedSynthesisCommon)0;
+    common.current_fallback.color = float4(0.0, 0.0, 0.0, 1.0);
+    uint2 integer_pixel = uint2(input.position.xy);
+    if ((SynthesisFlags & 0x10u) != 0u)
+        integer_pixel.x -= Slice * Width;
+    bool in_bounds = integer_pixel.x < Width && integer_pixel.y < Height && Slice < ArraySize;
+    if (in_bounds) {
+        common.pixel = float2(integer_pixel);
+        common.current_fallback = sample_current_target(common.pixel, Slice, ViewIndex);
+        MappedCoordinate previous_coverage = map_target_to_source(
+            common.pixel, PreviousMappings[ViewIndex]);
+        if (previous_coverage.valid >= 0.5) {
+            NvidiaFlowSample reconstructed = nvidia_confidence_flow_for_pixel(
+                common.pixel, Slice, ViewIndex, 1.0 / 32.0);
+            common.raw_backward = reconstructed.motion;
+            common.backward_flow_support = reconstructed.support;
+            common.previous_fallback = sample_previous_target(common.pixel, Slice, ViewIndex);
+            common.camera_only_error = rgb_error(
+                pack_flow_input_color(common.previous_fallback.color),
+                pack_flow_input_color(common.current_fallback.color));
+            common.valid = true;
+        }
+    }
+    return common;
+}
+
+float4 synthesize_nvidia_shared_phase(NvidiaSharedSynthesisCommon common, float fraction) {
+    float4 output_color = saturate(common.current_fallback.color);
+    if (common.valid) {
+        CameraSample previous_sample = sample_previous_target(
+            common.pixel + common.raw_backward * fraction, Slice, ViewIndex);
+        CameraSample current_sample = sample_current_target(
+            common.pixel - common.raw_backward * (1.0 - fraction), Slice, ViewIndex);
+        if (previous_sample.valid >= 0.5 && current_sample.valid >= 0.5) {
+            float4 flow_midpoint = lerp(previous_sample.color, current_sample.color, fraction);
+            float disagreement = max(abs(previous_sample.color.r - current_sample.color.r),
+                max(abs(previous_sample.color.g - current_sample.color.g),
+                    abs(previous_sample.color.b - current_sample.color.b)));
+            float confidence = saturate(1.0 - disagreement * 6.0);
+            float4 stable_midpoint = lerp(
+                common.previous_fallback.color, common.current_fallback.color, fraction);
+            float consistency_confidence = 1.0;
+            float cost_confidence = common.backward_flow_support;
+            confidence *= consistency_confidence * cost_confidence;
+            // Alpha retains the original stable/flow policy for each phase.
+            output_color = saturate(lerp(stable_midpoint, flow_midpoint, confidence));
+            float warped_error = rgb_error(
+                pack_flow_input_color(previous_sample.color), pack_flow_input_color(current_sample.color));
+            float rgb_confidence = saturate(1.0 + (common.camera_only_error - warped_error) * 8.0);
+            rgb_confidence *= cost_confidence;
+            output_color.rgb = saturate(lerp(
+                common.current_fallback.color.rgb, current_sample.color.rgb, rgb_confidence));
+        }
+    }
+    return output_color;
+}
+
+struct NvidiaShared3xTargets {
+    float4 first : SV_Target0;
+    float4 second : SV_Target1;
+};
+
+NvidiaShared3xTargets SynthesizeNvidiaShared3xPS(FullscreenVertex input) {
+    NvidiaSharedSynthesisCommon common = prepare_nvidia_shared_synthesis(input);
+    uint second_packed = (GameMotionPadding >> 8) & 0xffffu;
+    float second_fraction = second_packed == 0u ? 0.5 : float(second_packed) / 65535.0;
+    NvidiaShared3xTargets output;
+    output.first = synthesize_nvidia_shared_phase(common, synthesis_fraction());
+    output.second = synthesize_nvidia_shared_phase(common, second_fraction);
+    return output;
+}
+"""
+
+
 def prepare(source: Path, output: Path) -> None:
     manifest = json.loads((source / "manifest.json").read_text())
     if manifest["commit"] != "07449429c139e5d2070b6f0855ed5323de7cee00":
@@ -375,6 +775,8 @@ def prepare(source: Path, output: Path) -> None:
     modified = modified.replace(marker, marker + " |\n            packed_flow_input_scale(nvidia_options.input_scale)")
     output.mkdir(parents=True, exist_ok=True)
     modified = prepare_pair_real_output(source, output, modified)
+    modified = prepare_synthetic_atlas_output(output, modified)
+    modified = prepare_shared_nvidia_3x(output, modified)
     (output / path.name).write_text(modified, encoding="utf-8")
     (output / "initialization-ownership.patch").write_text("".join(difflib.unified_diff(
         original.splitlines(keepends=True), modified.splitlines(keepends=True),
@@ -383,6 +785,15 @@ def prepare(source: Path, output: Path) -> None:
     shader_path = source / "src/d3d12/frame_synthesis.hlsl"
     original_shader = shader_path.read_text(encoding="utf-8")
     shader = original_shader
+    old = "    uint2 integer_pixel = uint2(input.position.xy);"
+    new = (old + "\n"
+           "    // Shared synthetic atlases retain the array history's eye-local domain.\n"
+           "    // Default/native layouts keep their original pixel calculation.\n"
+           "    if ((SynthesisFlags & 0x10u) != 0u)\n"
+           "        integer_pixel.x -= Slice * Width;")
+    if shader.count(old) != 1:
+        raise ValueError("Pinned synthetic-atlas shader coordinate context differs")
+    shader = shader.replace(old, new)
     helper = (Path(__file__).resolve().parents[1] /
               "nr-frame-generation/src/ffx_endpoint_validation.hlsl").read_text(encoding="utf-8")
     marker = "// Preserve a stationary neighbourhood after the existing XR camera mapping."
@@ -423,6 +834,150 @@ def prepare(source: Path, output: Path) -> None:
     if shader.count(old_residual) != 1:
         raise ValueError("Pinned FidelityFX camera conversion context does not match uniquely")
     shader = shader.replace(old_residual, new_residual)
+    # Only normal NVIDIA reconstructs motion from cell reliability. Keep the
+    # original functions for FidelityFX, Fast and bidirectional entry points.
+    confidence_helper = """struct NvidiaFlowSample {
+    float2 motion;
+    float support;
+};
+
+NvidiaFlowSample nvidia_confidence_flow_for_pixel(
+    float2 pixel,
+    uint slice,
+    uint view_index,
+    float value_scale) {
+    float2 scaled = flow_input_coordinate(pixel);
+    float2 packed_coordinate = float2(
+        scaled.x, scaled.y + float(slice * PackedEyeStride));
+    float2 flow_coordinate =
+        (packed_coordinate + 0.5) / float(FlowBlockSize) - 0.5;
+    FlowGridBounds bounds = flow_grid_bounds(
+        PreviousMappings[view_index].TargetRect, slice);
+    float2 bounded = clamp(
+        flow_coordinate, float2(bounds.minimum), float2(bounds.maximum));
+    int2 top_left = int2(floor(bounded));
+    int2 bottom_right = min(top_left + int2(1, 1), bounds.maximum);
+    float2 fraction = bounded - float2(top_left);
+    float2 v00 = load_backward_flow_clamped(top_left, bounds.minimum, bounds.maximum);
+    float2 v10 = load_backward_flow_clamped(
+        int2(bottom_right.x, top_left.y), bounds.minimum, bounds.maximum);
+    float2 v01 = load_backward_flow_clamped(
+        int2(top_left.x, bottom_right.y), bounds.minimum, bounds.maximum);
+    float2 v11 = load_backward_flow_clamped(bottom_right, bounds.minimum, bounds.maximum);
+    uint c00 = FlowAuxiliary.Load(int3(top_left, 0)) & 0xffU;
+    // Exact-zero spatial contributors do not affect reliability or uniformity.
+    uint c10 = fraction.x > 0.0
+        ? FlowAuxiliary.Load(int3(bottom_right.x, top_left.y, 0)) & 0xffU : c00;
+    uint c01 = fraction.y > 0.0
+        ? FlowAuxiliary.Load(int3(top_left.x, bottom_right.y, 0)) & 0xffU : c00;
+    uint c11 = fraction.x > 0.0 && fraction.y > 0.0
+        ? FlowAuxiliary.Load(int3(bottom_right, 0)) & 0xffU : c00;
+    float2 top = lerp(v00, v10, fraction.x);
+    float2 bottom = lerp(v01, v11, fraction.x);
+    float2 result = lerp(top, bottom, fraction.y);
+    NvidiaFlowSample sample;
+    sample.support = saturate(1.0 - float(c00) / 255.0);
+    // Retain AAF7 arithmetic and endpoint validity for every uniform cost,
+    // including zero support: zeroing that vector would change alpha fallback.
+    if (c00 != c10 || c00 != c01 || c00 != c11) {
+        float q00 = sample.support;
+        float q10 = saturate(1.0 - float(c10) / 255.0);
+        float q01 = saturate(1.0 - float(c01) / 255.0);
+        float q11 = saturate(1.0 - float(c11) / 255.0);
+        sample.support = lerp(
+            lerp(q00, q10, fraction.x), lerp(q01, q11, fraction.x), fraction.y);
+        if (sample.support > 0.0) {
+            result = lerp(
+                lerp(v00 * q00, v10 * q10, fraction.x),
+                lerp(v01 * q01, v11 * q11, fraction.x), fraction.y) / sample.support;
+        }
+    }
+    result *= value_scale;
+    result /= max(flow_input_scale(), float2(1.0e-6, 1.0e-6));
+    float magnitude = length(result);
+    sample.motion = magnitude > 512.0 ? result * (512.0 / magnitude) : result;
+    return sample;
+}
+
+"""
+    marker = "float2 flow_for_pixel("
+    if shader.count(marker) != 1:
+        raise ValueError("Pinned NVIDIA confidence helper context does not match uniquely")
+    shader = shader.replace(marker, confidence_helper + marker)
+    old = "                float2 raw_backward = float2(0.0, 0.0);"
+    new = (old + "\n"
+           "                bool use_nvidia_vector_confidence = use_nvidia_cost && !validate_fast && !use_nvidia_bidirectional;\n"
+           "                float backward_flow_support = 1.0;")
+    if shader.count(old) != 1:
+        raise ValueError("Pinned NVIDIA confidence state context does not match uniquely")
+    shader = shader.replace(old, new)
+    old = ("                    raw_backward = repeated_capture_flag() != 0\n"
+           "                        ? float2(0.0, 0.0)\n"
+           "                        : flow_for_pixel(\n"
+           "                            pixel,\n"
+           "                            Slice,\n"
+           "                            ViewIndex,\n"
+           "                            flow_value_scale,\n"
+           "                            use_nvidia_cost);")
+    new = ("                    if (use_nvidia_vector_confidence && repeated_capture_flag() == 0) {\n"
+           "                        NvidiaFlowSample reconstructed = nvidia_confidence_flow_for_pixel(\n"
+           "                            pixel, Slice, ViewIndex, flow_value_scale);\n"
+           "                        raw_backward = reconstructed.motion;\n"
+           "                        backward_flow_support = reconstructed.support;\n"
+           "                    } else {\n" + old + "\n                    }")
+    if shader.count(old) != 1:
+        raise ValueError("Pinned NVIDIA reconstruction context does not match uniquely")
+    shader = shader.replace(old, new)
+    old = ("                                cost_confidence = saturate(\n"
+           "                                    1.0 - nvidia_cost_for_pixel(\n"
+           "                                        pixel,\n"
+           "                                        Slice,\n"
+           "                                        ViewIndex) / 255.0);")
+    new = old.replace("cost_confidence = saturate(",
+                      "cost_confidence = use_nvidia_vector_confidence ? backward_flow_support : saturate(")
+    if shader.count(old) != 1:
+        raise ValueError("Pinned NVIDIA support confidence context does not match uniquely")
+    shader = shader.replace(old, new)
+    # Reuse the camera-only A sample already read for the original alpha
+    # blend. Compare the camera-only and motion-warped RGB errors without
+    # adding source samples or changing that alpha calculation.
+    old_stable = ("                    float4 stable_midpoint = lerp(\n"
+                  "                        sample_previous_target(pixel, Slice, ViewIndex).color,\n"
+                  "                        current_fallback.color,\n"
+                  "                        synthesis_fraction());")
+    new_stable = ("                    CameraSample previous_fallback = sample_previous_target(pixel, Slice, ViewIndex);\n"
+                  "                    float4 stable_midpoint = lerp(\n"
+                  "                        previous_fallback.color,\n"
+                  "                        current_fallback.color,\n"
+                  "                        synthesis_fraction());")
+    if shader.count(old_stable) != 1:
+        raise ValueError("Pinned camera-only sample context does not match uniquely")
+    shader = shader.replace(old_stable, new_stable)
+    # Normal NVIDIA RGB keeps motion when it explains A/B at least as well
+    # as the camera alone, then applies the existing hardware cost guard.
+    # Compare in the packed flow color space so dark sRGB errors retain
+    # their encoded contrast. Alpha and other branches retain their policy.
+    old = ("                        output_color = saturate(lerp(\n"
+           "                            stable_midpoint,\n"
+           "                            flow_midpoint,\n"
+           "                            confidence));")
+    new = (old + "\n"
+           "                        if (!validate_fast && !use_nvidia_bidirectional && repeated_capture_flag() == 0) {\n"
+           "                            float camera_only_error = rgb_error(\n"
+           "                                pack_flow_input_color(previous_fallback.color), pack_flow_input_color(current_fallback.color));\n"
+           "                            float warped_error = rgb_error(\n"
+           "                                pack_flow_input_color(previous_sample.color), pack_flow_input_color(current_sample.color));\n"
+           "                            float rgb_confidence = saturate(1.0 + (camera_only_error - warped_error) * 8.0);\n"
+           "                            rgb_confidence *= cost_confidence;\n"
+           "                            output_color.rgb = saturate(lerp(\n"
+           "                                current_fallback.color.rgb, current_sample.color.rgb, rgb_confidence));\n"
+           "                        }")
+    start = shader.index("                    if (use_nvidia_cost) {", shader.index("float4 synthesize_midpoint("))
+    end = shader.index("                    } else {\n                        output_color", start)
+    section = shader[start:end]
+    if section.count(old) != 1:
+        raise ValueError("Pinned NVIDIA newest-image output context does not match uniquely")
+    shader = shader[:start] + section.replace(old, new) + shader[end:]
     old = ("                    } else {\n"
            "                        output_color = saturate(lerp(\n"
            "                            stable_midpoint,\n"
@@ -526,6 +1081,7 @@ def prepare(source: Path, output: Path) -> None:
     if shader.count(old) != 1:
         raise ValueError("Pinned NVIDIA current pack context does not match uniquely")
     shader = shader.replace(old, new)
+    shader += shared_nvidia_3x_shader()
     (output / shader_path.name).write_text(shader, encoding="utf-8")
     (output / "endpoint-validation.patch").write_text("".join(difflib.unified_diff(
         original_shader.splitlines(keepends=True), shader.splitlines(keepends=True),

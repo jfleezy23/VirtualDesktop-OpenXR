@@ -340,10 +340,10 @@ void barrierBatching(HMODULE module) {
                         result.operations.outerBarrierCalls,
                         result.operations.outerTransitions,
                         result.operations.outerCopies);
-            check(result.operations.outerBarrierCalls == 4 &&
-                      result.operations.outerTransitions == (multiplier + (hostOwned ? 0u : 1u)) * 4 &&
-                      result.operations.outerCopies == (multiplier + (hostOwned ? 0u : 1u)) * 2,
-                  "pair batches barrier calls without losing any transitions or eye copies");
+            check(result.operations.outerBarrierCalls == (hostOwned ? 2u : 4u) &&
+                      result.operations.outerTransitions == (hostOwned ? 4u : 8u) &&
+                      result.operations.outerCopies == (hostOwned ? 2u : 4u),
+                  "pair retains capture/current transitions and removes synthetic repacks");
             for (const auto& prime : {result.primeOperations, result.resetPrimeOperations})
                 check(prime.outerBarrierCalls == (hostOwned ? 2u : 4u) &&
                           prime.outerTransitions == (hostOwned ? 4u : 8u) && prime.outerCopies == (hostOwned ? 2u : 4u),
@@ -376,8 +376,8 @@ void emptyPrimeSubmission(HMODULE module) {
         check(ordinary.primeOperations.submits == 4 && legacy.primeOperations.submits == 4 &&
                   ordinary.resetPrimeOperations.submits == 4 && legacy.resetPrimeOperations.submits == 4,
               "V1 and ordinary V2 primes retain actual real-image pack submissions");
-        check(ordinary.operations.submits == owned.operations.submits,
-              "nonprime submission count is unchanged by empty prime elision");
+        check(ordinary.operations.submits == owned.operations.submits + 1,
+              "host-owned pairs also omit the final current-only repack submission");
     }
 }
 
@@ -410,10 +410,14 @@ void directHistoryCapture(HMODULE module) {
                     // whole-resource history copy leaves one owned capture.
                     // These are literal driver-call budgets, not counters
                     // supplied by the module under test.
-                    const unsigned submits = prime ? (hostOwned ? 3u : 4u) : (fidelityFx ? 4u : timed ? 6u : 5u);
+                    const unsigned submits = prime ? (hostOwned ? 3u : 4u)
+                                                   : (fidelityFx ? 4u
+                                                      : timed    ? 6u
+                                                                 : 5u) -
+                                                         (hostOwned ? 1u : 0u);
                     const unsigned resets =
                         prime ? (fidelityFx ? (hostOwned ? 3u : 4u) : (hostOwned ? 4u : 5u)) : submits;
-                    const unsigned copies = prime ? (hostOwned ? 2u : 4u) : (multiplier + (hostOwned ? 0u : 1u)) * 2u;
+                    const unsigned copies = hostOwned ? 2u : 4u;
                     const unsigned resourceCopies = hostOwned && !prime ? 0u : 1u;
                     reduced &= operations.submits == submits && operations.listResets == resets &&
                                operations.listCloses == resets && operations.copies == copies &&
@@ -443,6 +447,33 @@ void hostRealComparison(HMODULE module) {
         check(ordinary.operations.copies == owned.operations.copies + 2,
               "host-owned real removes exactly one outer stereo repack");
     }
+}
+
+void directSyntheticOutput(HMODULE module) {
+    bool direct = true;
+    bool explicitStates = true;
+    for (const uint32_t multiplier : {2u, 3u}) {
+        for (const bool fidelityFx : {false, true}) {
+            const uint32_t flags = VDXRFG_CREATE_HOST_OWNS_REAL | (fidelityFx ? VDXRFG_CREATE_FIDELITYFX_FULL : 0u);
+            const auto result = generated(module, multiplier, false, flags);
+            std::printf(
+                "direct synthetic %s %uX repackCopies=%u submits=%u captureCopies=%u RTTransitions=%u clears=%u\n",
+                fidelityFx ? "ffx" : "nvidia",
+                multiplier,
+                result.operations.syntheticRepackCopies,
+                result.operations.submits,
+                result.operations.captureRegionCopies,
+                result.operations.syntheticRenderTransitions,
+                result.operations.renderTargetClears);
+            direct &= result.operations.syntheticRepackCopies == 0;
+            explicitStates &= result.operations.syntheticRenderTransitions == 2 * (multiplier - 1) &&
+                              !result.operations.renderTargetClears &&
+                              !result.primeOperations.syntheticRenderTransitions &&
+                              !result.primeOperations.renderTargetClears;
+        }
+    }
+    check(direct, "shared synthetic outputs are rendered directly with zero synthetic repack copies");
+    check(explicitStates, "direct outputs have one whole-resource COMMON/RT bracket each and no unrequested clears");
 }
 
 void timingComparison(HMODULE module) {
@@ -536,7 +567,8 @@ void rejectEnvelopes(VDXRFG_GetApiV2Fn get) {
 
 int main(int argc, char** argv) {
     try {
-        check(argc == 2 || argc == 3, "module path and optional barriers/prime/capture/history mode required");
+        check(argc == 2 || argc == 3,
+              "module path and optional barriers/prime/capture/history/direct-output mode required");
         HMODULE module =
             LoadLibraryExA(argv[1], nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
         check(module != nullptr, "load real module");
@@ -544,7 +576,8 @@ int main(int argc, char** argv) {
         check(get != nullptr, "module publishes optional creation and diagnostic negotiation");
         rejectEnvelopes(get);
         const std::string mode = argc == 3 ? argv[2] : "all";
-        check(mode == "all" || mode == "barriers" || mode == "prime" || mode == "capture" || mode == "history",
+        check(mode == "all" || mode == "barriers" || mode == "prime" || mode == "capture" || mode == "history" ||
+                  mode == "direct-output",
               "recognized test mode");
         if (mode == "all" || mode == "capture") {
             timingComparison(module);
@@ -556,6 +589,8 @@ int main(int argc, char** argv) {
             emptyPrimeSubmission(module);
         if (mode == "all" || mode == "history")
             directHistoryCapture(module);
+        if (mode == "direct-output")
+            directSyntheticOutput(module);
         FreeLibrary(module);
         std::puts("PASS: optional creation negotiation");
         return 0;
