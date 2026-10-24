@@ -61,6 +61,7 @@ namespace virtualdesktop_openxr {
         std::array<ComPtr<ID3D11Texture2D>, 2> producerSources;
         uint64_t generation{};
         uint64_t producerValue{}, consumerValue{}, consumedValue{}, previousSerial{};
+        uint64_t inputOwnerToken{}, inputOwnerGeneration{};
         bool poisoned{}, hostCompletionUnknown{};
         bool hostOwnsReal{};
         HANDLE copyCompletionEvent{};
@@ -413,10 +414,16 @@ namespace virtualdesktop_openxr {
     }
 
     HRESULT FrameGeneration::capture(const FinalProjectionInput& input, OwnedFrameTransaction& transaction) noexcept {
-        if (!m_state || m_state->poisoned || transaction.ticket.token) {
+        if (!m_state) {
             return VDXRFG_E_REJECTED;
         }
         auto& state = *m_state;
+        // Packing can overwrite the shared atlas before Submit rejects. No
+        // failed capture may leave an older ticket claiming those pixels.
+        state.inputOwnerToken = state.inputOwnerGeneration = 0;
+        if (state.poisoned || transaction.ticket.token) {
+            return VDXRFG_E_REJECTED;
+        }
         if (state.producerValue == UINT64_MAX || input.slots.count == 0 || input.slots.count > 3 ||
             (input.slots.count != 1 && input.slots.count != state.info.multiplier) || !input.serial ||
             input.time <= 0 || input.period <= 0 ||
@@ -601,6 +608,8 @@ namespace virtualdesktop_openxr {
                 return VDXRFG_E_POISONED;
             }
         }
+        state.inputOwnerToken = transaction.ticket.token;
+        state.inputOwnerGeneration = transaction.ticket.generation;
         return S_OK;
     }
 
@@ -722,12 +731,28 @@ namespace virtualdesktop_openxr {
             // that retained source avoids waiting for synthesis just to fall
             // back to the real frame. It still obeys the producer's NR fence.
             if (state.capturedBgraMask[transaction.ticket.bank]) {
-                state.bgra.copy(state.context11.Get(),
-                                destination,
-                                state.info.eyeWidth,
-                                state.capturedBgraMask[transaction.ticket.bank],
-                                state.capturedSources[transaction.ticket.bank],
-                                state.capturedViews[transaction.ticket.bank]);
+                const auto completed = state.hostOwnsReal && state.inputOwnerToken == ticket.token &&
+                                               state.inputOwnerGeneration == ticket.generation && state.consumed11
+                                           ? state.consumed11->GetCompletedValue()
+                                           : UINT64_MAX;
+                if (completed != UINT64_MAX && completed >= ticket.input_consumed_value) {
+                    auto views = state.capturedViews[transaction.ticket.bank];
+                    for (uint32_t eye = 0; eye < 2; ++eye) {
+                        views[eye].rect.x = eye * state.info.eyeWidth;
+                        views[eye].rect.y = 0;
+                    }
+                    // Only the written canonical eye rectangles are valid;
+                    // coalesce them only when copyStereo proves adjacency.
+                    const std::array<ComPtr<ID3D11Texture2D>, 2> sources{state.input11, state.input11};
+                    copyStereo(state.context11.Get(), destination, state.info.eyeWidth, sources, views);
+                } else {
+                    state.bgra.copy(state.context11.Get(),
+                                    destination,
+                                    state.info.eyeWidth,
+                                    state.capturedBgraMask[transaction.ticket.bank],
+                                    state.capturedSources[transaction.ticket.bank],
+                                    state.capturedViews[transaction.ticket.bank]);
+                }
             } else {
                 copyStereo(state.context11.Get(),
                            destination,
@@ -827,6 +852,9 @@ namespace virtualdesktop_openxr {
         }
         const auto hr = m_state->api.Retire(m_state->context, transaction.ticket.token);
         if (SUCCEEDED(hr)) {
+            if (m_state->inputOwnerToken == transaction.ticket.token) {
+                m_state->inputOwnerToken = m_state->inputOwnerGeneration = 0;
+            }
             m_state->liveTokens[transaction.ticket.bank] = 0;
             m_state->consumerValues[transaction.ticket.bank] = 0;
             m_state->roleConsumerValues[transaction.ticket.bank] = {};
@@ -845,6 +873,7 @@ namespace virtualdesktop_openxr {
         if (!m_state || m_state->poisoned) {
             return VDXRFG_E_REJECTED;
         }
+        m_state->inputOwnerToken = m_state->inputOwnerGeneration = 0;
         const auto hr = m_state->api.Reset(m_state->context, reason);
         if (SUCCEEDED(hr)) {
             m_state->previousSerial = 0;

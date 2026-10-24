@@ -1170,7 +1170,7 @@ namespace virtualdesktop_openxr {
                 continue;
             }
 
-            const auto lastControllerType = m_cachedControllerType[side];
+            bool controllerTypeChanged = false;
             const auto controllerTypes = ovr_GetConnectedControllerTypes(m_ovrSession);
             const bool isLingering =
                 (std::chrono::high_resolution_clock::now() - m_lastControllerSeenTime[side]).count() <
@@ -1220,8 +1220,10 @@ namespace virtualdesktop_openxr {
             }
 
             if (isPhysicalControllerConnected || isEmulatedControllerConnected) {
-                m_cachedControllerType[side] =
+                const auto controllerType =
                     !(controllerTypes & ovrControllerType_Index) ? "touch_controller" : "knuckles";
+                controllerTypeChanged = m_cachedControllerType[side] != controllerType;
+                m_cachedControllerType[side] = controllerType;
                 m_isControllerActive[side] = true;
 
                 TraceLoggingWrite(
@@ -1258,6 +1260,7 @@ namespace virtualdesktop_openxr {
                                   TLArg(side == 0 ? "Left" : "Right", "Side"),
                                   TLArg(true, "Lingering"));
             } else {
+                controllerTypeChanged = !m_cachedControllerType[side].empty();
                 m_cachedControllerType[side].clear();
                 m_isControllerActive[side] = false;
                 m_lastValidControllerPose[side].reset();
@@ -1269,7 +1272,7 @@ namespace virtualdesktop_openxr {
             }
 
             // Look for changes in controller/interaction profiles.
-            if (lastControllerType != m_cachedControllerType[side]) {
+            if (controllerTypeChanged) {
                 if (!m_cachedControllerType[side].empty()) {
                     Log("Detected controller: %s (%s)\n",
                         m_cachedControllerType[side].c_str(),

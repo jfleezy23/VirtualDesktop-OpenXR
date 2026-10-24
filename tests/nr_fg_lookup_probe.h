@@ -57,17 +57,15 @@ struct NrLookupProbe {
         ComPtr<ID3D11Texture2D> texture;
         checkHr(resource.As(&texture));
         armed = false;
+        std::cout << "NR lookup positive control: GetResource=" << gets << " textureQI=" << queries << '\n';
         require(gets == 1 && queries == 1, "real COM hooks must observe a positive control");
         gets = queries = 0;
         armed = true;
     }
-    void finish(bool postprocess) {
+    void finish() {
         armed = false;
-        const unsigned expected = postprocess ? 0 : 1;
-        std::cout << "NR final-resource COM calls: GetResource=" << gets << " textureQI=" << queries
-                  << " expected=" << expected << '\n';
-        require(gets == expected && queries == expected,
-                "NR must extract final FG texture once, or never when postprocessing replaces it");
+        std::cout << "NR final-resource COM calls: GetResource=" << gets << " textureQI=" << queries << " expected=0\n";
+        require(gets == 0 && queries == 0, "NR must reuse its retained final FG texture without COM rediscovery");
     }
     ~NrLookupProbe() {
         armed = false;

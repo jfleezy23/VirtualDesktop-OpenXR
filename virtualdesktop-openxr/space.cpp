@@ -682,7 +682,13 @@ namespace virtualdesktop_openxr {
             Action& xrAction = *(Action*)xrSpace.action;
             const ActionSet& xrActionSet = *(ActionSet*)xrAction.actionSet;
 
-            const std::string& subActionPath = getXrPath(xrSpace.subActionPath);
+            // All callers hold m_actionsAndSpacesMutex while this path reference is in use.
+            const std::string emptyPath;
+            const std::string unknownPath = "<unknown>";
+            const auto subActionPathIt = m_strings.find(xrSpace.subActionPath);
+            const std::string& subActionPath = xrSpace.subActionPath == XR_NULL_PATH ? emptyPath
+                                               : subActionPathIt == m_strings.cend() ? unknownPath
+                                                                                     : subActionPathIt->second;
             const bool isActionSetActive =
                 (std::find(m_activeActionSets.begin(), m_activeActionSets.end(), xrAction.actionSet) !=
                  m_activeActionSets.end());

@@ -497,11 +497,9 @@ namespace virtualdesktop_openxr {
         m_dlssnrOutputSwapchainLastWrittenIndex = imageIndex;
 
         // Both eye rectangles reference one packed texture. Later postprocessing
-        // supplies its own final textures, so only extract this one when final.
+        // supplies its own final textures, so only retain this one when final.
         if (m_frameGenerationMode && finalColour) {
-            ComPtr<ID3D11Resource> resource;
-            m_dlssnrOutputSwapchainSrvs[imageIndex]->GetResource(&resource);
-            CHECK_HRCMD(resource.As(&m_precompositor.finalColour[0]));
+            m_precompositor.finalColour[0] = m_dlssnrOutputSwapchainTextures[imageIndex];
             m_precompositor.finalColour[1] = m_precompositor.finalColour[0];
         }
 
@@ -517,9 +515,10 @@ namespace virtualdesktop_openxr {
 
     // For output swapchain resources.
     void OpenXrRuntime::ensureDlssnrSwapchainResources(ovrTextureFormat format, const ovrSizei& resolution) {
+        m_dlssnrOutputSwapchainImages.clear();
+        m_dlssnrOutputSwapchainTextures.clear();
+        m_dlssnrOutputSwapchainSrvs.clear();
         if (m_dlssnrOutputSwapchain) {
-            m_dlssnrOutputSwapchainImages.clear();
-            m_dlssnrOutputSwapchainSrvs.clear();
             ovr_DestroyTextureSwapChain(m_ovrSession, m_dlssnrOutputSwapchain);
             m_dlssnrOutputSwapchain = nullptr;
         }
@@ -542,6 +541,9 @@ namespace virtualdesktop_openxr {
 
         int count = -1;
         CHECK_OVRCMD(ovr_GetTextureSwapChainLength(m_ovrSession, m_dlssnrOutputSwapchain, &count));
+        m_dlssnrOutputSwapchainImages.reserve(count);
+        m_dlssnrOutputSwapchainTextures.reserve(count);
+        m_dlssnrOutputSwapchainSrvs.reserve(count);
 
         // Query the textures for the swapchain.
         for (int i = 0; i < count; i++) {
@@ -556,7 +558,6 @@ namespace virtualdesktop_openxr {
             srvDesc.Texture2D.MipLevels = 1;
             ComPtr<ID3D11ShaderResourceView> srv;
             CHECK_HRCMD(m_ovrSubmissionDevice->CreateShaderResourceView(texture.Get(), &srvDesc, srv.GetAddressOf()));
-            m_dlssnrOutputSwapchainSrvs.push_back(std::move(srv));
 
             // Export to the DLSS context.
             ComPtr<IDXGIResource1> dxgiResource;
@@ -577,7 +578,10 @@ namespace virtualdesktop_openxr {
             CHECK_HRCMD(
                 m_dlssnrDevice->OpenSharedHandle(textureHandle, IID_PPV_ARGS(d3d12Resource.ReleaseAndGetAddressOf())));
 
+            // Publish the same bank only after all its resource setup succeeds.
             m_dlssnrOutputSwapchainImages.push_back(std::move(d3d12Resource));
+            m_dlssnrOutputSwapchainTextures.push_back(std::move(texture));
+            m_dlssnrOutputSwapchainSrvs.push_back(std::move(srv));
         }
         m_dlssnrOutputSwapchainResolution = resolution;
         m_dlssnrOutputSwapchainFormat = format;
