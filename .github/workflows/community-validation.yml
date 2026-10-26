@@ -165,6 +165,10 @@ jobs:
         run: |
           $source = (Resolve-Path 'virtualdesktop-openxr').Path
           $objects = (Resolve-Path 'bin/community/build/x64/ReleaseBundle/obj').Path
+          if ($env:VDXR_TOOLSET -eq 'v145') {
+            & tests/build-nr-spatial-regression.ps1 -PolicyOnly -OutputDirectory 'bin/community/nr-spatial-policy'
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
           foreach ($fixture in @('vr_input_regression.cpp', 'vr_input_watcher_regression.cpp', 'nonnr_input_regression.cpp', 'nonnr_gpu_timer_regression.cpp', 'nonnr_async_regression.cpp', 'nonnr_copy_preprocess_regression.cpp', 'nonnr_gl_regression.cpp')) {
             & tests/vr_input_build.cmd -SourceDirectory $source -RuntimeObjectDirectory $objects -TestSource $fixture -Toolset $env:VDXR_TOOLSET
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

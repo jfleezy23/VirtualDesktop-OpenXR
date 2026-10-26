@@ -639,6 +639,10 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
     <ClCompile Include="d3d12_interop.cpp" />
     <ClCompile Include="display_refresh_rate.cpp" />
     <ClCompile Include="dlssnr.cpp" />
+    <ClCompile Include="dlssnr_spatial.cpp" />
+    <ClCompile Include="NrSpatialPipeline.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="eye_tracking.cpp" />
     <ClCompile Include="face_tracking.cpp" />
     <ClCompile Include="frame.cpp" />
@@ -681,6 +685,9 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
   </ItemGroup>
   <ItemGroup>
     <None Include="Common.hlsli" />
+    <None Include="NrSpatialCommon.hlsli" />
+    <ClInclude Include="NrSpatialPipeline.h" />
+    <ClInclude Include="NrSpatialPolicy.h" />
     <None Include="framework\dispatch_generator.py" />
     <None Include="packages.config" />
     <None Include="virtualdesktop-openxr-32.json" />
@@ -708,6 +715,12 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
     </FxCompile>
     <FxCompile Include="SharpeningCS.hlsl">
       <ShaderType>Compute</ShaderType>
+    </FxCompile>
+    <FxCompile Include="NrSpatialDownsampleCS.hlsl">
+      <ShaderType>Compute</ShaderType>
+    </FxCompile>
+    <FxCompile Include="NrSpatialResolvePS.hlsl">
+      <ShaderType>Pixel</ShaderType>
     </FxCompile>
     <FxCompile Include="UpscalingCS.hlsl">
       <ShaderType>Compute</ShaderType>

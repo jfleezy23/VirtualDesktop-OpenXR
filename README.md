@@ -1,85 +1,97 @@
-# VirtualDesktop-OpenXR
+# VirtualDesktop-OpenXR — NR and frame generation
 
-An independent development fork of [VirtualDesktop-OpenXR](https://github.com/mbucchia/VirtualDesktop-OpenXR),
-maintained by [jfleezy23](https://github.com/jfleezy23). The runtime supports OpenXR applications through
-Virtual Desktop on Windows without requiring SteamVR.
+An independent Windows runtime fork maintained by [jfleezy23](https://github.com/jfleezy23), built on
+[VirtualDesktop-OpenXR](https://github.com/mbucchia/VirtualDesktop-OpenXR). Run compatible OpenXR games through
+Virtual Desktop with optional neural rendering (NR) and **OFXR 2×/3× PC frame generation**.
 
-Development focuses on runtime correctness, resource efficiency, and experimental neural rendering. General runtime
-changes and NR development are maintained on separate branches, with regression tests and independent code review.
+**[Download the October 25 NR/FG release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.25)** ·
+[Install and try it](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.25/docs/NR-FG-QUICKSTART.md) ·
+[Controls guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.25/docs/NR-FG-CONTROLS.md) ·
+[Game routing help](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.25/docs/GAME-COMPATIBILITY.md)
 
-## Two branches, two purposes
+[Runtime ZIP](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/download/nr-fg-2026.10.25/VDXR-NR-FG-Windows-x64-2026.10.25.zip) · [Controls ZIP](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/download/nr-fg-2026.10.25/VDXR-NR-FG-Controls-Windows-x64-2026.10.25.zip)
 
-| Branch | What belongs here |
-|---|---|
-| [stable](https://github.com/jfleezy23/VirtualDesktop-OpenXR/tree/stable) (default) | General runtime fixes and small, testable reductions in CPU work. No NR/NGX integration. |
-| [experimental-nr](https://github.com/jfleezy23/VirtualDesktop-OpenXR/tree/experimental-nr) | The NR development line, including shared runtime fixes and experimental NR resource handling. x64 builds only. |
+## What's new
 
-The upstream references are recorded by commit in the contribution guide; this fork has no separate public `main` branch.
-`stable` describes the branch's purpose, not a release or a promise of compatibility with every game.
+**NR processing resolution** runs whole-eye NR at a smaller working resolution, then reconstructs the result
+at the original output size. Start at **80% processing with 100% coverage**. Your game pixel density and saved
+face/hair/detail controls remain separate. Set processing back to **100%** for the native path.
 
-## What's different in this fork
+On an RTX 4090, isolated two-eye NR GPU time fell from **6.615 to 5.050 ms** at 2048 × 2048 per eye, and from
+**14.374 to 9.643 ms** at 3072 × 3072 per eye, including reconstruction: about **24% and 33% less NR GPU time**.
+These are not game-FPS or headset-latency measurements. Quality and performance depend on the game and settings.
 
-The general runtime work includes corrections to frame/session and swapchain lifetimes, interop cleanup and retries,
-depth alignment, input state, buffer bounds, and runtime loading. It also caches preprocessing shaders and constant
-buffers, replaces per-frame layer-pointer heap storage with bounded stack storage, and removes unused precompositor
-render-target views.
+Frame generation works with **NR on or off**. NVIDIA is the default optical-flow backend; FidelityFX at full
+resolution remains experimental. See the [release notes](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.25/docs/releases/2026.10.25.md).
 
-On the NR branch, inputs are prepared only when that frame enables NR. Imports become visible only after a complete
-generation is ready, and failed NT imports retain the owned export needed for retry. NR coverage is configurable.
+![The actual VDXR NR/FG Controls app](https://raw.githubusercontent.com/jfleezy23/VirtualDesktop-OpenXR/nr-fg-2026.10.25/docs/images/controls-overview.png)
 
-The experimental branch also includes optional **OFXR 2×/3× PC frame generation** after NR, sharpening and upscaling,
-with Off / OFXR 2× / OFXR 3× in the NR Controls panel. Final real frames retain full NR processing when synthesis is late.
-GPU copies are staged before the next producer can block the shared submission context, and destination readiness uses
-a GPU fence event rather than timer polling.
+*Actual app with example settings; installation preserves existing preferences.*
 
-For installation, controls and rollback, follow the [NR/FG quick start](docs/NR-FG-QUICKSTART.md).
-Download the Windows x64 runtime and controls package from [Releases](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases).
-The standalone **VDXR NR/FG Controls** app includes Python/Tk; extract its full ZIP and run the EXE.
-Its [illustrated guide](docs/NR-FG-CONTROLS.md) covers live NR adjustments, NR-off frame generation, backend selection
-and the settings that require a game restart.
+## What you need
 
-![VDXR NR/FG Controls](docs/images/controls-overview.png)
+- A Windows x64 PC, the headset version of [Virtual Desktop](https://www.vrdesktop.net/) and its installed Streamer.
+- A game that reaches VDXR through OpenXR. Steam or Oculus ownership alone does not establish compatibility.
+- For NR: compatible NVIDIA hardware and a separately supplied, compatible licensed `nvngx_dlssnr.dll`.
+  **No proprietary NR DLL or neural model is included or downloaded.** NR was tested on an RTX 4090;
+  support for every NVIDIA GPU is not established. FG with NR off does not need the NR component.
+- Current graphics drivers and the [Microsoft Visual C++ v14 x64 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/).
+  The standalone Controls package needs no Python installation.
 
-The [FG regression guide](tests/frame-generation.md) describes supported inputs, build requirements and test limits.
-The optional OFXR-derived module has separate [LGPL-3.0 notices and corresponding-source requirements](nr-frame-generation/NOTICE.md).
+This uses Virtual Desktop's Windows streaming connection. It does not install a Steam Frame or ALVR streaming
+runtime; Frame Launcher's existing SteamVR route remains separate.
 
-These changes have local regression and build evidence. That evidence covers specific correctness and resource-creation
-behavior; it does not establish a measured headset latency, FPS, or image-quality improvement.
+## Try it
 
-## Building and testing
+1. Download the dated **runtime** and **Controls** ZIPs from the
+   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.25).
+   Follow the [side-by-side installation](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.25/docs/SIDE-BY-SIDE-RUNTIME.md)
+   to install the matching runtime DLLs and metadata in `%ProgramFiles%\VDXR-NR-FG\OpenXR`.
+   Streamer's original files stay in place.
+2. Extract the **entire** Controls ZIP, keep `_internal` beside the EXE, and run **VDXR-NR-FG-Controls.exe**.
+   Select **Custom VDXR** there and **VDXR** in Streamer. Turn Virtual Desktop's **SSW Off** for OFXR.
+3. Enable NR, set **NR processing resolution to 80%**, keep **NR coverage at 100%**, and select **OFXR 3× / NVIDIA**.
+   Existing preferences survive installation; make these choices explicitly. Fresh settings start with NR and FG
+   off, processing 100% and coverage 100%.
+4. Relaunch the game after changing runtime, FG mode or backend. Controls save automatically; there is no Apply button.
+   Check both eyes, controllers, faces/hair and head motion. Compare processing 100% versus 80% in the same scene.
 
-Start with [CONTRIBUTING.md](CONTRIBUTING.md) for build prerequisites, source checks, and the supported configurations.
-The experimental branch defaults to Visual Studio 2026 / MSVC **14.51.36231**, including CI and NR/FG builds.
-The [runtime regression guide](tests/README.md) and [input regression guide](tests/vr_input_README.md) describe the fixtures
-and their requirements.
+If the game still uses SteamVR or native Oculus, follow the
+[game routing guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.25/docs/GAME-COMPATIBILITY.md).
+Some titles need a compatible translation layer or a title-specific fix; routing to VDXR does not guarantee an NR
+visual benefit. If interpolation is unsuitable, choose **FG Off** and restart. To return to the official runtime,
+close the game, select **Stock VDXR**, then launch again.
 
-The community CI workflow checks source hygiene, builds the unsigned core runtime, compares compiler/analyzer diagnostics,
-and runs CPU regressions against matching fresh objects and headers. GPU and headset testing are separate local steps.
-Core builds do not validate an installer. Proprietary NR vendor DLLs are supplied separately and are not distributed here.
+## Branches and development
 
-This is an independent community project. For the original runtime's documentation, see the
-[upstream wiki](https://github.com/mbucchia/VirtualDesktop-OpenXR/wiki). This fork makes no Khronos conformance claim and
-is provided as-is. The runtime's [MIT license](LICENSE) and inherited [third-party notices](THIRD_PARTY) remain intact;
-the optional OFXR-derived synthesis module contains LGPL-3.0 code as documented in its [notice](nr-frame-generation/NOTICE.md).
+| Branch | Purpose |
+| --- | --- |
+| [stable](https://github.com/jfleezy23/VirtualDesktop-OpenXR/tree/stable) — default | General runtime fixes. No NR/NGX integration. |
+| [experimental-nr](https://github.com/jfleezy23/VirtualDesktop-OpenXR/tree/experimental-nr) | NR and optional OFXR development; Windows x64. NR/FG downloads come from this branch. |
 
-## Upstream credit
+This README is shared between the branches; the dated links above open the NR release's own guides and images.
+`stable` describes the general runtime branch, not universal game compatibility. There is no separate public `main` branch.
 
-This work builds on Matthieu Bucchianeri's runtime and the contributions of the Virtual Desktop team. Their authorship,
-license, and third-party notices are retained.
+For source builds, start with [CONTRIBUTING.md](CONTRIBUTING.md). NR/FG build requirements and regression scope are
+in the [dated FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.25/tests/frame-generation.md).
+Binary downloads include matching corresponding source and license notices; branch source may advance later.
 
-Original contributors:
+## Credits and licenses
 
-- Matthieu Bucchianeri
-- Guy Godin (Virtual Desktop)
-- Kyle Hendry (Virtual Desktop)
+Thanks to **Matthieu Bucchianeri**, **Guy Godin**, **Kyle Hendry**, and the Virtual Desktop team for the original runtime
+and platform. Their authorship, the runtime's [MIT license](LICENSE), and inherited [third-party notices](THIRD_PARTY)
+are retained. Additional upstream contributors include Vladimir Dranyonkov, Sarah Heinzen, Jonas Holderman,
+Heather Kemp, Mathias Peter Nordskog and Pavel Skakov. The accessibility contributions were sponsored by Microsoft.
 
-Additional upstream contributions:
+Thanks to **janblade** for [F5 Superior Scaling in OptiScaler DLSSNR Multipass](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass),
+which inspired the spatial reconstruction approach. This fork uses an independent spatial implementation,
+not F5's full temporal pipeline.
 
-- Vladimir Dranyonkov (bug fixes, on original PimaxXR)
-- Sarah Heinzen (Accessibility project, sponsored by Microsoft)
-- Jonas Holderman (Accessibility project, sponsored by Microsoft)
-- Heather Kemp (Accessibility project, sponsored by Microsoft)
-- Mathias Peter Nordskog (bug fixes)
-- Pavel Skakov (bug fixes, on original PimaxXR)
+The optional synthesis module builds on [djules75/OFXR-Bridge](https://github.com/djules75/OFXR-Bridge) and includes
+**LGPL-3.0** code. AMD FidelityFX and NVIDIA interface notices accompany it. See the
+[module notice](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.25/nr-frame-generation/NOTICE.md)
+for component terms and corresponding source. The runtime's MIT license does not replace those terms.
 
-To support the original runtime author, visit [Matthieu's GitHub sponsorship page](https://github.com/sponsors/mbucchia).
+This is an independent community project, provided as-is, with no Khronos conformance claim. For original runtime
+documentation, visit the [upstream wiki](https://github.com/mbucchia/VirtualDesktop-OpenXR/wiki).
+Support its author through [Matthieu's GitHub sponsorship page](https://github.com/sponsors/mbucchia).

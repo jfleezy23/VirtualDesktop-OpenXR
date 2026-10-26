@@ -30,11 +30,12 @@ that unprivileged programs can modify.
 
 ## Install from the release
 
-The **2026.10.24 release** supplies the guarded runtime and
+The [**2026.10.25 release**](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.25) supplies the guarded runtime and
 `CUSTOM-RUNTIME.json` together. Older runtime packages without this metadata are
 not the switcher package. Download the dated runtime ZIP and dated Controls ZIP
-from the release's current Downloads section, and verify their published SHA-256
-checksums before continuing.
+from that release, and verify them against `SHA256SUMS-2026.10.25.txt` before continuing.
+Use `VDXR-NR-FG-Windows-x64-2026.10.25.zip` and
+`VDXR-NR-FG-Controls-Windows-x64-2026.10.25.zip` together.
 
 1. Close VR games. Keep Virtual Desktop Streamer's **official** runtime installed.
    If you previously replaced its DLL with a community build, restore the original
@@ -83,7 +84,10 @@ try {
 5. Extract the **whole** Controls ZIP and open `VDXR-NR-FG-Controls.exe`, keeping
    `_internal` beside it. Accept the administrator prompt. Choose **Custom VDXR**
    in the Runtime card, keep **VDXR** selected in Streamer, then launch a game
-   normally. For OFXR, turn VD's SSW off. Keep NR coverage at 100% when enabling NR.
+   through its supported VDXR route. For OFXR, turn VD's SSW off. For the first NR
+   comparison, enable NR, set processing resolution to **80%**, keep coverage at
+   **100%**, and choose **OFXR 3× / NVIDIA**. Fresh NR settings use native 100%
+   processing and NR off; installation preserves existing preferences.
 6. To compare with the official runtime, choose **Stock VDXR** and relaunch the
    game. Neither Streamer nor Controls needs to restart.
 
@@ -99,7 +103,8 @@ the Controls app can have a later documentation/application revision.
 Close all VR games and select **Stock VDXR** in Controls. Back up the existing
 external host, FG DLL and `CUSTOM-RUNTIME.json`. Replace only those three files
 with the matching new runtime package. Preserve the separately licensed NR DLL
-and the folder's permissions. Extract the new Controls app into a fresh folder
+and the folder's permissions. The new spatial NR option keeps processing at native
+100% until explicitly changed when no prior processing preference exists. Extract the new Controls app into a fresh folder
 and update your shortcut to its EXE. The saved `custom_runtime_path` remains valid
 when the installation path stays the same; rerunning the registration block is
 safe for that same path. Select Custom and launch a game again.

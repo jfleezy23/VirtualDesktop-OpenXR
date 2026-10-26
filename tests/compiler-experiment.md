@@ -84,7 +84,7 @@ and appropriate LBR/IP conversion before accepting the resulting profile.
 Relink with `/SPGO /SPDIN:<trained.spd>` into another isolated cohort. Never mix
 private and ordinary profiles or silently reuse a changed source/tool cohort.
 
-Training should include representative VR Paradise play. Hold out other scenes
+Training should include representative gameplay. Hold out other scenes
 or resolutions, keep timing runs free of competing builds/GPU tests, and compare
 multiple processes in counterbalanced order after warmup. Separate caller-thread
 CPU cost from frame-wall time, GPU inference, presentation and headset latency.

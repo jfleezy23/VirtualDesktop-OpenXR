@@ -93,10 +93,12 @@ def run(result_path):
             check(winreg.QueryValueEx(key, "PrivateTestMarker")[0] == 1, "process-private registry mapping")
         before = snapshot()
         root = tk.Tk()
+        root.withdraw()
         app = gui.VDXRRegistryApp(root)
         root.update()
         check(snapshot() == before, "normal startup is read-only")
         check(app.variables[-1].get() == 100 and not app.enabled.get(), "fresh defaults: NR off, coverage 100")
+        check(app.processing_resolution.get() == 100, "fresh processing resolution is native 100")
         runtime = gui.runtime_selection
         runtime_path = runtime.RUNTIME_REGISTRY_PATH
         check(app.runtime_selection.get() == runtime.STOCK_LABEL, "missing redirect displays Stock VDXR")
@@ -142,6 +144,10 @@ def run(result_path):
         app.slider_widgets[-1].set(94)
         wait_for_callbacks()
         check(read("FoveationSize")[0] == 94, "coverage debounce persists")
+        app.processing_resolution_slider.set(90)
+        wait_for_callbacks()
+        check(read(gui.PROCESSING_RESOLUTION_VALUE_NAME) == (90, winreg.REG_DWORD)
+              and read("FoveationSize")[0] == 94, "processing resolution saves 90 independently of coverage")
         mode_selector = control(ttk.Combobox, "textvariable", app.frame_generation)
         backend_selector = control(ttk.Combobox, "textvariable", app.frame_generation_backend)
         check(str(mode_selector.cget("state")) == str(backend_selector.cget("state")) == "readonly",
@@ -157,15 +163,22 @@ def run(result_path):
             root.update()
             check(read(gui.FRAME_GENERATION_BACKEND_NAME)[0] == value, f"FG backend {value}")
         app.slider_widgets[-1].set(95)
+        app.processing_resolution_slider.set(85)
         app.on_close()
         root = None
         check(read("FoveationSize")[0] == 95, "closing flushes pending coverage")
+        check(read(gui.PROCESSING_RESOLUTION_VALUE_NAME) == (85, winreg.REG_DWORD),
+              "closing flushes pending processing resolution")
         root = tk.Tk()
+        root.withdraw()
         app = gui.VDXRRegistryApp(root)
         check(app.variables[-1].get() == 95 and app.enabled.get(), "restart restores saved values")
+        check(app.processing_resolution.get() == 85, "restart restores processing resolution")
         control(ttk.Button, "text", "Reset NR settings").invoke()
         check([read(name)[0] for name in gui.VALUE_NAMES] == list(gui.VALUE_DEFAULTS), "reset persists every NR default immediately")
         check(read(gui.ENABLE_VALUE_NAME)[0] == 0, "reset disables NR")
+        check(read(gui.PROCESSING_RESOLUTION_VALUE_NAME) == (100, winreg.REG_DWORD)
+              and app.processing_resolution.get() == 100, "reset restores native processing resolution")
         check(read(gui.FRAME_GENERATION_VALUE_NAME)[0] == 3 and read(gui.FRAME_GENERATION_BACKEND_NAME)[0] == 1,
               "NR reset preserves FG selections")
         check(snapshot()[runtime_path] == runtime_before_nr and app.runtime_selection.get() == runtime.CUSTOM_LABEL,
@@ -173,14 +186,16 @@ def run(result_path):
         app.on_close()
         root = None
         for name in ("DLSSNR_Intensity", gui.ENABLE_VALUE_NAME, gui.FRAME_GENERATION_VALUE_NAME,
-                     gui.FRAME_GENERATION_BACKEND_NAME):
+                     gui.FRAME_GENERATION_BACKEND_NAME, gui.PROCESSING_RESOLUTION_VALUE_NAME):
             set_value(name, "malformed", winreg.REG_SZ)
         set_value(runtime.REDIRECT_VALUE_NAME, 8, path=runtime_path)
         malformed_before = snapshot()
         root = tk.Tk()
+        root.withdraw()
         app = gui.VDXRRegistryApp(root)
         check("invalid" in app.status.get().lower(), "malformed settings open with warning")
         check(not app.enabled.get() and app.variables[1].get() == 100, "malformed settings have safe displayed defaults")
+        check(app.processing_resolution.get() == 100, "malformed processing resolution displays native 100")
         check(app.runtime_selection.get() == runtime.OTHER_LABEL and snapshot() == malformed_before,
               "malformed runtime selection opens honestly without writes")
         result.update(tcl_patchlevel=root.tk.call("info", "patchlevel"),

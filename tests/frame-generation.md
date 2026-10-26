@@ -154,7 +154,7 @@ synthetic colors in the current real frame's camera plane; do not interpolate
 the submitted pose to a different plane. Depth-unaware translation and
 disocclusions need visual acceptance.
 
-Use VR Paradise with identical scene, refresh, resolution and 100% NR settings
+Use a compatible OpenXR title with identical scene, refresh, resolution and 100% NR settings
 in fresh Off/2X/3X sessions. Verify stereo fusion, face/hair detail in motion,
 occlusions and controller response. Record real/generated/repeated/dropped
 frames, GPU times, queue age and actual native presentation cadence. Compare
