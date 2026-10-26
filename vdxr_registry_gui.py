@@ -12,6 +12,7 @@ import vdxr_runtime_selection as runtime_selection
 
 REGISTRY_PATH = r"SOFTWARE\Virtual Desktop, Inc.\OpenXR"
 ENABLE_VALUE_NAME = "DLSSNR_Enabled"
+PROCESSING_RESOLUTION_VALUE_NAME = "DLSSNR_ProcessingResolution"
 VALUE_NAMES = (
     "DLSSNR_Style",
     "DLSSNR_Intensity",
@@ -266,8 +267,26 @@ def read_enabled(errors=None):
     return bool(read_nr_value(ENABLE_VALUE_NAME, 0, 1, [] if errors is None else errors))
 
 
+def read_processing_resolution(errors=None):
+    errors = [] if errors is None else errors
+    value = read_nr_value(PROCESSING_RESOLUTION_VALUE_NAME, 100, 100, errors)
+    if value < 50:
+        errors.append("Invalid saved NR processing resolution; showing native 100%.")
+        return 100
+    return value
+
+
+def write_processing_resolution(value):
+    if type(value) is not int or not 50 <= value <= 100:
+        raise ValueError("NR processing resolution must be an integer from 50 to 100.")
+    write_value(PROCESSING_RESOLUTION_VALUE_NAME, value)
+
+
 def write_value(name, value):
-    maximum = 1 if name == ENABLE_VALUE_NAME else VALUE_MAXIMUMS[VALUE_NAMES.index(name)]
+    if name == PROCESSING_RESOLUTION_VALUE_NAME:
+        maximum = 100
+    else:
+        maximum = 1 if name == ENABLE_VALUE_NAME else VALUE_MAXIMUMS[VALUE_NAMES.index(name)]
     value = max(0, min(maximum, int(value)))
     with winreg.CreateKeyEx(
         winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, 0, winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY
@@ -292,6 +311,7 @@ class VDXRRegistryApp:
         errors = []
         self.saved_values = read_values(errors)
         self.saved_enabled = read_enabled(errors)
+        self.saved_processing_resolution = read_processing_resolution(errors)
 
         frame = ttk.Frame(root, padding=(20, 16), style="App.TFrame")
         frame.grid()
@@ -387,8 +407,31 @@ class VDXRRegistryApp:
                 row=index + 2, column=2, sticky="e", padx=(14, 0)
             )
 
+        self.processing_resolution_save_id = None
+        self.processing_resolution = tk.IntVar(value=self.saved_processing_resolution)
+        self.processing_resolution.trace_add("write", self.on_processing_resolution_changed)
+        ttk.Label(nr, text="NR processing resolution (%)", style="Card.TLabel").grid(
+            row=8, column=0, sticky="w", padx=(0, 16)
+        )
+        self.processing_resolution_slider = tk.Scale(
+            nr, from_=50, to=100, resolution=1, variable=self.processing_resolution,
+            orient="horizontal", length=260, showvalue=False,
+            background="#B2C4FF", foreground=COLORS["text"], troughcolor="#56627A",
+            activebackground="#E7EDFF", sliderrelief="flat", sliderlength=18,
+            width=8, borderwidth=0, highlightthickness=1,
+            highlightbackground=COLORS["panel"], highlightcolor=COLORS["accent"], takefocus=True,
+        )
+        self.processing_resolution_slider.grid(row=8, column=1, sticky="ew")
+        ttk.Label(nr, textvariable=self.processing_resolution, style="Value.TLabel", width=3, anchor="e").grid(
+            row=8, column=2, sticky="e", padx=(14, 0)
+        )
+        ttk.Label(nr, text="Model grid, not Coverage area. Native 100%; try 80% experimentally.\n"
+                  "Requires Coverage 100% and a supported custom runtime; otherwise native NR.",
+                  style="Hint.TLabel", wraplength=592).grid(
+            row=9, column=0, columnspan=3, sticky="w", pady=(10, 0)
+        )
         ttk.Label(nr, text="Changes apply during play.  100% coverage recommended.", style="Hint.TLabel").grid(
-            row=8, column=0, columnspan=3, sticky="w", pady=(10, 0)
+            row=10, column=0, columnspan=3, sticky="w", pady=(6, 0)
         )
 
         fg_panel = RoundedPanel(frame)
@@ -495,6 +538,7 @@ class VDXRRegistryApp:
         state = tk.NORMAL if self.enabled.get() else tk.DISABLED
         for slider in self.slider_widgets:
             slider.configure(state=state)
+        self.processing_resolution_slider.configure(state=state)
 
     def on_enabled_changed(self):
         try:
@@ -508,6 +552,12 @@ class VDXRRegistryApp:
                 # Explicit enable also makes any displayed fallback values real, verified settings.
                 for index, variable in enumerate(self.variables[:-1]):
                     if not self.save_nr_value(index, variable):
+                        self.enabled.set(self.saved_enabled)
+                        self.set_slider_state()
+                        return
+                if self.processing_resolution_save_id is not None:
+                    self.cancel_processing_resolution_save()
+                    if not self.save_processing_resolution():
                         self.enabled.set(self.saved_enabled)
                         self.set_slider_state()
                         return
@@ -527,12 +577,14 @@ class VDXRRegistryApp:
 
     def reset_defaults(self):
         self.cancel_foveation_save()
+        self.cancel_processing_resolution_save()
         self.updating = True
         try:
             write_value(ENABLE_VALUE_NAME, 0)
             for name, default in zip(VALUE_NAMES, VALUE_DEFAULTS):
                 write_value(name, default)
-            self.status.set("NR reset: disabled, coverage 100%. Runtime and FG selections retained.")
+            write_processing_resolution(100)
+            self.status.set("NR reset: disabled, coverage and processing resolution 100%. Runtime and FG selections retained.")
         except PermissionError:
             self.status.set("Administrator access is required to write HKLM.")
         except OSError as error:
@@ -544,6 +596,7 @@ class VDXRRegistryApp:
             self.enabled.set(self.saved_enabled)
             for variable, value in zip(self.variables, self.saved_values):
                 variable.set(value)
+            self.refresh_processing_resolution(errors)
             self.set_slider_state()
             self.updating = False
             if errors:
@@ -587,11 +640,59 @@ class VDXRRegistryApp:
             self.root.after_cancel(self.foveation_save_id)
             self.foveation_save_id = None
 
+    def on_processing_resolution_changed(self, *_args):
+        if self.updating:
+            return
+        self.cancel_processing_resolution_save()
+        self.processing_resolution_save_id = self.root.after(400, self.save_processing_resolution)
+
+    def save_processing_resolution(self):
+        self.processing_resolution_save_id = None
+        try:
+            value = self.processing_resolution.get()
+            write_processing_resolution(value)
+        except PermissionError:
+            self.refresh_processing_resolution()
+            self.status.set("Administrator access is required to save NR processing resolution.")
+        except (OSError, ValueError) as error:
+            self.refresh_processing_resolution()
+            self.status.set(f"NR processing resolution error: {error}")
+        else:
+            self.saved_processing_resolution = value
+            self.status.set(f"Saved NR processing resolution = {value}% · supported custom runtime required")
+            return True
+        return False
+
+    def cancel_processing_resolution_save(self):
+        if self.processing_resolution_save_id is not None:
+            self.root.after_cancel(self.processing_resolution_save_id)
+            self.processing_resolution_save_id = None
+
+    def refresh_processing_resolution(self, errors=None):
+        self.cancel_processing_resolution_save()
+        self.saved_processing_resolution = read_processing_resolution(errors)
+        was_updating = self.updating
+        self.updating = True
+        try:
+            self.processing_resolution.set(self.saved_processing_resolution)
+        finally:
+            self.updating = was_updating
+
     def on_close(self):
-        if self.foveation_save_id is not None:
-            self.cancel_foveation_save()
+        pending_processing = self.processing_resolution_save_id is not None
+        pending_coverage = self.foveation_save_id is not None
+        self.cancel_processing_resolution_save()
+        self.cancel_foveation_save()
+        error_status = None
+        if pending_processing:
+            if not self.save_processing_resolution():
+                error_status = self.status.get()
+        if pending_coverage:
             if not self.save_foveation_size(self.variables[-1]):
-                return
+                error_status = self.status.get()
+        if error_status is not None:
+            self.status.set(error_status)
+            return
         self.root.destroy()
 
 

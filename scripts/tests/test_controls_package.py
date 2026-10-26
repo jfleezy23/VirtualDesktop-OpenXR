@@ -82,6 +82,8 @@ class ControlsPackageTests(unittest.TestCase):
             (snapshot / "docs/NR-FG-CONTROLS.md").write_bytes(guide)
             runtime_guide = b"# Runtime selection\nUse the Runtime selector for the next game launch.\n"
             (snapshot / "docs/SIDE-BY-SIDE-RUNTIME.md").write_bytes(runtime_guide)
+            game_guide = b"# Game routing\nKeep a working original launch route.\n"
+            (snapshot / "docs/GAME-COMPATIBILITY.md").write_bytes(game_guide)
             images = {"controls-overview.png": b"overview\r\nbytes", "controls-fg-only.png": b"backend\r\nbytes"}
             for name, data in images.items():
                 (snapshot / "docs/images" / name).write_bytes(data)
@@ -90,6 +92,8 @@ class ControlsPackageTests(unittest.TestCase):
             self.assertTrue((bundle / "SIDE-BY-SIDE-RUNTIME.md").is_file(), "Missing linked offline runtime guide")
             self.assertEqual((bundle / "SIDE-BY-SIDE-RUNTIME.md").read_bytes(), runtime_guide)
             self.assertIn("docs/SIDE-BY-SIDE-RUNTIME.md", module.SOURCE_FILES)
+            self.assertEqual((bundle / "GAME-COMPATIBILITY.md").read_bytes(), game_guide)
+            self.assertIn("docs/GAME-COMPATIBILITY.md", module.SOURCE_FILES)
             for name, data in images.items():
                 self.assertEqual((bundle / "images" / name).read_bytes(), data)
                 self.assertIn("docs/images/" + name, module.SOURCE_FILES)
@@ -97,6 +101,7 @@ class ControlsPackageTests(unittest.TestCase):
             self.assertIn("images/controls-overview.png", hashes)
             self.assertIn("images/controls-fg-only.png", hashes)
             self.assertIn("SIDE-BY-SIDE-RUNTIME.md", hashes)
+            self.assertIn("GAME-COMPATIBILITY.md", hashes)
 
     def test_missing_runtime_guide_prevents_incomplete_offline_package(self):
         module = self.builder()
