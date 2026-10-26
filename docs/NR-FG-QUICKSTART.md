@@ -1,118 +1,112 @@
-# VDXR NR and OFXR frame generation
+# Try VDXR NR and OFXR frame generation
 
-This experimental Windows x64 package adds neural rendering and optional PC-side **OFXR 2×/3×** generation to the
-Virtual Desktop OpenXR runtime. It includes the runtime, optional synthesis DLL and NR Controls. It uses Virtual Desktop
-Streamer and the headset's existing Virtual Desktop connection. It does not provide a Steam Frame streaming runtime.
+The [October 25 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.25)
+adds adjustable NR processing resolution and optional **OFXR 2×/3× PC frame generation** to Virtual Desktop's
+OpenXR runtime. Start with **80% processing / 100% coverage** to evaluate reduced NR GPU work at the same output size.
+Frame generation also works with NR off.
 
-The package was tested locally on an RTX 4090. Compatible NVIDIA hardware and a separately supplied, licensed
-`nvngx_dlssnr.dll` are required for NR. The proprietary NR DLL is not included in this repository or release.
+## Before installing
 
-Use a current NVIDIA display driver and the latest
+Connect your headset through its Virtual Desktop app and Windows Streamer. You need a compatible OpenXR game,
+current graphics drivers and the
 [Microsoft Visual C++ v14 x64 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/).
-The synthesis DLL uses the Microsoft C++ runtime; the host also needs the Vulkan loader supplied by the graphics driver.
-End users do not need Visual Studio, a compiler, or Python for the standalone Controls app.
+The graphics driver supplies the Vulkan loader needed by the host.
 
-## Install
+NR requires compatible NVIDIA hardware and a separately supplied, compatible licensed `nvngx_dlssnr.dll`.
+**No proprietary NR DLL or model is included or downloaded.** This build was tested on an RTX 4090; support for
+every NVIDIA GPU is not established. FG with NR off does not require the NR component.
 
-1. Install Virtual Desktop Streamer normally and connect the headset. Close VR games.
-2. Download the **2026.10.24 release's** dated runtime and Controls packages
-   from [Releases](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases).
-   Keep the matching guarded host, synthesis DLL and `CUSTOM-RUNTIME.json` together.
-3. Follow [the complete side-by-side setup](SIDE-BY-SIDE-RUNTIME.md): put the runtime
-   in the protected `%ProgramFiles%\VDXR-NR-FG\OpenXR` folder and register its managed
-   path. Keep Streamer's official files in place. Restore the official vendor DLL
-   first if an earlier installation replaced it.
-4. Open Controls, choose **Custom VDXR**, and keep **VDXR** selected in Streamer.
-   Launch games normally. Choose Stock and relaunch the game to compare with VD's
-   official runtime; Streamer can remain open.
+End users do not need Python, Visual Studio or a compiler. This package uses Virtual Desktop's Windows connection;
+it does not provide Steam Frame or ALVR streaming. Frame Launcher's separate SteamVR route is unchanged.
 
-This setup preserves existing NR/FG settings and runtime registration. Streamer
-updates do not overwrite the separate folder, but a future vendor runtime may
-decline an older custom build under its existing version-compatibility check.
+## Install once
 
-## Open NR Controls
+1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.10.25.zip` and
+   `VDXR-NR-FG-Controls-Windows-x64-2026.10.25.zip` from the
+   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.25).
+   Check them against `SHA256SUMS-2026.10.25.txt`.
+2. Follow the [complete side-by-side setup](SIDE-BY-SIDE-RUNTIME.md). It installs the matching host DLL, FG DLL
+   and `CUSTOM-RUNTIME.json` under `%ProgramFiles%\VDXR-NR-FG\OpenXR`, then registers the managed path.
+   Leave Streamer's official files in place. Restore them first if an older installation replaced them.
+3. Extract the **entire** Controls ZIP. Run **VDXR-NR-FG-Controls.exe**, keeping `_internal` beside it.
+   Accept the administrator prompt to save settings. This community app is unsigned; opening it preserves
+   existing preferences. It does not install runtime DLLs.
+4. Select **Custom VDXR** in Controls and **VDXR** in Streamer. The switch takes effect on the next game launch.
 
-Download the dated **VDXR-NR-FG-Controls-Windows-x64-2026.10.24.zip** from the release's current Downloads section. Extract the entire folder and open
-**VDXR-NR-FG-Controls.exe**, keeping `_internal` beside it. Python and Tk are bundled. The unsigned community app
-requests administrator access to save settings; opening it only reads existing settings and does not reset them.
+For upgrades, use the side-by-side guide's backup and replacement steps with all VR games closed. The new Controls
+app can live in its own extracted folder. Existing NR, appearance and FG settings are preserved.
 
-See the [illustrated Controls guide](NR-FG-CONTROLS.md) for each setting, automatic saving and troubleshooting.
+## First comparison
 
-![The standalone dark Controls app with NR at 100% and OFXR 3× selected](images/controls-overview.png)
+1. Turn Virtual Desktop's **SSW Off**, and disable any separate external FG layer.
+2. Enable NR. Set **NR processing resolution (%) to 80** and **NR coverage (%) to 100**.
+   Keep your face, hair, tone and detail choices as they are.
+3. Select **OFXR 3×** and **NVIDIA (default)**. Close and relaunch the game after changing FG mode, backend or runtime.
+4. Check that both eyes align, controllers work, and faces, hair, dark scenes and head motion look acceptable.
+   Compare processing **100%** against **80%** in the same scene, with game resolution and other settings held fixed.
 
-The runtime ZIP also retains the optional source script. If you prefer that route, install **64-bit Python 3.13**
-with Tcl/Tk and the Python launcher. Copy both `vdxr_registry_gui.py` and its adjacent
-`vdxr_runtime_selection.py` into the OpenXR folder, backing up existing copies before
-replacing them, then run this from PowerShell in that folder:
+![The actual Controls app with the spatial NR control](images/controls-overview.png)
 
-```powershell
-pyw -3.13 .\vdxr_registry_gui.py
-```
+*Actual app with example settings, not installation defaults.*
 
-Both versions edit VD Streamer's same 64-bit runtime registry settings. The standalone app does not install runtime
-DLLs, and its extracted folder can be stored outside the Streamer installation. Its Stock / Custom selector uses
-the separately verified [side-by-side installation](SIDE-BY-SIDE-RUNTIME.md) for the next VR launch.
+Changes save automatically; there is **no Apply button**. NR processing, coverage and appearance controls can be
+adjusted during play. Fresh settings start with NR off, processing **100%**, coverage **100%**, FG off and NVIDIA
+selected. Installation does not enable the recommended configuration for you.
 
-## Choose a mode
+Processing resolution and coverage do different jobs: **80% processing** uses a smaller whole-eye NR working image
+and reconstructs its result at native output size. **100% coverage** keeps NR across the whole eye. Game pixel
+density and final output dimensions do not change. Processing **100%** bypasses the new spatial work; zero NR
+strength preserves the original RGB. Saved appearance settings are not replaced by an 80% preset.
 
-1. Turn **SSW Off** in Virtual Desktop. Disable any external OFXR frame-generation layer for this comparison.
-2. In NR Controls, leave NR off for ordinary frame generation, or enable it for neural rendering plus FG. Keep **FoveationSize / NR coverage at 100%** when NR is on; FG does not lower coverage or change face/hair settings.
-3. Select **Off**, **OFXR 2×** or **OFXR 3×** under PC frame generation. The selection saves immediately.
-4. Close and relaunch the game after changing FG mode. NR strength/detail controls can be adjusted during play.
+In an isolated RTX 4090 benchmark,
+complete two-eye NR GPU time improved from 6.615 to 5.050 ms at 2048 × 2048 per eye, and from 14.374 to 9.643 ms
+at 3072 × 3072, including reconstruction. These are NR-region timings, not game-FPS or latency measurements.
+See the [release notes](releases/2026.10.25.md) for scope and remaining limits.
 
-The **PC frame-generation backend** selector offers **NVIDIA (default)** and experimental
-**FidelityFX (full resolution)**. It saves immediately; restart the game after changing it.
-NVIDIA retains its existing Medium/50% optical-flow settings. FidelityFX uses the full per-eye image
-for motion estimation. This setting does not change game resolution, NR coverage, or NR detail controls.
-Keep NR coverage at 100%. Compare hair, faces and head motion before choosing a backend for regular play.
-An explicit FidelityFX request requires a matching module; an older or unsupported module leaves FG
-unavailable for that session and retains real frames, with the cause recorded in the runtime log.
+## Choose your combination
 
-Off disables OFXR and retains the selected ordinary or NR processing path. OFXR 2× adds one synthetic frame between real frames; 3× adds two when the runtime's eligibility
-and deadline checks pass. These are PC-generated frames; VD's separate headset-side SSW should remain off for this test.
-The selector shows the saved request, not proof that FG is active in the current game.
+| NR | FG | Result |
+| --- | --- | --- |
+| Off | Off | Ordinary custom-runtime rendering |
+| On | Off | NR without PC frame generation |
+| Off | OFXR 2× or 3× | PC frame generation from the ordinary stereo images |
+| On | OFXR 2× or 3× | NR followed by PC frame generation; keep coverage at 100% |
 
-FG accepts an eligible full color-only stereo projection through VDXR. With NR off, the current independent path supports DirectX 11 and DirectX 12. When NR is on, coverage must be at least 90%; use 100% for this configuration. Unsupported depth, overlay or format/layout submissions retain the ordinary path.
-Games running through native Oculus or SteamVR do not acquire these features simply because the files are installed;
-those titles need a compatible OpenXR translation path. NR and OFXR are independent: NR off with OFXR 2× or 3× processes the ordinary final stereo images. Unsupported inputs or missed deadlines can still fall back to real frames.
+OFXR 2× can add one generated frame between real frames; 3× can add two when eligibility and timing allow.
+Unsupported submissions and missed deadlines retain real frames. The selector shows the saved request, not proof
+that every frame was generated. This is separate from Virtual Desktop's headset-side SSW.
 
-## First check
+Start with NVIDIA. **FidelityFX (full resolution)** remains experimental and may show interpolation artifacts.
+Restart the game after changing backends. Backend selection does not change NR coverage, appearance controls or
+game pixel density. An explicit unsupported/mismatched backend request can leave FG unavailable for that session.
 
-Use fresh Off / 2× / 3× sessions at the same refresh rate and resolution. Check stereo alignment, hair and faces in motion,
-occlusions and controller response. Keep NR coverage at 100%. If an artifact or startup issue occurs, select FG Off and
-restart the game. The selected mode is a request, not confirmation that every frame was generated. Confirm actual
-synthetic submissions when validating a new game; perceived smoothness and a displayed FPS counter alone do not establish
-which component supplied the frames.
+## Check the game's route
 
-Rapid head turns can still produce interpolation artifacts. This remains an experimental frame-generation path;
-the recovery and synchronization corrections do not establish artifact-free head motion in every title.
-The reported left-offset multiple-image issue and separate exposure-change artifact are not established as fixed by
-this release. The work-reduction changes preserve the tested image output; combined headset acceptance of this
-latest build remains pending. See the [release and validation notes](releases/2026.10.24.md) for measured scope.
+Use the Virtual Desktop overlay's **Runtime: VDXR** indication to check that the game reaches VDXR. It does not
+identify the custom build or confirm NR/FG activity. A saved Custom selection alone does not prove a running game
+loaded it; restart the game after switching.
 
-### Automatic color handoff
+Steam and Oculus games may require different launch choices or compatible translation layers. Follow the
+[game routing guide](GAME-COMPATIBILITY.md) before changing files or settings. Native Oculus and OpenVR games are
+not automatically converted by selecting VDXR. Routing a game successfully does not guarantee an NR visual benefit.
 
-The shared runtime handoff supports 8-bit RGBA and BGRA, including linear/sRGB and typeless textures. Both eyes may use
-different channel layouts. Packed, separate, cropped, and resolved array/mip images use the same path; no game profile or
-launch flag is needed. BGRA conversion preserves encoded color and alpha bytes. NR output, coverage, and appearance settings
-are unchanged, and the existing RGBA copy path remains available.
+## If something looks wrong
 
-Unsupported higher-precision or X8 formats retain the original real-frame path rather than being silently reduced to
-8-bit input. For development captures, `FG_Capture` records accepted slot plans and `FG_Present` identifies the source serial,
-slot, and whether a native submission was synthetic or a fallback repeat. These are software submissions, not a measurement
-of physical headset scanout. Regular gameplay telemetry remains off.
+- For ghosting or interpolation artifacts, choose **FG Off** and relaunch. NR can remain on independently.
+- To compare NR quality, keep coverage at **100%** and return processing to **100%**, or disable NR.
+- If settings fail to save, read the Controls status line and check administrator access.
+- If custom loading fails after a Streamer update, return to Stock and check the
+  [side-by-side compatibility notes](SIDE-BY-SIDE-RUNTIME.md#updates-and-verification).
+- To return to the official runtime, close the game, select **Stock VDXR**, then launch again. Streamer may stay open.
+  If an older install overwrote vendor DLLs, restore their backup or reinstall/update Streamer first.
 
-## Return to the official runtime
-
-Close the game, choose **Stock VDXR** in Controls, and launch again. The switch
-removes only the development redirect and preserves NR/FG preferences. Keep the
-external files until no process is using them. See the side-by-side guide for
-manual recovery and upgrades. If reverting an older installation that overwrote
-Streamer's DLLs, restore the original vendor backup or reinstall/update Streamer;
-removing a redirect alone cannot restore a replaced file.
+Rapid head turns, ghosting and exposure-change artifacts can remain. This release does not establish universal
+game compatibility, artifact-free motion or identical perceived detail at every processing percentage.
 
 ## Source and licenses
 
-The runtime retains its original MIT license. The optional synthesis module includes the pinned OFXR core under LGPL-3.0,
-with FidelityFX and NVIDIA interface notices retained. Each binary release includes licenses and a matching corresponding
-source archive. See [the module notice](../nr-frame-generation/NOTICE.md) and [the regression/build guide](../tests/frame-generation.md).
+The host retains its MIT license. The optional synthesis module includes OFXR code under LGPL-3.0, with AMD
+FidelityFX and NVIDIA interface notices retained. Matching corresponding source and rebuild instructions accompany
+the release; see the [module notice](../nr-frame-generation/NOTICE.md). Thanks to
+[janblade's F5 project](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass) for the spatial reconstruction
+inspiration. This is an independent spatial implementation, not F5's full temporal pipeline or copied F5 GPL source.

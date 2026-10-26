@@ -5,7 +5,7 @@ Adjust neural rendering (NR) during play, or select PC-side OFXR frame generatio
 for the next game session. Frame generation also works with NR off. The Runtime
 selector chooses stock or custom VDXR for the next VR launch.
 
-![VDXR Controls showing neural rendering enabled at 100% coverage, OFXR 3× and NVIDIA](images/controls-overview.png)
+![The actual Controls app showing processing resolution, full coverage and OFXR settings](images/controls-overview.png)
 
 *The screenshots show the actual app with example settings. The appearance sliders are
 examples, not a preset applied by installation.*
@@ -30,11 +30,12 @@ examples, not a preset applied by installation.*
 5. Choose **Off**, **OFXR 2×** or **OFXR 3×**, then an optical-flow backend.
    Start with **NVIDIA (default)**. Fully close and relaunch the game after changing
    either FG selector.
-6. For NR, enable **Enable NR** and keep **NR coverage (%) at 100**. The toggle and
-   appearance sliders save automatically and can be adjusted during play.
+6. For the first NR comparison, enable **Enable NR**, set **NR processing resolution (%) to 80**,
+   and keep **NR coverage (%) at 100**. The toggle, processing, coverage and appearance controls
+   save automatically and can be adjusted during play. Compare processing 100% and 80% in the same scene.
 
 Opening the app preserves existing saved settings. Fresh settings show NR off, FG off,
-NVIDIA selected and NR coverage at **100%**. If coverage has never been saved, the status
+NVIDIA selected, NR processing resolution at **100%** and NR coverage at **100%**. If coverage has never been saved, the status
 message asks you to toggle NR off/on to persist the displayed defaults. Enabling NR
 saves the displayed coverage before turning NR on.
 
@@ -54,15 +55,22 @@ NR component.
 | Local tone | NR local-tone strength, 0–100 | During play |
 | Structure detail | NR structure-detail strength, 0–100 | During play |
 | Skin detail | NR skin-detail strength, 0–100 | During play |
-| NR coverage (%) | The portion of the image processed by NR; use **100%** | During play, saved after a short pause while dragging |
+| NR processing resolution (%) | Whole-eye NR working resolution, **50–100%**; start at **80%**, native default **100%** | During play, saved after a short pause while dragging |
+| NR coverage (%) | The portion of the image processed by NR; keep **100%** | During play, saved after a short pause while dragging |
 | Mode | Off, OFXR 2× or OFXR 3× | After restarting the game |
 | Optical-flow backend | NVIDIA or experimental FidelityFX at full resolution | After restarting the game |
 
 There is no Apply button. The status line confirms a saved change or reports an error.
 The NR sliders are disabled while NR is off; FG remains selectable. Closing the app
-flushes a pending coverage change and leaves the saved settings in place.
+flushes pending processing/coverage changes and leaves the saved settings in place.
 
-**Reset NR settings** disables NR and saves its defaults, including 100% coverage.
+**Processing resolution is independent of coverage.** Reducing processing to 80% runs NR on a smaller
+whole-eye working image and reconstructs the result at native output size. Coverage 100% still includes
+the whole eye. It does not lower game pixel density, alter final output dimensions or replace the appearance
+settings. Processing 100% uses the native path and bypasses the new spatial work. Zero NR strength preserves
+the original RGB. Compare faces, hair, dark areas and movement before settling on a processing percentage.
+
+**Reset NR settings** disables NR and saves its defaults, including 100% processing resolution and 100% coverage.
 It replaces the saved NR appearance choices but preserves the FG mode and backend.
 Installing or upgrading the controls app does not reset your hair/face settings.
 
@@ -93,7 +101,7 @@ Leave **Enable NR** off, choose OFXR 2× or 3×, and restart the game. OFXR then
 the ordinary final stereo images. Selecting **Off** disables OFXR while retaining the
 selected ordinary or NR processing path.
 
-![VDXR Controls showing NR off with OFXR 2× and FidelityFX full resolution selected](images/controls-fg-only.png)
+![VDXR Controls showing NR off with OFXR 3× and NVIDIA selected](images/controls-fg-only.png)
 
 NVIDIA is the default optical-flow backend. FidelityFX uses full-resolution inputs and
 remains experimental; compare head motion, occlusions and image stability before
@@ -111,7 +119,8 @@ the frames.
 
 - These settings affect games that actually reach the patched VDXR runtime. A native
   Oculus or SteamVR game needs a compatible translation path; installing this app does
-  not reroute it. **Frame Launcher's separate SteamVR route is unaffected.**
+  not reroute it. See the [game routing guide](GAME-COMPATIBILITY.md).
+  **Frame Launcher's separate SteamVR route is unaffected.**
 - The app does not control streaming codecs, bandwidth, headset refresh rate, SSW or
   game pixel density. Make those changes in Virtual Desktop, the headset or the game.
 - If a change fails to save, read the status line and confirm administrator access.
@@ -119,6 +128,8 @@ the frames.
 - If FG causes artifacts or a startup problem, select **Off** and restart the game.
   NR can remain enabled independently. Rapid head motion can still reveal interpolation
   artifacts; this is an experimental build.
+- If NR loses too much detail at a reduced percentage, return processing to **100%**
+  while keeping coverage at 100%, or disable NR to compare. Installation preserves saved appearance settings.
 - You can close the controls window during gameplay. To remove the app, delete its
   extracted folder; the saved runtime settings remain.
 
