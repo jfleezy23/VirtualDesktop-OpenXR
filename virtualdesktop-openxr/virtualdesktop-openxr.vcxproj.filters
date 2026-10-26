@@ -44,6 +44,12 @@
     <ClInclude Include="runtime.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="NrSpatialPolicy.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="NrSpatialPipeline.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="utils.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -208,6 +214,12 @@
     <ClCompile Include="dlssnr.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="dlssnr_spatial.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="NrSpatialPipeline.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="virtualdesktop-openxr.json" />
@@ -220,12 +232,21 @@
     <None Include="Common.hlsli">
       <Filter>Shaders</Filter>
     </None>
+    <None Include="NrSpatialCommon.hlsli">
+      <Filter>Shaders</Filter>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="resource.rc" />
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="FullScreenQuadVS.hlsl">
+      <Filter>Shaders</Filter>
+    </FxCompile>
+    <FxCompile Include="NrSpatialDownsampleCS.hlsl">
+      <Filter>Shaders</Filter>
+    </FxCompile>
+    <FxCompile Include="NrSpatialResolvePS.hlsl">
       <Filter>Shaders</Filter>
     </FxCompile>
     <FxCompile Include="AlphaBlendingCS.hlsl">

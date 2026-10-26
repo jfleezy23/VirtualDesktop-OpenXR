@@ -29,6 +29,7 @@
 #include "accessibility.h"
 #include "frame_generation.h"
 #include "utils.h"
+#include "NrSpatialPipeline.h"
 
 #include "BodyState.h"
 #include <hand_simulation.h>
@@ -415,6 +416,7 @@ namespace virtualdesktop_openxr {
             float localStructureStrength{0.7f};
             float skinStructureStrength{0.5f};
             float foveationSize{0.66f};
+            uint32_t processingResolution{100};
         };
 
         using SwapchainImageList = std::vector<std::pair<Swapchain*, uint32_t>>;
@@ -718,6 +720,13 @@ namespace virtualdesktop_openxr {
         void cleanupDlssnrResources();
         void retainDlssnrRuntimeOnCleanupFailure() noexcept;
         void unloadDlssnrModule();
+        void createDlssnrFeature(uint32_t eye, const ovrSizei& resolution, ID3D12GraphicsCommandList* commands);
+        void releaseDlssnrFeatures();
+        bool upliftSpatialLayer(const XrSwapchainSubImage** views,
+                                const XrSwapchainSubImage** depth,
+                                const bool* depthInverted,
+                                ovrLayerEyeFov& layer,
+                                bool finalColour);
         void ensureDlssnrSwapchainResources(ovrTextureFormat format, const ovrSizei& resolution);
         void ensureSwapchainDlssnrResources(Swapchain& xrSwapchain, uint32_t slice);
         void upliftLayer(const XrSwapchainSubImage** views,
@@ -1002,6 +1011,15 @@ namespace virtualdesktop_openxr {
         ComPtr<ID3D11Fence> m_dlssnrOutFence;
         std::unique_ptr<D3D12Utils::CommandContext> m_dlssnrContext;
         ovrSizei m_dlssnrFeatureResolution{0, 0};
+        std::unique_ptr<nr_spatial::Pipeline> m_nrSpatialPipeline;
+        std::array<ovrSizei, 2> m_nrSpatialFeatureExtents{};
+        std::array<ovrTextureSwapChain, 4> m_nrSpatialSourceChains{};
+        bool m_nrSpatialFeatures{};
+        bool m_nrSpatialNeedsDrain{};
+        bool m_nrSpatialNeedsFeatureReset{};
+        uint64_t m_nrSpatialLastFrame{UINT64_MAX};
+        int m_nrSpatialStatus{};
+
         NVSDK_NGX_Handle* m_dlssnrFeature[xr::StereoView::Count]{nullptr, nullptr};
         decltype(&::NVSDK_NGX_D3D12_ReleaseFeature) m_dlssnrFeatureRelease[xr::StereoView::Count]{
             &::NVSDK_NGX_D3D12_ReleaseFeature, &::NVSDK_NGX_D3D12_ReleaseFeature};

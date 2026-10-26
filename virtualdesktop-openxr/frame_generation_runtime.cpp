@@ -167,7 +167,8 @@ namespace virtualdesktop_openxr {
              settings.intensity != previous.intensity || settings.localToneStrength != previous.localToneStrength ||
              settings.localStructureStrength != previous.localStructureStrength ||
              settings.skinStructureStrength != previous.skinStructureStrength ||
-             settings.foveationSize != previous.foveationSize)) {
+             settings.foveationSize != previous.foveationSize ||
+             settings.processingResolution != previous.processingResolution)) {
             const auto result = m_frameGeneration->reset(1);
             if (result == VDXRFG_E_BUSY) {
                 return bypass(true);

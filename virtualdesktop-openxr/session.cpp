@@ -655,6 +655,10 @@ namespace virtualdesktop_openxr {
         settings.localStructureStrength = getSetting("DLSSNR_LocalStructureStrength").value_or(70) / 100.0f;
         settings.skinStructureStrength = getSetting("DLSSNR_SkinStructureStrength").value_or(50) / 100.0f;
         settings.foveationSize = getSetting("FoveationSize").value_or(66) / 100.0f;
+        const auto processingResolution = getSetting("DLSSNR_ProcessingResolution").value_or(100);
+        settings.processingResolution =
+            processingResolution >= 50 && processingResolution <= 100 ? processingResolution : 100;
+
         {
             std::unique_lock lock(m_dlssnrSettingsMutex);
             m_dlssnrSettings = settings;

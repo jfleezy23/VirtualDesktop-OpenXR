@@ -472,6 +472,11 @@ namespace virtualdesktop_openxr {
         if (m_dlssnrContext) {
             m_dlssnrContext->Flush();
         }
+        if (m_nrSpatialPipeline) {
+            // A later chain can reuse a retired handle even at identical size.
+            // Invalidate history, without resetting ordinary rotating image banks.
+            m_nrSpatialLastFrame = UINT64_MAX;
+        }
 
         Swapchain& xrSwapchain = *(Swapchain*)swapchain;
 

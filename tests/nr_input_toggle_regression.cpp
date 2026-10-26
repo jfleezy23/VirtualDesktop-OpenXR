@@ -14,6 +14,7 @@ namespace {
     }
     std::atomic<DWORD> enabled{};
     DWORD coverage = 100;
+    DWORD nrProcessingResolution = 100;
     DWORD requestedFrameGeneration{}, nrSharpenSetting{}, nrUpscalingSetting{100};
     DWORD requestedFrameGenerationBackend{};
     bool preserveNrAppearance{};
@@ -33,6 +34,15 @@ namespace {
     std::function<ovrResult(ovrSession, ovrTextureSwapChain)> guardNativeCommit;
     std::function<void(const ovrLayerHeader* const*, unsigned)> observeNativeLayers;
     std::function<void(XrFrameEndInfo&, const XrCompositionLayerProjection&)> adjustFrameLayers;
+    // Optional bounded fixture extensions; retained tests use their original schedule.
+    std::function<void(int)> beforeInputFrame;
+    std::function<void(int)> afterInputFrame;
+    std::function<void()> beforeFailureCleanup;
+    std::function<void(XrResult)> afterFailureCleanup;
+    std::function<bool(int)> inputFrameNrEnabled;
+    bool checkEnabledColourIdentity{};
+    bool refreshColourEachFrame{};
+    std::function<void(const D3D11_TEXTURE2D_DESC&, unsigned)> observeSubmittedColour;
     ovrResult OVR_CDECL captureCommit(ovrSession session, ovrTextureSwapChain chain) {
         if (guardNativeCommit) {
             const auto guarded = guardNativeCommit(session, chain);
@@ -61,6 +71,8 @@ namespace {
             value = enabled.load();
         else if (setting == L"FoveationSize")
             value = coverage;
+        else if (setting == L"DLSSNR_ProcessingResolution")
+            value = nrProcessingResolution;
         else if (setting == L"upscaling")
             value = nrUpscalingSetting;
         else if (setting == L"FrameGenerationMode")
@@ -145,6 +157,8 @@ namespace {
         auto texture = getCommitted(session, layer.ColorTexture[eye]);
         D3D11_TEXTURE2D_DESC desc{};
         texture->GetDesc(&desc);
+        if (observeSubmittedColour)
+            observeSubmittedColour(desc, eye);
         const bool bgra = desc.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS || desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
                           desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
         require(desc.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS || desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
@@ -175,7 +189,7 @@ namespace {
             return true;
         };
         bool edgesCorrect = true;
-        if (checkOffColourEdges && !enabled.load()) {
+        if (checkOffColourEdges && (!enabled.load() || checkEnabledColourIdentity)) {
             for (const auto& corner : std::array<std::array<int, 2>, 4>{{{0, 0},
                                                                          {viewport.Size.w - 1, 0},
                                                                          {0, viewport.Size.h - 1},
@@ -190,7 +204,7 @@ namespace {
         std::cout << "native color eye=" << eye << " NR=" << enabled.load() << " rgba=" << actual[0] << ',' << actual[1]
                   << ',' << actual[2] << ',' << actual[3] << '\n';
         require(actual[3] == 255, "Submitted color alpha is incorrect");
-        if (!enabled.load())
+        if (!enabled.load() || checkEnabledColourIdentity)
             require(matchesExpected(actual), "NR-off color pixels changed");
         checkHr(device->GetDeviceRemovedReason());
     }
@@ -446,6 +460,10 @@ namespace virtualdesktop_openxr {
             require(runtime.m_dlssnrSettings.enabled == value &&
                         runtime.m_dlssnrSettings.foveationSize == coverage * .01f,
                     "Synthetic settings were not published through real refreshSettings");
+#ifdef VDXR_NR_SPATIAL_CANDIDATE
+            require(runtime.m_dlssnrSettings.processingResolution == nrProcessingResolution,
+                    "Synthetic processing setting was not parsed by real refreshSettings");
+#endif
         }
         static void checkRenderPreset() {
             auto& runtime = *static_cast<OpenXrRuntime*>(GetInstance());
@@ -489,6 +507,39 @@ namespace virtualdesktop_openxr {
                 result.insert(result.end(), slice.dlssnrImages.begin(), slice.dlssnrImages.end());
             return result;
         }
+#ifdef VDXR_NR_SPATIAL_CANDIDATE
+        struct SpatialSubmissionBoundary {
+            ID3D12CommandQueue* queue;
+            ID3D12Fence* completion;
+            ID3D11DeviceContext4* consumer;
+            ID3D11Fence* consumerFence;
+        };
+        static SpatialSubmissionBoundary spatialSubmissionBoundary() {
+            const auto& runtime = *static_cast<OpenXrRuntime*>(GetInstance());
+            require(runtime.m_dlssnrContext && runtime.m_nrSpatialPipeline,
+                    "native submission observation requires a warm spatial frame");
+            return {runtime.m_dlssnrContext->GetCommandQueue(),
+                    runtime.m_dlssnrContext->GetCompletionFence(),
+                    runtime.m_ovrSubmissionContext.Get(),
+                    runtime.m_dlssnrOutFence.Get()};
+        }
+        static bool spatialFailureOwnsResources(bool uncertain) {
+            const auto& runtime = *static_cast<OpenXrRuntime*>(GetInstance());
+            return runtime.m_nrSpatialPipeline && runtime.m_nrSpatialNeedsFeatureReset &&
+                   runtime.m_nrSpatialNeedsDrain == uncertain && !runtime.m_precompositor.pendingColourCommits[0] &&
+                   runtime.m_nrSpatialLastFrame + 1 == runtime.m_frameBegun;
+        }
+        static void checkSpatialPipeline(bool expected) {
+            const auto& runtime = *static_cast<OpenXrRuntime*>(GetInstance());
+            std::cout << "spatial route requested=" << nrProcessingResolution
+                      << " parsed=" << runtime.m_dlssnrSettings.processingResolution
+                      << " captured=" << runtime.m_precompositor.dlssnrSettings.processingResolution
+                      << " status=" << runtime.m_nrSpatialStatus << " pipeline=" << bool(runtime.m_nrSpatialPipeline)
+                      << '\n';
+            require(bool(runtime.m_nrSpatialPipeline) == expected,
+                    "spatial pipeline allocation must agree with active route (native100 is lazy bypass)");
+        }
+#endif
         static void checkDirectDepth(XrSwapchain handle, bool submitted) {
             const auto& chain = *reinterpret_cast<OpenXrRuntime::Swapchain*>(handle);
             require(chain.appSwapchain.ovrSwapchain &&
@@ -643,7 +694,19 @@ int VDXR_NR_TEST_ENTRYPOINT(int argc, char** argv) {
                                     "depth-restored"};
             const int frameCount = (mode == "toggle" ? 7 : 12) + additionalSteadyFrames;
             for (int frame = 0; frame < frameCount; ++frame) {
-                const bool nr = (startWithNr && frame == 0) || frame == 1 || frame == 4 || frame >= 6;
+                if (beforeInputFrame)
+                    beforeInputFrame(frame);
+                if (refreshColourEachFrame) {
+                    for (unsigned eye = 0; eye < 2; ++eye) {
+                        const auto& value = expectedOffColour[eye];
+                        std::fill(rgba[eye].begin(),
+                                  rgba[eye].end(),
+                                  value[0] | value[1] << 8 | value[2] << 16 | value[3] << 24);
+                    }
+                }
+                const bool nr = inputFrameNrEnabled
+                                    ? inputFrameNrEnabled(frame)
+                                    : (startWithNr && frame == 0) || frame == 1 || frame == 4 || frame >= 6;
                 if (frame == 7 && mode != "toggle")
                     observation = std::make_unique<Regression::Observation>(mode == "metadata", mode == "writes");
                 Regression::setEnabled(nr);
@@ -771,6 +834,8 @@ int VDXR_NR_TEST_ENTRYPOINT(int argc, char** argv) {
                             "Live toggling replaced a completed color/depth input generation");
                 }
                 checkHr(device->GetDeviceRemovedReason());
+                if (afterInputFrame)
+                    afterInputFrame(frame);
             }
             if (observation) {
                 failures += observation->failures;
@@ -784,14 +849,21 @@ int VDXR_NR_TEST_ENTRYPOINT(int argc, char** argv) {
         std::cout << "normal instance/session teardown completed; frames=" << captured
                   << " color/depth cache assertion failures=" << failures << '\n';
         require(!failures, "NR native cache/parameter assertions failed");
-        std::cout << "PASS: native synchronous live OFF/ON/OFF with fresh pair B, complete cached imports, both-eye "
-                     "color/depth readback and real NR; mode="
-                  << mode << " FoveationSize=" << coverage << '\n';
+        std::cout << "PASS: "
+                  << (inputFrameNrEnabled ? "custom NR frame schedule" : "native synchronous live OFF/ON/OFF")
+                  << " with fresh pair B, complete cached imports, both-eye color/depth readback and "
+                  << (checkEnabledColourIdentity ? "identity NR test backend" : "real NR") << "; mode=" << mode
+                  << " FoveationSize=" << coverage << '\n';
         return 0;
     } catch (const std::exception& error) {
+        if (beforeFailureCleanup)
+            beforeFailureCleanup();
         if (instance && xrDestroyInstance) {
             try {
-                checkXr(xrDestroyInstance(instance), "failure-path xrDestroyInstance");
+                const auto cleanupResult = xrDestroyInstance(instance);
+                if (afterFailureCleanup)
+                    afterFailureCleanup(cleanupResult);
+                checkXr(cleanupResult, "failure-path xrDestroyInstance");
             } catch (const std::exception& cleanup) {
                 std::cerr << "FAIL: cleanup: " << cleanup.what() << '\n';
             }

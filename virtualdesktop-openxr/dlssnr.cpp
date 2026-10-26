@@ -212,11 +212,85 @@ namespace virtualdesktop_openxr {
     using namespace virtualdesktop_openxr::log;
     using namespace virtualdesktop_openxr::utils;
 
+    void OpenXrRuntime::createDlssnrFeature(uint32_t eye,
+                                            const ovrSizei& resolution,
+                                            ID3D12GraphicsCommandList* commands) {
+        if (!m_dlssnrFeature[eye]) {
+            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Width, resolution.w);
+            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Height, resolution.h);
+            // Select the lightweight network explicitly; the appearance Style is independent.
+            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Hint_Render_Preset, 2 /* Preset B */);
+            m_ngxParameters->Set(NVSDK_NGX_Parameter_CreationNodeMask, 1u);
+            m_ngxParameters->Set(NVSDK_NGX_Parameter_VisibilityNodeMask, 1u);
+
+            // Keep each opaque feature paired with the dispatch table that created it.
+            auto release = ngx::NVSDK_NGX_D3D12_ReleaseFeature;
+            auto evaluate = ngx::NVSDK_NGX_D3D12_EvaluateFeature;
+            if (ngx::forceManualLoad ||
+                NVSDK_NGX_FAILED(ngx::NVSDK_NGX_D3D12_CreateFeature(
+                    commands, NVSDK_NGX_Feature_Reserved18 /* DLSS-NR */, m_ngxParameters, &m_dlssnrFeature[eye]))) {
+                // User might be using an unsigned nvngx_dlssnr.dll that gets bounced by the NGX SDK. Try loading it
+                // manually.
+                if (!ngx::dlssnrModule) {
+                    const auto nvngx_dlssnrPath = virtualdesktop_openxr::dllHome / L"nvngx_dlssnr.dll";
+                    ngx::loadModule(nvngx_dlssnrPath);
+                }
+
+                if (ngx::initializedDevice.Get() != m_dlssnrDevice.Get()) {
+                    CHECK_MSG(ngx::Init_Ext && ngx::Shutdown1, "DLSS-NR module load did not complete");
+                    CHECK_NGXCMD(ngx::Init_Ext(123456,
+                                               virtualdesktop_openxr::programData.c_str(),
+                                               m_dlssnrDevice.Get(),
+                                               NVSDK_NGX_Version_API,
+                                               nullptr));
+                    ngx::initializedDevice = m_dlssnrDevice;
+                }
+
+                release = ngx::NVSDK_NGX_D3D12_ReleaseFeature;
+                evaluate = ngx::NVSDK_NGX_D3D12_EvaluateFeature;
+                CHECK_NGXCMD(ngx::NVSDK_NGX_D3D12_CreateFeature(
+                    commands, NVSDK_NGX_Feature_Reserved18 /* DLSS-NR */, m_ngxParameters, &m_dlssnrFeature[eye]));
+            }
+            m_dlssnrFeatureRelease[eye] = release;
+            m_dlssnrFeatureEvaluate[eye] = evaluate;
+        }
+    }
+
+    // Caller must have established completion of all NR work using these features.
+    void OpenXrRuntime::releaseDlssnrFeatures() {
+        for (uint32_t eye = 0; eye < xr::StereoView::Count; ++eye) {
+            if (m_dlssnrFeature[eye]) {
+                CHECK_NGXCMD(m_dlssnrFeatureRelease[eye](m_dlssnrFeature[eye]));
+                m_dlssnrFeature[eye] = nullptr;
+                m_dlssnrFeatureRelease[eye] = nullptr;
+                m_dlssnrFeatureEvaluate[eye] = nullptr;
+            }
+        }
+        m_dlssnrFeatureResolution = {0, 0};
+        m_nrSpatialFeatureExtents = {};
+        m_nrSpatialFeatures = false;
+        m_nrSpatialLastFrame = UINT64_MAX;
+        m_nrSpatialSourceChains = {};
+    }
+
     void OpenXrRuntime::upliftLayer(const XrSwapchainSubImage** views,
                                     const XrSwapchainSubImage** depth,
                                     const bool* depthInverted,
                                     ovrLayerEyeFov& layer,
                                     bool finalColour) {
+        if (m_precompositor.dlssnrSettings.processingResolution < 100 &&
+            upliftSpatialLayer(views, depth, depthInverted, layer, finalColour)) {
+            return;
+        }
+        // Retire an optional generation before returning to the unchanged native route.
+        if (m_nrSpatialPipeline) {
+            m_dlssnrContext->Flush();
+            m_nrSpatialPipeline->DiscardRecording();
+            m_nrSpatialPipeline.reset();
+            releaseDlssnrFeatures();
+            m_nrSpatialNeedsDrain = false;
+            m_nrSpatialNeedsFeatureReset = false;
+        }
         TraceLocalActivity(local);
         TraceLoggingWriteStart(local, "DLSSNR");
         const auto& settings = m_precompositor.dlssnrSettings;
@@ -300,50 +374,7 @@ namespace virtualdesktop_openxr {
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthInverted, depthInverted[eye]);
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Enabled, true);
 
-            // (Re)create with the desired resolution.
-            if (!m_dlssnrFeature[eye]) {
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Width, foveatedResolution.w);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Height, foveatedResolution.h);
-                // Select the lightweight network explicitly; the appearance Style is independent.
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Hint_Render_Preset, 2 /* Preset B */);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_CreationNodeMask, 1u);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_VisibilityNodeMask, 1u);
-
-                // Keep each opaque feature paired with the dispatch table that created it.
-                auto release = ngx::NVSDK_NGX_D3D12_ReleaseFeature;
-                auto evaluate = ngx::NVSDK_NGX_D3D12_EvaluateFeature;
-                if (ngx::forceManualLoad ||
-                    NVSDK_NGX_FAILED(ngx::NVSDK_NGX_D3D12_CreateFeature(cmdList.Commands.Get(),
-                                                                        NVSDK_NGX_Feature_Reserved18 /* DLSS-NR */,
-                                                                        m_ngxParameters,
-                                                                        &m_dlssnrFeature[eye]))) {
-                    // User might be using an unsigned nvngx_dlssnr.dll that gets bounced by the NGX SDK. Try loading it
-                    // manually.
-                    if (!ngx::dlssnrModule) {
-                        const auto nvngx_dlssnrPath = virtualdesktop_openxr::dllHome / L"nvngx_dlssnr.dll";
-                        ngx::loadModule(nvngx_dlssnrPath);
-                    }
-
-                    if (ngx::initializedDevice.Get() != m_dlssnrDevice.Get()) {
-                        CHECK_MSG(ngx::Init_Ext && ngx::Shutdown1, "DLSS-NR module load did not complete");
-                        CHECK_NGXCMD(ngx::Init_Ext(123456,
-                                                   virtualdesktop_openxr::programData.c_str(),
-                                                   m_dlssnrDevice.Get(),
-                                                   NVSDK_NGX_Version_API,
-                                                   nullptr));
-                        ngx::initializedDevice = m_dlssnrDevice;
-                    }
-
-                    release = ngx::NVSDK_NGX_D3D12_ReleaseFeature;
-                    evaluate = ngx::NVSDK_NGX_D3D12_EvaluateFeature;
-                    CHECK_NGXCMD(ngx::NVSDK_NGX_D3D12_CreateFeature(cmdList.Commands.Get(),
-                                                                    NVSDK_NGX_Feature_Reserved18 /* DLSS-NR */,
-                                                                    m_ngxParameters,
-                                                                    &m_dlssnrFeature[eye]));
-                }
-                m_dlssnrFeatureRelease[eye] = release;
-                m_dlssnrFeatureEvaluate[eye] = evaluate;
-            }
+            createDlssnrFeature(eye, foveatedResolution, cmdList.Commands.Get());
 
             // Prepare feature evaluation.
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Output, m_dlssnrOutputSwapchainImages[imageIndex].Get());

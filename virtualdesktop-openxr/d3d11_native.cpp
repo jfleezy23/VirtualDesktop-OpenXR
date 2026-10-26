@@ -347,6 +347,15 @@ namespace virtualdesktop_openxr {
         if (m_dlssnrContext) {
             m_dlssnrContext->Flush();
         }
+        // The drain above also protects all optional scratch and descriptor banks.
+        if (m_nrSpatialPipeline) {
+            m_nrSpatialPipeline->DiscardRecording();
+            m_nrSpatialPipeline.reset();
+        }
+        m_nrSpatialNeedsDrain = false;
+        m_nrSpatialNeedsFeatureReset = false;
+        m_nrSpatialFeatures = false;
+        m_nrSpatialLastFrame = UINT64_MAX;
         m_dlssnrOutputSwapchainImages.clear();
         m_dlssnrOutputSwapchainTextures.clear();
         m_dlssnrOutputSwapchainSrvs.clear();
