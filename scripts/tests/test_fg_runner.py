@@ -2,9 +2,36 @@ import importlib.util
 from pathlib import Path
 import unittest
 import tempfile
+import uuid
+import winreg
+from vdxr_game_profiles import ProfileStore
 
 
 class ResultTests(unittest.TestCase):
+    def test_profile_fixture_guard_cleans_after_child_failure_and_preserves_existing(self):
+        runner = self.runner()
+        base = r"SOFTWARE\VDXR-Test-" + uuid.uuid4().hex
+        store = ProfileStore(winreg.HKEY_CURRENT_USER, base)
+        executable = r"C:\Fixture\Game.exe"
+        try:
+            with self.assertRaisesRegex(RuntimeError, "child failed"):
+                with runner.profile_fixture_guard(executable, "bgra-profile-4", store):
+                    store.save(executable, {"FrameGenerationMode": 4})
+                    raise RuntimeError("child failed")
+            self.assertIsNone(store._read(store.path(executable), "ExecutablePath"))
+            store.save(executable, {"FrameGenerationMode": 3})
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                with runner.profile_fixture_guard(executable, "bgra-profile-4", store):
+                    self.fail("existing profile must prevent fixture launch")
+            self.assertEqual(store.load(executable)[0]["FrameGenerationMode"], 3)
+            store.reset(executable)
+        finally:
+            for key in (store.path(executable), base + r"\Profiles", base):
+                try:
+                    winreg.DeleteKeyEx(winreg.HKEY_CURRENT_USER, key, winreg.KEY_WOW64_64KEY)
+                except FileNotFoundError:
+                    pass
+
     def runner(self):
         path = Path(__file__).parents[2] / "tests/run-fg-regressions.py"
         spec = importlib.util.spec_from_file_location("fg_clock_runner", path)

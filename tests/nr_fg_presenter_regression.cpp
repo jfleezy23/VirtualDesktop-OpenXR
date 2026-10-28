@@ -15,6 +15,35 @@ void require(bool condition, const char* message) {
 }
 
 int main() {
+    FrameGenerationCadence four;
+    const auto fourReservation = four.reserve(990000000, 1000000000, 10000000, 4, 0);
+    require(fourReservation.valid && fourReservation.currentTarget == 1030000000,
+            "4X reserves three synthetic native slots before B");
+    const auto fourPlan = four.plan(fourReservation, 990000000, true);
+    require(fourPlan.count == 4 && fourPlan.roles[0] == FrameGenerationRole::synthetic1 &&
+                fourPlan.roles[1] == FrameGenerationRole::synthetic2 &&
+                fourPlan.roles[2] == FrameGenerationRole::synthetic3 && fourPlan.roles[3] == FrameGenerationRole::real,
+            "4X publishes distinct S1/S2/S3/B in temporal order");
+    require(fourPlan.targets[2] == 1020000000 && fourPlan.targets[3] == 1030000000,
+            "4X S3 and B keep distinct native targets");
+    require(fourPlan.fractions[0] == .25f && fourPlan.fractions[1] == .5f && fourPlan.fractions[2] == .75f,
+            "4X fractions are quarter/half/three-quarter");
+    require(!four.onTime(fourPlan, 1000000001), "4X late completion cannot retime generated pixels");
+    for (const unsigned multiplier : {2u, 3u, 4u}) {
+        FrameGenerationCadence sustained;
+        int64_t previous = 1000000000;
+        for (unsigned iteration = 0; iteration < 2000; ++iteration) {
+            const bool gap = iteration % 37 == 0;
+            const int64_t first = previous + (gap ? 1000000000 : 10000000);
+            const auto reservation = sustained.reserve(previous, first, 10000000, multiplier, iteration * multiplier);
+            const auto group = sustained.plan(reservation, previous, true);
+            require(group.count == (gap ? 1u : multiplier),
+                    "sustained cadence rejects long gaps and immediately recovers");
+            require(group.targets[group.count - 1] == reservation.currentTarget, "fallback retains original B target");
+            require(!sustained.onTime(group, group.targets[0] + 1), "late outputs never become on-time by recovery");
+            previous = reservation.currentTarget;
+        }
+    }
     FrameGenerationCadence cadence;
     constexpr int64_t period = 10000000, firstTarget = 1000000000;
     const auto prime = cadence.reserve(firstTarget - period, firstTarget, period, 3, 20);
@@ -42,7 +71,7 @@ int main() {
     require(!cadence.reserve(0, 1, 0, 3, 0).valid, "zero period rejected");
     require(!cadence.reserve(0, std::numeric_limits<int64_t>::max(), period, 3, 0).valid,
             "prediction addition overflow rejected");
-    require(!cadence.reserve(0, firstTarget, period, 4, 0).valid, "unsupported multiplier rejected");
+    require(!cadence.reserve(0, firstTarget, period, 5, 0).valid, "unsupported multiplier rejected");
     require(!cadence.onTime(triplet, 1030000001), "late work cannot move synthetic group unchanged");
     require(cadence.onTime(triplet, 1029000000), "ready work has a valid first slot");
     const auto changed = cadence.reserve(1020000000, 1030000000, period / 2, 3, 23);
@@ -100,5 +129,5 @@ int main() {
     require(rejected.count == 1 && rejected.roles[0] == FrameGenerationRole::real &&
                 rejected.targets[0] == upper.currentTarget,
             "invalid second fraction cannot expose a partially initialized synthetic plan");
-    std::puts("PASS: FG pure reservation, 2X/3X roles, fractions, late/overflow/reset guards");
+    std::puts("PASS: FG pure reservation, 2X/3X/4X roles, sustained cadence, fractions, late/overflow/reset guards");
 }

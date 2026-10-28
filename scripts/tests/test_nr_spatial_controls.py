@@ -14,7 +14,7 @@ SETTING = "DLSSNR_ProcessingResolution"
 class SpatialControlsTests(unittest.TestCase):
     def setUp(self):
         self.registry = Registry()
-        for module in (gui, gui.runtime_selection):
+        for module in (gui, gui.runtime_selection, gui.game_profiles):
             patch = mock.patch.object(module, "winreg", self.registry)
             patch.start()
             self.addCleanup(patch.stop)

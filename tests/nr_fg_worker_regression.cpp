@@ -88,6 +88,44 @@ namespace {
             }
         }
     };
+    std::atomic<double> capacityClockTime{};
+    decltype(&ovr_GetTimeInSeconds) originalCapacityTime{};
+    double OVR_CDECL capacityTime() {
+        return capacityClockTime.load();
+    }
+    // Capacity admission deliberately parks End and schedules another thread.
+    // Its correctness must not depend on CPU readback/scheduler overhead fitting
+    // inside the synthetic deadline. Native Wait advances this fixture clock;
+    // GPU completion and fixture watchdogs still use real bounded waits.
+    struct CapacityClockHook {
+        bool enabled{};
+        double origin{};
+        explicit CapacityClockHook(bool useClock) : enabled(useClock) {
+            if (!enabled)
+                return;
+            originalCapacityTime = reinterpret_cast<decltype(originalCapacityTime)>(
+                GetProcAddress(GetModuleHandleW(L"LibOVRRT64_1.dll"), "ovr_GetTimeInSeconds"));
+            require(originalCapacityTime != nullptr, "capacity clock export required");
+            origin = originalCapacityTime();
+            capacityClockTime = origin;
+            checkDetour(DetourTransactionBegin());
+            checkDetour(DetourUpdateThread(GetCurrentThread()));
+            checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalCapacityTime), capacityTime));
+            checkDetour(DetourTransactionCommit());
+        }
+        void advance(long long nativeId) const {
+            if (enabled)
+                capacityClockTime = origin + nativeId * .01;
+        }
+        ~CapacityClockHook() {
+            if (enabled &&
+                (DetourTransactionBegin() != NO_ERROR || DetourUpdateThread(GetCurrentThread()) != NO_ERROR ||
+                 DetourDetach(reinterpret_cast<PVOID*>(&originalCapacityTime), capacityTime) != NO_ERROR ||
+                 DetourTransactionCommit() != NO_ERROR)) {
+                std::_Exit(2);
+            }
+        }
+    };
     decltype(&ovr_CommitTextureSwapChain) originalFgCommit;
     ovrResult OVR_CDECL fakeCommit(ovrSession, ovrTextureSwapChain) {
         return ovrSuccess;
@@ -598,6 +636,9 @@ namespace virtualdesktop_openxr {
             BackendState state;
             BackendHooks hooks(backend, state);
             CommitHook commits;
+            CapacityClockHook capacityClock(capacity);
+            if (capacity)
+                state.observeWait = [&](long long nativeId) { capacityClock.advance(nativeId); };
             Interop hw;
             RuntimeInputRegression::seed(runtime);
             runtime.m_frameGenerationMode = multiplier;
@@ -614,18 +655,19 @@ namespace virtualdesktop_openxr {
             success(runtime.m_frameGeneration->initialize(init), "initialize presenter GPU module");
             std::map<ovrTextureSwapChain, ComPtr<ID3D11Texture2D>> textures;
             for (unsigned bank = 0; bank < 2; ++bank) {
-                for (unsigned role = 0; role < 3; ++role) {
-                    if (role == 1 && multiplier == 2) {
+                for (unsigned role = 0; role < 4; ++role) {
+                    if ((role == 1 && multiplier == 2) || (role == 3 && multiplier != 4)) {
                         continue;
                     }
                     auto& slice = runtime.m_fgPresentationBanks[bank][role];
-                    slice.ovrSwapchain = reinterpret_cast<ovrTextureSwapChain>(uintptr_t(0x6000 + bank * 3 + role));
+                    slice.ovrSwapchain = reinterpret_cast<ovrTextureSwapChain>(uintptr_t(0x6000 + bank * 4 + role));
                     slice.images.push_back(hw.texture());
                     textures[slice.ovrSwapchain] = slice.images[0];
                 }
             }
             std::vector<std::vector<uint8_t>> frames;
             std::vector<ovrTextureSwapChain> chains;
+            std::atomic<int64_t> diagnosticFirstTarget{};
             state.observeLayers = [&](const ovrLayerHeader* const* layers, unsigned count) {
                 require(count == 1 && layers[0] && layers[0]->Type == ovrLayerType_EyeFov,
                         "each generated slot presents a stereo color projection");
@@ -633,6 +675,14 @@ namespace virtualdesktop_openxr {
                 require(eye.ColorTexture[0] == eye.ColorTexture[1] && eye.Viewport[0].Pos.x == 0 &&
                             eye.Viewport[1].Pos.x == eyeWidth && eye.Viewport[0].Size.w == eyeWidth,
                         "both eyes use distinct rectangles of an owned output");
+                if (capacity) {
+                    const auto now = runtime.ovrTimeToXrTime(ovr_GetTimeInSeconds());
+                    std::cout << "Capacity End frame=" << frames.size() << " now=" << now
+                              << " S1=" << diagnosticFirstTarget.load()
+                              << " lead_ns=" << diagnosticFirstTarget.load() - now
+                              << " need_reprime=" << runtime.m_fgNeedReprime.load() << " chain=" << eye.ColorTexture[0]
+                              << '\n';
+                }
                 frames.push_back(hw.read(textures.at(eye.ColorTexture[0]).Get()));
                 chains.push_back(eye.ColorTexture[0]);
             };
@@ -668,6 +718,7 @@ namespace virtualdesktop_openxr {
                 OwnedFrameTransaction pending;
                 PredictionReservation pendingReservation;
                 const auto activeToken = transaction.ticket.token;
+                const auto activeBank = transaction.ticket.bank;
                 if (failedPending) {
                     pendingReservation =
                         cadence.reserve(first - period, first + multiplier * period, period, multiplier, multiplier);
@@ -690,12 +741,15 @@ namespace virtualdesktop_openxr {
                     }
                 }
                 const bool injectedFailure = group && scenario.rfind(L"fail-", 0) == 0;
-                const unsigned failedSlot = scenario.find(L"s1") != std::wstring::npos   ? 0
-                                            : scenario.find(L"s2") != std::wstring::npos ? 1
-                                                                                         : 2;
+                const unsigned failedSlot = scenario.find(L"-s1") != std::wstring::npos   ? 0
+                                            : scenario.find(L"-s2") != std::wstring::npos ? 1
+                                            : scenario.find(L"-s3") != std::wstring::npos ? 2
+                                                                                          : multiplier - 1;
                 if (injectedFailure) {
                     std::lock_guard lock(state.mutex);
                     state.faultFrameId = multiplier + failedSlot;
+                    std::wcout << L"FAULT_INJECTION: scenario=" << scenario << L" multiplier=" << multiplier
+                               << L" slot=" << failedSlot << L" native_id=" << state.faultFrameId << L'\n';
                     state.fault = scenario.find(L"wait") != std::wstring::npos    ? Fault::Wait
                                   : scenario.find(L"begin") != std::wstring::npos ? Fault::Begin
                                                                                   : Fault::End;
@@ -713,6 +767,15 @@ namespace virtualdesktop_openxr {
                             runtime.m_asyncSubmissionCondVar.notify_all();
                         }
                     };
+                }
+                if (capacity) {
+                    diagnosticFirstTarget = reservation.firstTarget;
+                    const auto now = runtime.ovrTimeToXrTime(ovr_GetTimeInSeconds());
+                    std::cout << "Capacity publish group=" << group << " now=" << now
+                              << " S1=" << reservation.firstTarget << " lead_ns=" << reservation.firstTarget - now
+                              << " prime=" << transaction.ticket.prime << " slots=" << transaction.slots.count
+                              << " bank=" << transaction.ticket.bank
+                              << " need_reprime=" << runtime.m_fgNeedReprime.load() << '\n';
                 }
                 {
                     std::lock_guard lock(runtime.m_asyncSubmissionMutex);
@@ -799,14 +862,36 @@ namespace virtualdesktop_openxr {
                     }
                     {
                         std::lock_guard lock(state.mutex);
-                        require(state.frames.size() == multiplier + failedSlot + (state.fault == Fault::End),
+                        // End records its attempted layer before returning the injected error;
+                        // Wait/Begin failures have no submitted layer for their failed slot.
+                        const unsigned observedPairSlots = failedSlot + (state.fault == Fault::End ? 1u : 0u);
+                        require(state.frames.size() == multiplier + observedPairSlots &&
+                                    frames.size() == state.frames.size() && chains.size() == frames.size(),
                                 "failure does not replay earlier synthetic slots or present later slots");
                         for (unsigned i = 0; i < state.frames.size(); ++i) {
                             require(state.frames[i].id == i, "failed cycle does not reuse a compositor ID");
                         }
-                        if (failedSlot) {
-                            require(frames[multiplier] != a && frames[multiplier] != b,
-                                    "first synthetic slot completed before the injected later-slot failure");
+                        for (unsigned slot = 0; slot < observedPairSlots; ++slot) {
+                            const auto role = slot == multiplier - 1 ? FrameGenerationRole::real
+                                              : slot == 0            ? FrameGenerationRole::synthetic1
+                                              : slot == 1            ? FrameGenerationRole::synthetic2
+                                                                     : FrameGenerationRole::synthetic3;
+                            const auto index = multiplier + slot;
+                            const auto expectedChain =
+                                runtime.m_fgPresentationBanks[activeBank][static_cast<unsigned>(role)].ovrSwapchain;
+                            require(chains[index] == expectedChain,
+                                    "each observed fault-path slot uses its intended role and owned bank");
+                            if (role == FrameGenerationRole::real) {
+                                require(frames[index] == b, "failed End at B still records bit-exact real pixels");
+                            } else {
+                                require(frames[index] != a && frames[index] != b,
+                                        "every observed synthetic fault-path slot contains an intermediate frame");
+                            }
+                            for (unsigned earlier = 0; earlier < slot; ++earlier) {
+                                require(frames[index] != frames[multiplier + earlier] &&
+                                            chains[index] != chains[multiplier + earlier],
+                                        "observed fault-path roles have distinct pixels and separate chains");
+                            }
                         }
                     }
                     RuntimeInputRegression::stop(runtime, state);
@@ -830,6 +915,17 @@ namespace virtualdesktop_openxr {
                     }
                 }
                 require(frames.back() == b, "native B output is bit-exact");
+                if (capacity) {
+                    for (unsigned index = multiplier; index < frames.size(); ++index) {
+                        size_t differingBytes{};
+                        for (size_t byte = 0; byte < b.size(); ++byte)
+                            differingBytes += frames[index][byte] != b[byte];
+                        std::cout << "Capacity output frame=" << index << " equals_A=" << (frames[index] == a)
+                                  << " equals_B=" << (frames[index] == b) << " differs_B_bytes=" << differingBytes
+                                  << " chain_is_B=" << (chains[index] == chains.back())
+                                  << " need_reprime=" << runtime.m_fgNeedReprime.load() << '\n';
+                    }
+                }
                 if (late) {
                     for (unsigned i = multiplier; i < frames.size(); ++i) {
                         require(frames[i] == b, "late group uses real B, never retimed synthetic roles");
@@ -838,10 +934,10 @@ namespace virtualdesktop_openxr {
                 } else {
                     require(frames[multiplier] != a && frames[multiplier] != b && chains[multiplier] != chains.back(),
                             "presented S1 is distinct and committed on its own chain");
-                    if (multiplier == 3) {
-                        require(frames[3] != frames[4] && chains[3] != chains[4] && chains[4] != chains[5],
-                                "presented S1/S2/B use distinct pixels and separate chains");
-                    }
+                    for (unsigned firstRole = multiplier; firstRole < frames.size(); ++firstRole)
+                        for (unsigned secondRole = firstRole + 1; secondRole < frames.size(); ++secondRole)
+                            require(frames[firstRole] != frames[secondRole] && chains[firstRole] != chains[secondRole],
+                                    "every synthetic and B has distinct pixels and a separate committed chain");
                 }
             }
             RuntimeInputRegression::stop(runtime, state);
@@ -856,7 +952,7 @@ int wmain(int argc, wchar_t** argv) {
     try {
         require(argc == 5, "backend, module, multiplier and normal/late required");
         const unsigned multiplier = std::wcstoul(argv[3], nullptr, 10);
-        require(multiplier == 2 || multiplier == 3, "2X or 3X required");
+        require(multiplier >= 2 && multiplier <= 4, "2X, 3X or 4X required");
         const std::wstring scenario = argv[4];
         if (scenario == L"bgrx" || scenario == L"unequal-eyes" || scenario == L"static" || scenario == L"protected" ||
             scenario == L"nr-off" || scenario == L"low-coverage" || scenario == L"app-submission" ||
@@ -875,18 +971,25 @@ int wmain(int argc, wchar_t** argv) {
             virtualdesktop_openxr::RuntimeFrameGenerationRegression::history(argv[1], argv[2], scenario);
         } else {
             require(scenario == L"normal" || scenario == L"late" || scenario == L"capacity" ||
-                        scenario == L"stop-before-begin" || scenario == L"failed-pending" ||
-                        scenario == L"fail-wait-s1" || scenario == L"fail-wait-s2" || scenario == L"fail-wait-b" ||
-                        scenario == L"fail-begin-s1" || scenario == L"fail-begin-s2" || scenario == L"fail-begin-b" ||
-                        scenario == L"fail-end-s1" || scenario == L"fail-end-s2" || scenario == L"fail-end-b",
+                        scenario == L"capacity-late" || scenario == L"stop-before-begin" ||
+                        scenario == L"failed-pending" || scenario == L"fail-wait-s1" || scenario == L"fail-wait-s2" ||
+                        scenario == L"fail-wait-s3" || scenario == L"fail-wait-b" || scenario == L"fail-begin-s1" ||
+                        scenario == L"fail-begin-s2" || scenario == L"fail-begin-s3" || scenario == L"fail-begin-b" ||
+                        scenario == L"fail-end-s1" || scenario == L"fail-end-s2" || scenario == L"fail-end-s3" ||
+                        scenario == L"fail-end-b",
                     "unknown worker scenario");
-            virtualdesktop_openxr::RuntimeFrameGenerationRegression::run(argv[1],
-                                                                         argv[2],
-                                                                         multiplier,
-                                                                         scenario == L"late",
-                                                                         scenario == L"capacity",
-                                                                         scenario == L"failed-pending",
-                                                                         scenario);
+            require(scenario.find(L"-s2") == std::wstring::npos || multiplier >= 3,
+                    "S2 fault requires a three- or four-frame multiplier");
+            require(scenario.find(L"-s3") == std::wstring::npos || multiplier == 4,
+                    "S3 fault requires a four-frame multiplier");
+            virtualdesktop_openxr::RuntimeFrameGenerationRegression::run(
+                argv[1],
+                argv[2],
+                multiplier,
+                scenario == L"late" || scenario == L"capacity-late",
+                scenario == L"capacity" || scenario == L"capacity-late",
+                scenario == L"failed-pending",
+                scenario);
         }
         std::cout << "PASS: real GPU native presenter roles, retained pixels, IDs and late bypass\n";
         return 0;

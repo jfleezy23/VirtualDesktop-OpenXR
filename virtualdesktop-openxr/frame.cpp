@@ -182,7 +182,7 @@ namespace virtualdesktop_openxr {
             if (m_frameGenerationMode && m_fgTimelineReanchor.exchange(false)) {
                 m_fgNextReservedNativeId = std::max(m_fgWorkerGroupNativeId.load(), m_fgPublishedEndNativeId.load());
                 if (m_frameBegun > m_frameCompleted) {
-                    m_fgNextReservedNativeId += std::clamp(m_fgBegunReservation.multiplier, 1u, 3u);
+                    m_fgNextReservedNativeId += std::clamp(m_fgBegunReservation.multiplier, 1u, 4u);
                 }
                 m_fgLastReservedTime = 0;
             }
@@ -744,7 +744,7 @@ namespace virtualdesktop_openxr {
                     m_fgReservationForSubmission = m_fgBegunReservation;
                     m_fgPublishedEndNativeId =
                         std::max(m_fgWorkerGroupNativeId.load(), m_fgPublishedEndNativeId.load()) +
-                        std::clamp(m_fgBegunReservation.multiplier, 1u, 3u);
+                        std::clamp(m_fgBegunReservation.multiplier, 1u, 4u);
                 }
                 m_asyncNextFrameId = m_frameBegun;
                 m_asyncSubmissionReady = false;

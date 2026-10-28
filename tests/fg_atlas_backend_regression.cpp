@@ -126,8 +126,9 @@ namespace {
         AtlasGpu gpu;
         auto input = gpu.texture(monoWidth, monoHeight, 2);
         std::array<ComPtr<ID3D12Resource>, 2> current;
-        std::array<ComPtr<ID3D12Resource>, 2> synthetic;
-        std::array<ID3D12Resource*, 2> currentRaw{}, syntheticRaw{};
+        std::array<ComPtr<ID3D12Resource>, 3> synthetic;
+        std::array<ID3D12Resource*, 2> currentRaw{};
+        std::array<ID3D12Resource*, 3> syntheticRaw{};
         const auto syntheticState = atlas ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_RENDER_TARGET;
         const auto arraySeed = image(72), atlasSeed = wide(arraySeed);
         for (UINT i = 0; i < 2; ++i) {
@@ -153,6 +154,11 @@ namespace {
         options.bidirectional = sharedMode == "shared-3x-bidir";
         if (backend == xrfg::D3D12OpticalFlowBackend::fidelity_fx)
             options.input_scale = xrfg::D3D12OpticalFlowInputScale::full;
+        if (multiplier == 4) {
+            synthetic[2] = gpu.texture(atlas ? monoWidth * 2 : monoWidth, monoHeight, atlas ? 1 : 2, syntheticState);
+            syntheticRaw[2] = synthetic[2].Get();
+            gpu.transfer(synthetic[2].Get(), atlas ? &atlasSeed : &arraySeed, syntheticState);
+        }
         const auto syntheticSpan = std::span<ID3D12Resource* const>(syntheticRaw.data(), multiplier - 1);
         if (atlas)
             success(synthesizer.initialize(gpu.device.Get(),
@@ -252,11 +258,27 @@ namespace {
             check(gpu.transfer(current[0].Get(), nullptr, D3D12_RESOURCE_STATE_RENDER_TARGET) == image(0),
                   "backend prime current remains bit-exact");
             const auto b = capture(24);
-            std::optional<xrfg::D3D12ExtraSynthetic> extra;
-            if (multiplier == 3)
-                extra = xrfg::D3D12ExtraSynthetic{1, 2.0f / 3.0f};
+            std::array<xrfg::D3D12ExtraSynthetic, 2> extraValues{};
+            for (unsigned i = 0; i < multiplier - 2; ++i)
+                extraValues[i] = {i + 1, static_cast<float>(i + 2) / multiplier};
+            const std::span<const xrfg::D3D12ExtraSynthetic> extra(extraValues.data(), multiplier - 2);
+            if (multiplier == 4) {
+                auto alias = extraValues;
+                alias[1].destination_index = alias[0].destination_index;
+                xrfg::D3D12FrameSynthesisTicket rejected{};
+                check(synthesizer.submit_pair_outputs(
+                          b, views, views, 0, 1, &rejected, marker, {}, false, .25f, alias) == E_INVALIDARG &&
+                          !rejected.fence_value,
+                      "bounded third output rejects duplicate destinations before GPU submission");
+                const std::array<xrfg::D3D12ExtraSynthetic, 3> overflow{};
+                check(synthesizer.submit_pair_outputs(
+                          b, views, views, 0, 1, &rejected, marker, {}, false, .25f, overflow) == E_INVALIDARG &&
+                          !rejected.fence_value,
+                      "bounded extra span rejects a fourth synthetic");
+            }
             xrfg::D3D12FrameSynthesisTicket pair{};
-            success(synthesizer.submit_pair(b, views, views, 0, 1, &pair, marker, {}, false, 1.0f / multiplier, extra),
+            success(synthesizer.submit_pair_outputs(
+                        b, views, views, 0, 1, &pair, marker, {}, false, 1.0f / multiplier, extra),
                     "generate backend differential pair");
             completed(pair);
             snapshot();
@@ -268,7 +290,7 @@ namespace {
                 view.pose.orientation.w = std::cos(.006f);
             }
             xrfg::D3D12FrameSynthesisTicket repeated{};
-            success(synthesizer.submit_pair(
+            success(synthesizer.submit_pair_outputs(
                         b, repeatedViews, repeatedViews, 0, 1, &repeated, marker, {}, false, 1.0f / multiplier, extra),
                     "generate true repeated-capture backend pair");
             completed(repeated);
@@ -318,7 +340,7 @@ int main(int argc, char** argv) {
               "known shared-3x opt-in/fallback control");
         check(backendName == "nvidia" || backendName == "fidelityfx-full", "known differential backend");
         const UINT multiplier = static_cast<UINT>(std::stoul(argv[2]));
-        check(multiplier == 2 || multiplier == 3, "known differential multiplier");
+        check(multiplier >= 2 && multiplier <= 4, "known differential multiplier");
         check(scenario == "full" || scenario == "srgb-crop-marker" || scenario == "reversed-crop-marker",
               "known direct backend differential scenario");
         const auto backend = backendName == "nvidia" ? xrfg::D3D12OpticalFlowBackend::nvidia

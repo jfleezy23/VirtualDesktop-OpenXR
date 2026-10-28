@@ -25,7 +25,7 @@ namespace virtualdesktop_openxr {
         FrameGenerationSlotPlan slots;
         uint64_t consumerValue{};
         uint64_t ownerGeneration{};
-        std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, 3> destinations;
+        std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, 4> destinations;
     };
 
     // The caller serializes methods and owns the submission-context lease.

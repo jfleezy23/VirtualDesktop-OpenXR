@@ -24,6 +24,7 @@
 
 #include "log.h"
 #include "runtime.h"
+#include "game_profiles.h"
 #include "trackers.h"
 #include "utils.h"
 #include "version.h"
@@ -783,6 +784,9 @@ namespace virtualdesktop_openxr {
     }
 
     std::optional<int> OpenXrRuntime::getSetting(const std::string& value) const {
+        if (vdxr_profiles::isProfileSetting(value)) {
+            return vdxr_profiles::readCurrent(xr::utf8_to_wide(RegPrefix)).get(value);
+        }
         return RegGetDword(HKEY_LOCAL_MACHINE, RegPrefix, value);
     }
 

@@ -61,6 +61,15 @@ namespace {
             D3D12_ROOT_SIGNATURE_DESC description{};
             description.NumParameters = 3;
             description.pParameters = parameters;
+            D3D12_STATIC_SAMPLER_DESC linearClamp{};
+            linearClamp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+            linearClamp.AddressU = linearClamp.AddressV = linearClamp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            linearClamp.MaxAnisotropy = 1;
+            linearClamp.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+            linearClamp.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK;
+            linearClamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            description.NumStaticSamplers = 1;
+            description.pStaticSamplers = &linearClamp;
             ComPtr<ID3DBlob> serialized, errors;
             success(D3D12SerializeRootSignature(&description, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors),
                     "serialize exact 64-DWORD fixture root");

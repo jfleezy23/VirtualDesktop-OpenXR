@@ -168,6 +168,9 @@ jobs:
           if ($env:VDXR_TOOLSET -eq 'v145') {
             & tests/build-nr-spatial-regression.ps1 -PolicyOnly -OutputDirectory 'bin/community/nr-spatial-policy'
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $compilerDirectory = [IO.DirectoryInfo](Split-Path (Get-Command cl.exe -ErrorAction Stop).Source)
+            & tests/build-game-profiles-regression.ps1 -OutputDirectory 'bin/community/game-profiles' -VCToolsDirectory $compilerDirectory.Parent.Parent.Parent.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           foreach ($fixture in @('vr_input_regression.cpp', 'vr_input_watcher_regression.cpp', 'nonnr_input_regression.cpp', 'nonnr_gpu_timer_regression.cpp', 'nonnr_async_regression.cpp', 'nonnr_copy_preprocess_regression.cpp', 'nonnr_gl_regression.cpp')) {
             & tests/vr_input_build.cmd -SourceDirectory $source -RuntimeObjectDirectory $objects -TestSource $fixture -Toolset $env:VDXR_TOOLSET

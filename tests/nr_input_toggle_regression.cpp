@@ -16,6 +16,7 @@ namespace {
     DWORD coverage = 100;
     DWORD nrProcessingResolution = 100;
     DWORD requestedFrameGeneration{}, nrSharpenSetting{}, nrUpscalingSetting{100};
+    std::optional<DWORD> globalFrameGenerationReadOverride;
     DWORD requestedFrameGenerationBackend{};
     bool preserveNrAppearance{};
     DWORD nrDepthSubmissionSetting{1};
@@ -76,7 +77,7 @@ namespace {
         else if (setting == L"upscaling")
             value = nrUpscalingSetting;
         else if (setting == L"FrameGenerationMode")
-            value = requestedFrameGeneration;
+            value = globalFrameGenerationReadOverride.value_or(requestedFrameGeneration);
         else if (setting == L"FrameGenerationBackend")
             value = requestedFrameGenerationBackend;
         else if (preserveNrAppearance && setting == L"DLSSNR_Style")

@@ -14,6 +14,7 @@ int main(int argc, char** argv) {
     check(argc == 2, "module path required");
     HMODULE module = LoadLibraryExA(argv[1], nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     check(module != nullptr, "module loads from absolute path");
+    check(GetProcAddress(module, "VDXRFG_GetApiV3") != nullptr, "V3 four-frame negotiation export exists");
     auto getApi = reinterpret_cast<VDXRFG_GetApiV1Fn>(GetProcAddress(module, "VDXRFG_GetApiV1"));
     check(getApi != nullptr, "versioned API export exists");
     check(FAILED(getApi(nullptr)), "null negotiation output rejected");
@@ -44,6 +45,37 @@ int main(int argc, char** argv) {
     check(FAILED(api.Retire(nullptr, 123)), "null retire rejected");
     check(FAILED(api.Reset(nullptr, 0)), "null reset rejected");
     check(FAILED(api.Destroy(nullptr)), "null destroy rejected");
+    auto get3 = reinterpret_cast<VDXRFG_GetApiV3Fn>(GetProcAddress(module, "VDXRFG_GetApiV3"));
+    VDXRFG_ApiV3 api3{};
+    api3.struct_size = sizeof(api3);
+    api3.api_version = VDXRFG_API_VERSION_3;
+    check(SUCCEEDED(get3(&api3)) && api3.max_multiplier == 4, "V3 explicitly advertises four-frame support");
+    check((api3.supported_create_flags & VDXRFG_CREATE_OMIT_REAL_OUTPUTS) != 0,
+          "real allocation omission requires a separate negotiated capability");
+    check(FAILED(get3(nullptr)), "V3 null negotiation rejected");
+    auto malformed = api3;
+    --malformed.struct_size;
+    check(FAILED(get3(&malformed)), "V3 undersized negotiation rejected");
+    malformed = api3;
+    malformed.api_version = 1;
+    check(FAILED(get3(&malformed)), "V3 cannot reinterpret a legacy envelope");
+    VDXRFG_CreateInfoV3 create3{};
+    create3.struct_size = sizeof(create3);
+    create3.api_version = VDXRFG_API_VERSION_3;
+    create3.flags = VDXRFG_CREATE_OMIT_REAL_OUTPUTS;
+    context = reinterpret_cast<void*>(1);
+    check(api3.Create(&create3, &context) == VDXRFG_E_REJECTED && !context,
+          "omission without host ownership rejects before touching device pointers");
+    VDXRFG_SubmitInfoV3 submit3{};
+    submit3.struct_size = sizeof(submit3);
+    submit3.api_version = VDXRFG_API_VERSION_3;
+    ticket.token = 1;
+    check(api3.Submit(nullptr, &submit3, &ticket) == VDXRFG_E_REJECTED && !ticket.token,
+          "V3 rejects without publishing stale ownership");
+    create.multiplier = 4;
+    context = reinterpret_cast<void*>(1);
+    check(api.Create(&create, &context) == VDXRFG_E_REJECTED && !context,
+          "legacy creation never enables four-frame payloads");
     FreeLibrary(module);
     std::puts("PASS: fg_abi negotiation and rejection");
 }

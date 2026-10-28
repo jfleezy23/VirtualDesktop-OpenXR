@@ -1,6 +1,7 @@
 """Bounded hardware checks against one explicit module/runtime build cohort."""
 
 import argparse
+from contextlib import contextmanager
 import importlib.util
 import hashlib
 import json
@@ -20,6 +21,31 @@ def successful(code, output):
 
 def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@contextmanager
+def profile_fixture_guard(executable, scenario, store=None):
+    """Recover the fixture's profile even if its child uses _Exit or times out."""
+    if scenario != "bgra-profile-4":
+        yield
+        return
+    import winreg
+    if store is None:
+        source = Path(__file__).resolve().parents[1] / "vdxr_game_profiles.py"
+        spec = importlib.util.spec_from_file_location("fg_fixture_profiles", source)
+        profiles = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(profiles)
+        store = profiles.ProfileStore()
+    try:
+        with winreg.OpenKey(store.root, store.path(executable), 0,
+                            winreg.KEY_READ | winreg.KEY_WOW64_64KEY):
+            raise ValueError("Fixture executable profile already exists; refusing to overwrite it")
+    except FileNotFoundError:
+        pass
+    try:
+        yield
+    finally:
+        store.reset(executable)
 
 
 def select_clock(scenario, inherited=None, override=None):
@@ -75,7 +101,7 @@ def main():
         module_case("c-abi", "fg_c_abi_regression", module)
         module_case("cpp-abi", "fg_abi_regression", module)
         module_case("v2-timing-and-real", "fg_v2_regression", module)
-        for multiplier in (2, 3):
+        for multiplier in (2, 3, 4):
             module_case(f"gpu-{multiplier}x", "fg_gpu_regression", module, multiplier)
         for scenario in ("gamma-alpha", "cropped-eyes"):
             module_case("gpu-" + scenario, "fg_gpu_regression", module, 3, scenario)
@@ -148,30 +174,32 @@ def main():
         if args.suite in {"integration", "all"}:
             runtime_case("cpu-query-allocations", "nonnr_input_regression", "query-allocations")
             runtime_case("cpu-resolve-allocations", "nonnr_copy_preprocess_regression", "allocations", backend)
-            for scenario in ("native", "upscaled", "sharpen", "discard", "nr-toggle", "bgra", "bgra-srgb", "bgra-srgb-jitter", "nr-off-reset-busy", "nr-off-capture-busy"):
+            for scenario in ("native", "upscaled", "sharpen", "discard", "nr-toggle", "bgra", "bgra-srgb", "bgra-4", "bgra-srgb-4", "bgra-discard-4", "bgra-publication-4", "bgra-profile-4", "bgra-srgb-jitter", "nr-off-reset-busy", "nr-off-capture-busy"):
                 runtime_case("nr-" + scenario, "nr_fg_runtime_regression", backend, output / ("state-" + scenario), scenario)
             for scenario in ("spatial-bgra-off", "spatial-bgra-srgb-off", "spatial-bgra-2", "spatial-bgra-srgb-2",
-                             "spatial-bgra-3", "spatial-bgra-srgb-3",
+                             "spatial-bgra-3", "spatial-bgra-srgb-3", "spatial-bgra-4", "spatial-bgra-srgb-4",
                              "spatial-combined-bgra-off", "spatial-combined-bgra-srgb-off",
                              "spatial-combined-bgra-2", "spatial-combined-bgra-srgb-2",
-                             "spatial-combined-bgra-3", "spatial-combined-bgra-srgb-3"):
+                             "spatial-combined-bgra-3", "spatial-combined-bgra-srgb-3",
+                             "spatial-combined-bgra-4", "spatial-combined-bgra-srgb-4"):
                 runtime_case(scenario, "nr_fg_runtime_regression", backend, output / ("state-" + scenario), scenario)
             for coverage, processing in ((95, 80), (90, 80), (90, 85), (100, 80)):
                 for encoding in ("bgra", "bgra-srgb"):
-                    for multiplier in (2, 3):
+                    for multiplier in (2, 3, 4):
                         scenario = f"spatial-steady-{coverage}-{processing}-{encoding}-{multiplier}"
                         runtime_case(scenario, "nr_fg_runtime_regression", backend, output / ("state-" + scenario), scenario)
             for scenario in ("color", "depth", "ignored", "reuse", "upscaled", "direct", "static", "static-array"):
                 runtime_case("commits-" + scenario, "nr_intermediate_commit_regression", backend,
                              output / ("state-commits-" + scenario), scenario)
-            for scenario in ("nr-off-2", "nr-off-3", "nr-off-upscaled", "nr-off-cropped", "nr-off-packed",
+            for scenario in ("nr-off-2", "nr-off-3", "nr-off-4", "nr-off-upscaled", "nr-off-cropped", "nr-off-packed",
                              "nr-off-reuse", "nr-off-bypass", "nr-off-reuse-bypass",
                              "nr-off-d3d12", "nr-off-d3d12-reuse", "nr-off-d3d12-reuse-bypass"):
                 runtime_case(scenario, "nr_fg_runtime_regression", ordinary_backend,
                              output / ("state-" + scenario), scenario)
         if args.suite in {"presenter", "all"}:
-            for multiplier, scenario in ((2, "normal"), (3, "normal"), (3, "late"), (3, "capacity")):
-                runtime_case(f"worker-{multiplier}-{scenario}", "nr_fg_worker_regression", backend, module, multiplier, scenario)
+            for multiplier in (2, 3, 4):
+                for scenario in ("normal", "late", "capacity", "capacity-late"):
+                    runtime_case(f"worker-{multiplier}-{scenario}", "nr_fg_worker_regression", backend, module, multiplier, scenario)
             for scenario in ("control", "late-fg", "future-input", "late-nr", "expired-ready",
                              "ready-event-failure", "ready-wait-failure", "ready-cancel"):
                 runtime_case("delay-" + scenario, "nr_fg_delay_regression", backend, module, scenario)
@@ -185,6 +213,10 @@ def main():
             scenarios += [f"fail-{operation}-{slot}" for operation in ("wait", "begin", "end") for slot in ("s1", "s2", "b")]
             for scenario in scenarios:
                 runtime_case("worker-" + scenario, "nr_fg_worker_regression", backend, module, 3, scenario)
+            four_frame_faults = [f"fail-{operation}-{slot}" for operation in ("wait", "begin", "end")
+                                 for slot in ("s1", "s2", "s3", "b")]
+            for scenario in four_frame_faults + ["failed-pending", "stop-before-begin"]:
+                runtime_case("worker-4x-" + scenario, "nr_fg_worker_regression", backend, module, 4, scenario)
 
     for _, command, _ in cases:
         if not Path(command[0]).is_file():
@@ -214,7 +246,8 @@ def main():
                 environment["VDXR_FG_TEST_REFRESH_RATE"] = str(selected_clock["selected_hz"])
             if name.startswith("stereo-"):
                 environment["VDXR_FG_TEST_OUTPUT"] = str(output)
-            run = subprocess.run(command, cwd=repo, env=environment, capture_output=True, text=True, timeout=60)
+            with profile_fixture_guard(command[0], command[-1]):
+                run = subprocess.run(command, cwd=repo, env=environment, capture_output=True, text=True, timeout=60)
             text, code = run.stdout + run.stderr, run.returncode
         except subprocess.TimeoutExpired:
             text, code = "FAIL: child process timed out\n", -999

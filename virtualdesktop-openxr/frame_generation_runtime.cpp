@@ -89,7 +89,7 @@ namespace virtualdesktop_openxr {
                 CHECK_HRCMD(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_fgDevice)));
                 for (auto& bank : m_fgPresentationBanks) {
                     for (unsigned role = 0; role < bank.size(); ++role) {
-                        if (role == 1 && m_frameGenerationMode == 2) {
+                        if ((role == 1 && m_frameGenerationMode == 2) || (role == 3 && m_frameGenerationMode != 4)) {
                             continue;
                         }
                         auto& slice = bank[role];
@@ -401,17 +401,16 @@ namespace virtualdesktop_openxr {
                     m_fgActiveSubmission = true;
                     m_fgActiveOwnedPixels = transaction.ticket.token != 0;
                     m_fgWorkerGroupNativeId =
-                        static_cast<uint64_t>(nativeId) + std::clamp(reservation.multiplier, 1u, 3u);
+                        static_cast<uint64_t>(nativeId) + std::clamp(reservation.multiplier, 1u, 4u);
                     // The mailbox is empty, but a producer must not enqueue
                     // next-frame GPU waits ahead of this group's SDK copies.
                     m_asyncSubmissionReady = false;
                     m_asyncSubmissionCondVar.notify_all();
                 }
                 const bool hasGpuOutput = transaction.ticket.token != 0;
-                std::array<int, 3> preparedImages{{-1, -1, -1}};
+                std::array<int, 4> preparedImages{{-1, -1, -1, -1}};
                 const auto prepareRole = [&](FrameGenerationRole role) {
-                    const unsigned index =
-                        role == FrameGenerationRole::real ? 2 : (role == FrameGenerationRole::synthetic1 ? 0 : 1);
+                    const unsigned index = static_cast<unsigned>(role);
                     auto& output = m_fgPresentationBanks[transaction.ticket.bank][index];
                     auto& image = preparedImages[index];
                     CHECK_OVRCMD(ovr_GetTextureSwapChainCurrentIndex(m_ovrSession, output.ovrSwapchain, &image));
@@ -474,7 +473,7 @@ namespace virtualdesktop_openxr {
                     }
                 }
                 const unsigned cycles =
-                    reservation.multiplier >= 1 && reservation.multiplier <= 3 ? reservation.multiplier : 1;
+                    reservation.multiplier >= 1 && reservation.multiplier <= 4 ? reservation.multiplier : 1;
                 std::unique_lock contextLease(m_fgContextMutex);
                 if (generated) {
                     // All current destination copies precede the next NR/app
@@ -534,8 +533,7 @@ namespace virtualdesktop_openxr {
                                 m_fgTimelineReanchor = true;
                             }
                         }
-                        const unsigned index =
-                            role == FrameGenerationRole::real ? 2 : (role == FrameGenerationRole::synthetic1 ? 0 : 1);
+                        const unsigned index = static_cast<unsigned>(role);
                         if (role == FrameGenerationRole::real && committedReal) {
                             layer = realLayer;
                         } else {

@@ -1,12 +1,70 @@
 // Public OpenXR path, real vendor NR, selected real flow backend and private OVRNull.
-// Settings are read-only synthetic registry responses, never real writes.
+// Globals use synthetic registry responses. The profile case owns one temporary
+// executable-specific key and never rewrites global or game settings.
 #define VDXR_NR_HELPERS_ONLY
 #include "nr_input_toggle_regression.cpp"
 #undef VDXR_NR_HELPERS_ONLY
 #include "nr_fg_lookup_probe.h"
+#include "../virtualdesktop-openxr/game_profiles.h"
 #include <fstream>
 
 namespace {
+    struct FixtureGameProfile {
+        std::wstring key;
+        FixtureGameProfile() {
+            const auto& executable = vdxr_profiles::currentExecutable();
+            key = xr::utf8_to_wide(virtualdesktop_openxr::RegPrefix) + L"\\Profiles\\" +
+                  vdxr_profiles::profileId(executable);
+            HKEY opened{};
+            DWORD disposition{};
+            require(RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+                                    key.c_str(),
+                                    0,
+                                    nullptr,
+                                    0,
+                                    KEY_SET_VALUE | KEY_WOW64_64KEY,
+                                    nullptr,
+                                    &opened,
+                                    &disposition) == ERROR_SUCCESS,
+                    "create isolated executable profile");
+            if (disposition != REG_CREATED_NEW_KEY) {
+                RegCloseKey(opened);
+                throw std::runtime_error("Refusing to overwrite an existing fixture executable profile");
+            }
+            try {
+                require(RegSetValueExW(opened,
+                                       L"ExecutablePath",
+                                       0,
+                                       REG_SZ,
+                                       reinterpret_cast<const BYTE*>(executable.c_str()),
+                                       static_cast<DWORD>((executable.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS,
+                        "write fixture identity");
+                const DWORD multiplier = 4;
+                require(RegSetValueExW(opened,
+                                       L"FrameGenerationMode",
+                                       0,
+                                       REG_DWORD,
+                                       reinterpret_cast<const BYTE*>(&multiplier),
+                                       sizeof(multiplier)) == ERROR_SUCCESS,
+                        "write fixture frame-generation override");
+            } catch (...) {
+                RegCloseKey(opened);
+                RegDeleteKeyExW(HKEY_LOCAL_MACHINE, key.c_str(), KEY_WOW64_64KEY, 0);
+                throw;
+            }
+            RegCloseKey(opened);
+        }
+        void remove() {
+            const auto status = RegDeleteKeyExW(HKEY_LOCAL_MACHINE, key.c_str(), KEY_WOW64_64KEY, 0);
+            require(status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND, "remove fixture executable profile");
+            key.clear();
+        }
+        ~FixtureGameProfile() {
+            if (!key.empty())
+                RegDeleteKeyExW(HKEY_LOCAL_MACHINE, key.c_str(), KEY_WOW64_64KEY, 0);
+        }
+    };
+
     struct D3D12Input {
         ComPtr<ID3D12Device> device;
         std::unique_ptr<D3D12Utils::CommandContext> context;
@@ -159,9 +217,9 @@ namespace virtualdesktop_openxr {
         static decltype(&NVSDK_NGX_D3D12_EvaluateFeature) originalEvaluate[2];
         inline static bool spatialObservation{};
         inline static ovrTextureSwapChain previousSpatialOutput{};
-        inline static unsigned spatialSynthetic[2]{};
+        inline static unsigned spatialSynthetic[3]{};
         inline static bool combinedSpatial{};
-        inline static unsigned combinedSynthetic[3][2]{};
+        inline static unsigned combinedSynthetic[3][3]{};
         // Hand-derived for native512: coverage95->488,90->460; then ceil/align4.
         static int expectedSpatialSize() {
             return coverage == 95 ? 392 : coverage == 90 ? (nrProcessingResolution == 85 ? 392 : 368) : 412;
@@ -339,7 +397,7 @@ namespace virtualdesktop_openxr {
         static void verifyRecoveryCadence(const XrFrameState& state, bool native, XrTime previous) {
             const auto& value = runtime();
             const auto& reservation = value.m_fgWaitedReservation;
-            const unsigned multiplier = native ? 1u : 3u;
+            const unsigned multiplier = native ? 1u : requestedFrameGeneration;
             std::cout << "public recovery cadence: multiplier=" << reservation.multiplier
                       << " period=" << state.predictedDisplayPeriod << " first=" << reservation.firstTarget
                       << " target=" << state.predictedDisplayTime << '\n';
@@ -379,6 +437,25 @@ namespace virtualdesktop_openxr {
             require(!value.m_dlssnrOutputSwapchain && value.m_dlssnrOutputSwapchainImages.empty() &&
                         value.m_dlssnrOutputSwapchainTextures.empty() && value.m_dlssnrOutputSwapchainSrvs.empty(),
                     "session cleanup releases the NR output swapchain and its resource rings");
+        }
+        static uint64_t expectedReanchorAfterDiscard() {
+            auto& value = runtime();
+            std::unique_lock lock(value.m_asyncSubmissionMutex);
+            require(value.m_fgTimelineReanchor && value.m_frameBegun > value.m_frameCompleted &&
+                        value.m_fgBegunReservation.multiplier == 4,
+                    "4x discard probe reaches a pending begun group before its End");
+            return std::max(value.m_fgWorkerGroupNativeId.load(), value.m_fgPublishedEndNativeId.load()) + 4;
+        }
+        static void verifyQueuedReanchor(uint64_t expected) {
+            require(runtime().m_fgWaitedReservation.nativeId == expected,
+                    "pipelined Wait after 4x discard must reserve past all four pending native slots");
+        }
+        static void verifyPublishedSpan() {
+            auto& value = runtime();
+            value.waitForAsyncSubmissionIdle();
+            if (value.m_fgBegunReservation.multiplier == 4)
+                require(value.m_fgPublishedEndNativeId.load() == value.m_fgWorkerGroupNativeId.load(),
+                        "4x publication and completed worker must account for the same four native IDs");
         }
         static void verifyInternalChains() {
             auto& value = runtime();
@@ -445,18 +522,19 @@ namespace virtualdesktop_openxr {
             // consumes this actual layer. A synthesized GPU pair alone is not
             // evidence that any synthetic pixels were submitted.
             for (const auto& bank : runtime().m_fgPresentationBanks) {
-                for (unsigned role = 0; role < 2; ++role) {
+                for (const unsigned role : {0u, 1u, 3u}) {
                     if (bank[role].ovrSwapchain && bank[role].ovrSwapchain == projection.ColorTexture[0]) {
                         ++syntheticPresentations;
+                        const unsigned syntheticIndex = role == 3 ? 2 : role;
                         if (runtime().m_nrSpatialPipeline && runtime().m_nrSpatialFeatures &&
                             runtime().m_precompositor.dlssnrSettings.processingResolution != 100) {
-                            ++spatialSynthetic[role];
+                            ++spatialSynthetic[syntheticIndex];
                             const auto& settings = runtime().m_precompositor.dlssnrSettings;
                             if (combinedSpatial && settings.foveationSize < 1.f) {
                                 const unsigned cohort = settings.foveationSize > .925f        ? 0
                                                         : settings.processingResolution == 85 ? 2
                                                                                               : 1;
-                                ++combinedSynthetic[cohort][role];
+                                ++combinedSynthetic[cohort][syntheticIndex];
                             }
                         }
                         presentedRole = role;
@@ -791,7 +869,7 @@ namespace virtualdesktop_openxr {
         }
         struct SpatialRecovery {
             VDXRFG_StatisticsV1 statistics{};
-            std::array<unsigned, 2> synthetic{};
+            std::array<unsigned, 3> synthetic{};
             std::array<unsigned, 2> evaluations{};
             bool currentCapture{}, currentGeometry{}, realBank{};
             uint64_t nextNative{};
@@ -806,7 +884,7 @@ namespace virtualdesktop_openxr {
             SpatialRecovery result{};
             require(value.m_frameGeneration != nullptr, "spatial recovery observes the actual initialized FG module");
             checkHr(value.m_frameGeneration->getStatistics(result.statistics));
-            result.synthetic = {spatialSynthetic[0], spatialSynthetic[1]};
+            result.synthetic = {spatialSynthetic[0], spatialSynthetic[1], spatialSynthetic[2]};
             result.evaluations = {nrEvaluations[0], nrEvaluations[1]};
             result.currentCapture = value.m_fgPreviousCapturedTime == value.m_precompositor.displayTime;
             const auto format =
@@ -844,12 +922,13 @@ namespace virtualdesktop_openxr {
                    current.statistics.pairs >= baseline.statistics.pairs + 1 &&
                    current.synthetic[0] >= baseline.synthetic[0] + roles &&
                    (requestedFrameGeneration == 2 || current.synthetic[1] >= baseline.synthetic[1] + roles) &&
+                   (requestedFrameGeneration != 4 || current.synthetic[2] >= baseline.synthetic[2] + roles) &&
                    current.currentCapture && current.currentGeometry && current.realBank;
         }
         static void printSpatialRecovery(const char* phase, unsigned inputs, const SpatialRecovery& state) {
             std::cout << "SPATIAL_RECOVERY " << phase << " inputs=" << inputs << " FG=" << requestedFrameGeneration
                       << " captures=" << state.statistics.captures << " pairs=" << state.statistics.pairs
-                      << " S1=" << state.synthetic[0] << " S2=" << state.synthetic[1]
+                      << " S1=" << state.synthetic[0] << " S2=" << state.synthetic[1] << " S3=" << state.synthetic[2]
                       << " accepted=" << state.currentCapture << " geometry=" << state.currentGeometry
                       << " realB=" << state.realBank << " nextNative=" << state.nextNative
                       << " nextLeadMs=" << state.nextLeadMs << " evaluations=" << state.evaluations[0] << ','
@@ -918,7 +997,7 @@ int main(int argc, char** argv) {
         unsigned steadyCoverage{}, steadyProcessing{};
         for (const auto settings : {std::array<unsigned, 2>{95, 80}, {90, 80}, {90, 85}, {100, 80}})
             for (const auto encoding : {"bgra", "bgra-srgb"})
-                for (const auto multiplier : {2u, 3u})
+                for (const auto multiplier : {2u, 3u, 4u})
                     if (scenario == "spatial-steady-" + std::to_string(settings[0]) + "-" +
                                         std::to_string(settings[1]) + "-" + encoding + "-" +
                                         std::to_string(multiplier)) {
@@ -928,19 +1007,25 @@ int main(int argc, char** argv) {
         const bool steady = steadyCoverage != 0;
         const bool combined = scenario == "spatial-combined-bgra-off" || scenario == "spatial-combined-bgra-srgb-off" ||
                               scenario == "spatial-combined-bgra-2" || scenario == "spatial-combined-bgra-srgb-2" ||
-                              scenario == "spatial-combined-bgra-3" || scenario == "spatial-combined-bgra-srgb-3";
-        const bool spatial = steady || combined || scenario == "spatial-bgra-off" ||
-                             scenario == "spatial-bgra-srgb-off" || scenario == "spatial-bgra-2" ||
-                             scenario == "spatial-bgra-srgb-2" || scenario == "spatial-bgra-3" ||
-                             scenario == "spatial-bgra-srgb-3";
+                              scenario == "spatial-combined-bgra-3" || scenario == "spatial-combined-bgra-srgb-3" ||
+                              scenario == "spatial-combined-bgra-4" || scenario == "spatial-combined-bgra-srgb-4";
+        const bool spatial =
+            steady || combined || scenario == "spatial-bgra-off" || scenario == "spatial-bgra-srgb-off" ||
+            scenario == "spatial-bgra-2" || scenario == "spatial-bgra-srgb-2" || scenario == "spatial-bgra-3" ||
+            scenario == "spatial-bgra-srgb-3" || scenario == "spatial-bgra-4" || scenario == "spatial-bgra-srgb-4";
         const bool spatialOff = spatial && scenario.find("-off") != std::string::npos;
-        const bool discard = !strcmp(argv[3], "discard");
+        const bool discard4 = scenario == "bgra-discard-4";
+        const bool publication4 = scenario == "bgra-publication-4";
+        const bool profile4 = scenario == "bgra-profile-4";
+        const bool discard = !strcmp(argv[3], "discard") || discard4;
         const bool toggle = !strcmp(argv[3], "nr-toggle");
         const bool captureBusyRecovery = !strcmp(argv[3], "nr-off-capture-busy");
         const bool busyRecovery = !strcmp(argv[3], "nr-off-reset-busy") || captureBusyRecovery;
         predictionJitter = !strcmp(argv[3], "bgra-srgb-jitter");
-        const bool bgra = spatial || !strcmp(argv[3], "bgra") || !strcmp(argv[3], "bgra-srgb") || predictionJitter;
-        const bool bgraSrgb = !strcmp(argv[3], "bgra-srgb") || predictionJitter ||
+        const bool bgra = spatial || discard4 || publication4 || profile4 || scenario == "bgra-4" ||
+                          scenario == "bgra-srgb-4" || !strcmp(argv[3], "bgra") || !strcmp(argv[3], "bgra-srgb") ||
+                          predictionJitter;
+        const bool bgraSrgb = !strcmp(argv[3], "bgra-srgb") || scenario == "bgra-srgb-4" || predictionJitter ||
                               (spatial && scenario.find("srgb") != std::string::npos);
         const bool d3d12 = !strcmp(argv[3], "nr-off-d3d12") || !strcmp(argv[3], "nr-off-d3d12-reuse") ||
                            !strcmp(argv[3], "nr-off-d3d12-reuse-bypass");
@@ -950,7 +1035,7 @@ int main(int argc, char** argv) {
             !strcmp(argv[3], "nr-off-reuse-bypass") || !strcmp(argv[3], "nr-off-d3d12-reuse-bypass");
         const bool reuse = !strcmp(argv[3], "nr-off-reuse") || !strcmp(argv[3], "nr-off-d3d12-reuse") || reuseFallback;
         const bool fallback = !strcmp(argv[3], "nr-off-bypass") || reuseFallback;
-        const bool noNr = !strcmp(argv[3], "nr-off-2") || !strcmp(argv[3], "nr-off-3") ||
+        const bool noNr = !strcmp(argv[3], "nr-off-2") || !strcmp(argv[3], "nr-off-3") || scenario == "nr-off-4" ||
                           !strcmp(argv[3], "nr-off-upscaled") || cropped || packed || reuse || fallback || d3d12 ||
                           busyRecovery;
         if (const auto rate = std::getenv("VDXR_FG_TEST_REFRESH_RATE")) {
@@ -963,8 +1048,11 @@ int main(int argc, char** argv) {
                     !strcmp(argv[3], "upscaled"),
                 "known public FG scenario");
         requestedFrameGeneration = !strcmp(argv[3], "nr-off-2") ? 2 : 3;
+        if (scenario == "nr-off-4" || scenario == "bgra-4" || scenario == "bgra-srgb-4" || discard4 || publication4 ||
+            profile4)
+            requestedFrameGeneration = 4;
         if (spatial)
-            requestedFrameGeneration = spatialOff ? 0 : (scenario.back() == '2' ? 2 : 3);
+            requestedFrameGeneration = spatialOff ? 0 : static_cast<unsigned>(scenario.back() - '0');
         if (const auto backend = std::getenv("VDXR_FG_TEST_BACKEND")) {
             require(!strcmp(backend, "nvidia") || !strcmp(backend, "fidelityfx-full"), "known test backend");
             requestedFrameGenerationBackend = !strcmp(backend, "fidelityfx-full") ? 1 : 0;
@@ -982,6 +1070,11 @@ int main(int argc, char** argv) {
         checkOffColourEdges = cropped;
         expectedOffColour[0] = {32, 64, 96, 255};
         expectedOffColour[1] = {144, 80, 48, 255};
+        std::unique_ptr<FixtureGameProfile> profile;
+        if (profile4) {
+            globalFrameGenerationReadOverride = 2;
+            profile = std::make_unique<FixtureGameProfile>();
+        }
         SettingsReadHook settings;
         using Regression = virtualdesktop_openxr::RuntimeFrameGenerationRegression;
         Regression::combinedSpatial = combined || steady;
@@ -1125,6 +1218,8 @@ int main(int argc, char** argv) {
             Regression::SpatialRecovery recoveryBaseline{};
             bool haveRecoveryBaseline{}, steadyRecovery{};
             size_t steadyPresentationStart{};
+            XrFrameState queuedState{XR_TYPE_FRAME_STATE};
+            bool queuedWait{};
             for (unsigned frame = 0; frame < maximumInputs; ++frame) {
                 const bool spatialPostprocess = spatial && !steady && frame >= 8 && frame < 16;
                 const bool spatialBypass = spatial && !steady && !spatialOff && frame == 22;
@@ -1146,7 +1241,12 @@ int main(int argc, char** argv) {
                 XrFrameWaitInfo wait{XR_TYPE_FRAME_WAIT_INFO};
                 XrFrameState state{XR_TYPE_FRAME_STATE};
                 const auto previousTarget = previousPublicTime;
-                XR_CHECK(xrWaitFrame(session, &wait, &state));
+                if (queuedWait) {
+                    state = queuedState;
+                    queuedWait = false;
+                } else {
+                    XR_CHECK(xrWaitFrame(session, &wait, &state));
+                }
                 if (busyRecovery && (frame == 10 || frame == 11)) {
                     Regression::verifyRecoveryCadence(state, frame == 10, previousPublicTime);
                 }
@@ -1160,6 +1260,12 @@ int main(int argc, char** argv) {
                     require(state.predictedDisplayTime > previousTime, "pipelined Wait timestamps stay monotonic");
                     require(xrBeginFrame(session, &fb) == XR_FRAME_DISCARDED,
                             "second public Begin discards its unsubmitted predecessor");
+                    if (discard4) {
+                        const auto expectedNative = Regression::expectedReanchorAfterDiscard();
+                        XR_CHECK(xrWaitFrame(session, &wait, &queuedState));
+                        Regression::verifyQueuedReanchor(expectedNative);
+                        queuedWait = true;
+                    }
                 }
                 const auto image = acquireImage(colour);
                 if (input12) {
@@ -1304,6 +1410,8 @@ int main(int argc, char** argv) {
                                             ((51200 / nrUpscalingSetting + 3) / 4) * 4,
                                             frame <= 1 || frame == inputCount - 1 ||
                                                 (recoverSpatial && frame >= inputCount));
+                if (publication4)
+                    Regression::verifyPublishedSpan();
                 if (spatial) {
                     Regression::verifySpatialFormats(bgraSrgb, spatialPostprocess, spatialBypass);
                     if (!spatialOff && combined && frame == 15)
@@ -1398,27 +1506,31 @@ int main(int argc, char** argv) {
             }
             if (spatial && !spatialOff) {
                 require(Regression::spatialSynthetic[0] >= 4 &&
-                            (requestedFrameGeneration == 2 || Regression::spatialSynthetic[1] >= 4),
-                        "real synthetic native submissions occur while reduced NR is active in both FG modes");
+                            (requestedFrameGeneration == 2 || Regression::spatialSynthetic[1] >= 4) &&
+                            (requestedFrameGeneration != 4 || Regression::spatialSynthetic[2] >= 4),
+                        "all requested synthetic roles reach native submission while reduced NR is active");
                 std::cout << "SPATIAL_PRESENT FG=" << requestedFrameGeneration
                           << " S1=" << Regression::spatialSynthetic[0] << " S2=" << Regression::spatialSynthetic[1]
-                          << " evaluated=" << Regression::nrEvaluations[0] << ',' << Regression::nrEvaluations[1]
-                          << '\n';
+                          << " S3=" << Regression::spatialSynthetic[2] << " evaluated=" << Regression::nrEvaluations[0]
+                          << ',' << Regression::nrEvaluations[1] << '\n';
                 if (steady)
                     std::cout << "STEADY_PRESENT clock=" << nativeRate << "Hz coverage=" << coverage
                               << " processing=" << nrProcessingResolution << " FG=" << requestedFrameGeneration
                               << " measuredInputs=" << executedInputs - 2
                               << " NEW_S1=" << Regression::spatialSynthetic[0] - recoveryBaseline.synthetic[0]
-                              << " NEW_S2=" << Regression::spatialSynthetic[1] - recoveryBaseline.synthetic[1] << '\n';
+                              << " NEW_S2=" << Regression::spatialSynthetic[1] - recoveryBaseline.synthetic[1]
+                              << " NEW_S3=" << Regression::spatialSynthetic[2] - recoveryBaseline.synthetic[2] << '\n';
                 if (combined) {
                     require(Regression::combinedSynthetic[2][0] >= 4 &&
-                                (requestedFrameGeneration == 2 || Regression::combinedSynthetic[2][1] >= 4),
+                                (requestedFrameGeneration == 2 || Regression::combinedSynthetic[2][1] >= 4) &&
+                                (requestedFrameGeneration != 4 || Regression::combinedSynthetic[2][2] >= 4),
                             "after combined coverage/processing changes, native synthetic roles recover on90/85");
                     for (unsigned cohort = 0; cohort < 3; ++cohort)
                         std::cout << "COMBINED_PRESENT coverage=" << (cohort == 0 ? 95 : 90)
                                   << " processing=" << (cohort == 2 ? 85 : 80) << " FG=" << requestedFrameGeneration
                                   << " S1=" << Regression::combinedSynthetic[cohort][0]
-                                  << " S2=" << Regression::combinedSynthetic[cohort][1] << '\n';
+                                  << " S2=" << Regression::combinedSynthetic[cohort][1]
+                                  << " S3=" << Regression::combinedSynthetic[cohort][2] << '\n';
                 }
             }
             if (discard) {
@@ -1441,6 +1553,25 @@ int main(int argc, char** argv) {
                         "BGRA NR must present both synthetic roles and a complete consecutive S1/S2/B group");
                 std::cout << "BGRA3x proof: S1=" << s1 << " S2=" << s2 << " complete=" << complete << '\n';
             }
+            if (bgra && !spatialOff && requestedFrameGeneration == 4) {
+                std::array<unsigned, 3> counts{};
+                unsigned complete{};
+                const auto& roles = Regression::presentedRoles;
+                const size_t start = steady ? steadyPresentationStart : 0;
+                for (size_t i = start; i < roles.size(); ++i) {
+                    const auto role = roles[i].second;
+                    if (role == 0 || role == 1 || role == 3)
+                        ++counts[role == 3 ? 2 : role];
+                    if (i >= start + 3 && roles[i - 3].second == 0 && roles[i - 2].second == 1 &&
+                        roles[i - 1].second == 3 && role == 2 && roles[i - 3].first + 1 == roles[i - 2].first &&
+                        roles[i - 2].first + 1 == roles[i - 1].first && roles[i - 1].first + 1 == roles[i].first)
+                        ++complete;
+                }
+                require(counts[0] >= 4 && counts[1] >= 4 && counts[2] >= 4 && complete >= 1,
+                        "BGRA NR must present S1/S2/S3/B with consecutive native IDs");
+                std::cout << "BGRA4x proof: S1=" << counts[0] << " S2=" << counts[1] << " S3=" << counts[2]
+                          << " complete=" << complete << '\n';
+            }
             observeProjection = {};
             observeNativeEnd = {};
             observeNativeCommit = {};
@@ -1456,6 +1587,10 @@ int main(int argc, char** argv) {
         context->Flush();
         XR_CHECK(xrDestroyInstance(instance));
         instance = XR_NULL_HANDLE;
+        if (profile4) {
+            profile->remove();
+            std::cout << "PASS: actual executable profile selects4x over global2x without changing globals\n";
+        }
         std::cout << "PASS: public FG capture, native presentation, final colour and independent NR state\n";
         return 0;
     } catch (const std::exception& e) {

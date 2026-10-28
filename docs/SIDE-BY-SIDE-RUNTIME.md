@@ -23,19 +23,20 @@ C:\Program Files\VDXR-NR-FG\OpenXR\
     nvngx_dlssnr.dll            (separately supplied, licensed NR component)
 ```
 
-Keep the matching host and FG module together. NR requires the compatible licensed
+Keep the matching host and FG module together. OFXR 4× requires both new DLLs; an older
+FG module cannot supply its third generated output. NR requires the compatible licensed
 NR component beside them; it is not distributed by this project. Keep the folder
 protected by normal Program Files permissions. Do not redirect to a build directory
 that unprivileged programs can modify.
 
 ## Install from the release
 
-The [**2026.10.25 release**](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.25) supplies the guarded runtime and
+The [**2026.10.27 release**](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.27) supplies the guarded runtime and
 `CUSTOM-RUNTIME.json` together. Older runtime packages without this metadata are
 not the switcher package. Download the dated runtime ZIP and dated Controls ZIP
-from that release, and verify them against `SHA256SUMS-2026.10.25.txt` before continuing.
-Use `VDXR-NR-FG-Windows-x64-2026.10.25.zip` and
-`VDXR-NR-FG-Controls-Windows-x64-2026.10.25.zip` together.
+from that release, and verify them against `SHA256SUMS-2026.10.27.txt` before continuing.
+Use `VDXR-NR-FG-Windows-x64-2026.10.27.zip` and
+`VDXR-NR-FG-Controls-Windows-x64-2026.10.27.zip` together.
 
 1. Close VR games. Keep Virtual Desktop Streamer's **official** runtime installed.
    If you previously replaced its DLL with a community build, restore the original
@@ -103,7 +104,8 @@ the Controls app can have a later documentation/application revision.
 Close all VR games and select **Stock VDXR** in Controls. Back up the existing
 external host, FG DLL and `CUSTOM-RUNTIME.json`. Replace only those three files
 with the matching new runtime package. Preserve the separately licensed NR DLL
-and the folder's permissions. The new spatial NR option keeps processing at native
+and the folder's permissions. Existing executable-bound NR/FG profiles are preserved.
+The new spatial NR option keeps processing at native
 100% until explicitly changed when no prior processing preference exists. Extract the new Controls app into a fresh folder
 and update your shortcut to its EXE. The saved `custom_runtime_path` remains valid
 when the installation path stays the same; rerunning the registration block is

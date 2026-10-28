@@ -199,10 +199,50 @@ def run(result_path):
         check(read(gui.ENABLE_VALUE_NAME)[0] == 0, "reset disables NR")
         check(read(gui.PROCESSING_RESOLUTION_VALUE_NAME) == (100, winreg.REG_DWORD)
               and app.processing_resolution.get() == 100, "reset restores native processing resolution")
-        check(read(gui.FRAME_GENERATION_VALUE_NAME)[0] == 3 and read(gui.FRAME_GENERATION_BACKEND_NAME)[0] == 0,
+        check(read(gui.FRAME_GENERATION_VALUE_NAME)[0] == 4 and read(gui.FRAME_GENERATION_BACKEND_NAME)[0] == 0,
               "NR reset preserves MFG and NVIDIA selections")
         check(snapshot()[runtime_path] == runtime_before_nr and app.runtime_selection.get() == runtime.CUSTOM_LABEL,
               "NR and FG changes and NR reset preserve runtime selection")
+        globals_before_profile = snapshot()
+        executable = r"C:\ProfileFixtures\One\fixture.exe"
+        app.load_scope(executable)
+        global_values = app.profile_store.load()[0]
+        check(str(app.save_profile_button.cget("state")) == "normal" and not app.profile_dirty,
+              "inherited game setup can be saved without edits")
+        app.save_profile_button.invoke()
+        saved, sources = app.profile_store.load(executable)
+        check(saved == global_values and set(sources.values()) == {"profile"},
+              "unchanged Save locks all ten displayed NR and FG fields")
+        app.profile_store.save(None, {"DLSSNR_Intensity": 63, gui.FRAME_GENERATION_VALUE_NAME: 2})
+        check(app.profile_store.load(executable)[0] == global_values,
+              "locked game setup survives global appearance and FG changes")
+        app.reset_defaults()
+        inherited, sources = app.profile_store.load(executable)
+        check(inherited["DLSSNR_Intensity"] == 63 and inherited[gui.FRAME_GENERATION_VALUE_NAME] == 2
+              and set(sources.values()) == {"global"}, "Reset returns game to current globals")
+        app.profile_store.save(None, {"DLSSNR_Intensity": global_values["DLSSNR_Intensity"],
+                                      gui.FRAME_GENERATION_VALUE_NAME: global_values[gui.FRAME_GENERATION_VALUE_NAME]})
+        app.load_scope(executable)
+        app.enabled.set(True)
+        app.on_enabled_changed()
+        app.variables[1].set(81)
+        app.processing_resolution.set(80)
+        app.frame_generation.set("OFXR 2×")
+        app.on_frame_generation_changed()
+        check(snapshot() == globals_before_profile and app.profile_store.list_profiles() == [],
+              "game profile edits are drafts; globals unchanged")
+        check(app.save_profile(), "explicit game profile Save")
+        saved, sources = app.profile_store.load(executable)
+        check(saved[gui.ENABLE_VALUE_NAME] == 1 and saved["DLSSNR_Intensity"] == 81
+              and saved[gui.PROCESSING_RESOLUTION_VALUE_NAME] == 80
+              and saved[gui.FRAME_GENERATION_VALUE_NAME] == 2,
+              "complete game NR and FG round-trip")
+        check(set(sources.values()) == {"profile"} and snapshot() == globals_before_profile,
+              "game Save locks every displayed field without global writes")
+        app.reset_defaults()
+        check(app.profile_store.list_profiles() == [] and snapshot() == globals_before_profile,
+              "Reset game profile removes overrides and retains globals")
+        app.load_scope(None)
         app.on_close()
         root = None
         for coverage, processing in ((95, 80), (90, 85), (90, 80), (100, 80)):
@@ -247,8 +287,11 @@ def run(result_path):
         check(app.processing_resolution.get() == 100, "malformed processing resolution displays native 100")
         check(app.runtime_selection.get() == runtime.OTHER_LABEL and snapshot() == malformed_before,
               "malformed runtime selection opens honestly without writes")
+        root.update_idletasks()
         result.update(tcl_patchlevel=root.tk.call("info", "patchlevel"),
                       tk_patchlevel=root.tk.call("set", "tk_patchLevel"),
+                      window_required=[root.winfo_reqwidth(), root.winfo_reqheight()],
+                      screen_size=[root.winfo_screenwidth(), root.winfo_screenheight()],
                       executable=sys.executable, bundle_root=getattr(sys, "_MEIPASS", None))
     except Exception as error:
         result["error"] = f"{type(error).__name__}: {error}"
@@ -261,7 +304,8 @@ def run(result_path):
                 result["error"] = f"Could not restore registry mapping: {code}"
         if target is not None:
             target.Close()
-        for suffix in ("\\" + gui.REGISTRY_PATH, "\\" + gui.runtime_selection.RUNTIME_REGISTRY_PATH,
+        for suffix in ("\\" + gui.REGISTRY_PATH + "\\Profiles",
+                       "\\" + gui.REGISTRY_PATH, "\\" + gui.runtime_selection.RUNTIME_REGISTRY_PATH,
                        r"\SOFTWARE\Virtual Desktop, Inc.", r"\SOFTWARE", ""):
             try:
                 winreg.DeleteKeyEx(winreg.HKEY_CURRENT_USER, owned + suffix, winreg.KEY_WOW64_64KEY)

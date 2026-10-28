@@ -64,11 +64,19 @@ namespace {
         }
     };
     decltype(VDXRFG_ApiV1::Submit) originalDelayedSubmit;
+    decltype(VDXRFG_ApiV3::Submit) originalDelayedSubmit3;
+    std::atomic<unsigned> submitV1Calls{}, submitV3Calls{}, submitInjectionCalls{};
     ID3D12Fence* synthesisGate;
     ID3D12Fence* compositeGate;
     ID3D12CommandQueue* dependencyQueue;
     bool delaySubmission{};
-    HRESULT WINAPI delayedSubmit(void* context, const VDXRFG_SubmitInfoV1* input, VDXRFG_TicketV1* ticket) noexcept {
+    template <typename SubmitInfo, typename SubmitFunction>
+    HRESULT delayedSubmitImpl(void* context,
+                              const SubmitInfo* input,
+                              VDXRFG_TicketV1* ticket,
+                              SubmitFunction original) noexcept {
+        // Copy the negotiated payload type in full, including V3's fourth
+        // target and third fraction. Only its producer dependency is replaced.
         auto gated = *input;
         if (delaySubmission) {
             // Preserve the real input-copy dependency while adding a separate
@@ -87,16 +95,25 @@ namespace {
                 *ticket = {};
                 return hr;
             }
+            ++submitInjectionCalls;
             gated.producer_fence = compositeGate;
             gated.producer_value = 1;
         }
-        return originalDelayedSubmit(context, &gated, ticket);
+        return original(context, &gated, ticket);
+    }
+    HRESULT WINAPI delayedSubmit(void* context, const VDXRFG_SubmitInfoV1* input, VDXRFG_TicketV1* ticket) noexcept {
+        ++submitV1Calls;
+        return delayedSubmitImpl(context, input, ticket, originalDelayedSubmit);
+    }
+    HRESULT WINAPI delayedSubmit3(void* context, const VDXRFG_SubmitInfoV3* input, VDXRFG_TicketV1* ticket) noexcept {
+        ++submitV3Calls;
+        return delayedSubmitImpl(context, input, ticket, originalDelayedSubmit3);
     }
     struct SubmitHook {
         ComPtr<ID3D12Fence> composite;
-        SubmitHook(Gpu& gpu, ID3D12Fence* gate) {
+        unsigned expectedVersion{VDXRFG_API_VERSION};
+        SubmitHook(Gpu& gpu, ID3D12Fence* gate, HMODULE module) {
             success(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&composite)), "composite gate");
-            const auto module = GetModuleHandleW(L"vdxr-frame-generation.dll");
             auto getApi = reinterpret_cast<VDXRFG_GetApiV1Fn>(GetProcAddress(module, "VDXRFG_GetApiV1"));
             require(getApi != nullptr, "FG API export required");
             VDXRFG_ApiV1 api{};
@@ -104,18 +121,46 @@ namespace {
             api.api_version = VDXRFG_API_VERSION;
             success(getApi(&api), "get real module API");
             originalDelayedSubmit = api.Submit;
+            originalDelayedSubmit3 = nullptr;
+            const auto getApi3 = reinterpret_cast<VDXRFG_GetApiV3Fn>(GetProcAddress(module, "VDXRFG_GetApiV3"));
+            if (getApi3) {
+                VDXRFG_ApiV3 api3{};
+                api3.struct_size = sizeof(api3);
+                api3.api_version = VDXRFG_API_VERSION_3;
+                success(getApi3(&api3), "get real V3 module API");
+                require(api3.Submit != nullptr, "V3 submission entry point required");
+                originalDelayedSubmit3 = api3.Submit;
+                expectedVersion = VDXRFG_API_VERSION_3;
+            }
             synthesisGate = gate;
             compositeGate = composite.Get();
             dependencyQueue = gpu.queue.Get();
             delaySubmission = false;
+            submitV1Calls = submitV3Calls = submitInjectionCalls = 0;
             checkDetour(DetourTransactionBegin());
-            checkDetour(DetourUpdateThread(GetCurrentThread()));
-            checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalDelayedSubmit), delayedSubmit));
+            LONG status = DetourUpdateThread(GetCurrentThread());
+            if (status == NO_ERROR)
+                status = DetourAttach(reinterpret_cast<PVOID*>(&originalDelayedSubmit), delayedSubmit);
+            if (status == NO_ERROR && originalDelayedSubmit3)
+                status = DetourAttach(reinterpret_cast<PVOID*>(&originalDelayedSubmit3), delayedSubmit3);
+            if (status != NO_ERROR) {
+                DetourTransactionAbort();
+                checkDetour(status);
+            }
             checkDetour(DetourTransactionCommit());
+        }
+        void verify(unsigned expectedCalls, unsigned expectedInjections) const {
+            require(submitV1Calls == (expectedVersion == VDXRFG_API_VERSION ? expectedCalls : 0) &&
+                        submitV3Calls == (expectedVersion == VDXRFG_API_VERSION_3 ? expectedCalls : 0),
+                    "negotiated Submit version must reach the delay fixture hook exactly once per capture");
+            require(submitInjectionCalls == expectedInjections,
+                    "requested synthesis gate must be injected exactly once per delayed capture");
         }
         ~SubmitHook() {
             if (DetourTransactionBegin() != NO_ERROR || DetourUpdateThread(GetCurrentThread()) != NO_ERROR ||
                 DetourDetach(reinterpret_cast<PVOID*>(&originalDelayedSubmit), delayedSubmit) != NO_ERROR ||
+                (originalDelayedSubmit3 &&
+                 DetourDetach(reinterpret_cast<PVOID*>(&originalDelayedSubmit3), delayedSubmit3) != NO_ERROR) ||
                 DetourTransactionCommit() != NO_ERROR) {
                 std::_Exit(2);
             }
@@ -198,7 +243,7 @@ namespace virtualdesktop_openxr {
             const auto heldModule = LoadLibraryW(std::filesystem::absolute(module).c_str());
             require(heldModule != nullptr, "hold detoured module");
             auto heldModuleGuard = MakeScopeGuard([&] { FreeLibrary(heldModule); });
-            SubmitHook submitHook(hw.gpu, fgGate.Get());
+            SubmitHook submitHook(hw.gpu, fgGate.Get(), heldModule);
             ComPtr<ID3D11Fence> futureGate, presented;
             success(hw.device->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&futureGate)), "future NR gate");
             success(hw.device->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&presented)), "presentation marker");
@@ -289,6 +334,7 @@ namespace virtualdesktop_openxr {
             success(runtime.m_frameGeneration->capture(input, prime), "prime actual synthesis history");
             hw.await(*runtime.m_frameGeneration, prime);
             hw.retire(*runtime.m_frameGeneration, prime);
+            submitHook.verify(1, 0);
             input.serial = 2;
             input.time = reservation.currentTarget;
             input.slots = cadence.plan(reservation, first - period, true);
@@ -325,6 +371,11 @@ namespace virtualdesktop_openxr {
                 runtime.m_asyncSubmissionReady = false;
                 runtime.m_asyncSubmissionCondVar.notify_all();
             }
+            // Verify after transferring the ticket into runtime ownership so
+            // a failed hook assertion can use the existing joined cleanup.
+            submitHook.verify(2, delaySubmission ? 1 : 0);
+            std::cout << "SUBMIT_HOOK: api=" << submitHook.expectedVersion << " v1_calls=" << submitV1Calls.load()
+                      << " v3_calls=" << submitV3Calls.load() << " injections=" << submitInjectionCalls.load() << '\n';
             if (readyCase) {
                 if (scenario == L"expired-ready") {
                     require(state.waitFor([&] { return state.frames.size() == 3; }),

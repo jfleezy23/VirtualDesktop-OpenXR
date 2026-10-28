@@ -27,7 +27,7 @@ examples, not a preset applied by installation.*
    in this app's Runtime card. **Stock VDXR** returns to Streamer's official runtime.
    Streamer and the Controls app can stay open; restart an already running game to
    use the newly selected runtime.
-5. Choose **Off**, **OFXR 2×** or **OFXR 3×**, then an optical-flow backend.
+5. Choose **Off**, **OFXR 2×**, **OFXR 3×** or **OFXR 4×**, then an optical-flow backend.
    Start with **NVIDIA (default)**. Fully close and relaunch the game after changing
    either FG selector.
 6. With the updated custom runtime installed, enable **Enable NR**, set **NR coverage (%) to 95**,
@@ -41,12 +41,59 @@ NR off, FG off, NVIDIA selected, processing **100%** and coverage **100%**. Miss
 unreadable settings show a warning and a displayed fallback without overwriting the saved values.
 If coverage has never been saved, the status message asks you to toggle NR off/on to persist the
 displayed defaults. Enabling NR saves and verifies the displayed coverage before turning NR on,
-because the runtime's missing-coverage default differs from the app's displayed 100%.
+so the saved request matches the displayed 100%.
 
 NR requires compatible NVIDIA hardware and a separately supplied, compatible licensed
 NR component. **No DLSSNR DLLs or models are included or downloaded.** The controls
 package also contains no VR runtime DLLs or games. FG with NR off does not require the
 NR component.
+
+## Automatic game profiles
+
+**Globals** retains the existing immediate-save controls and your saved appearance values.
+Use **Add game EXE…** to select the actual game executable, then edit its effective NR/FG
+values and click **Save game profile**. Adding or selecting an executable writes nothing.
+Game edits remain drafts until saved; switching or closing offers Save, Discard or Cancel.
+**New games inherit globals; Save locks current setup; Reset returns to globals.** Save is
+available even without edits so you can lock a working global setup for one game.
+**Reset game profile** removes that game's overrides and restores inheritance immediately.
+Global **Reset NR settings** continues to reset only NR and preserves the FG selections.
+
+![The actual Controls app showing an example 4× game profile](images/controls-game-profile.png)
+
+*Example executable path and settings; no personal game inventory is included in the download.*
+
+The scope displays the executable's full path, the number of overrides and inherited values.
+All appearance controls, NR enable, coverage, processing resolution, FG mode and optical-flow
+backend support overrides. **Save game profile** stores all ten displayed values, so later
+global edits do not change that game's saved setup. New or manually partial profiles inherit
+each missing value from the current global value, then the runtime default. Reset removes
+all saved overrides and restores that inheritance. Missing coverage defaults to **100%** in
+both Controls and the runtime. A saved global coverage value, including 90%, always takes
+precedence over that fallback; this default change does not overwrite any saved value.
+
+Profiles apply automatically when that executable uses the custom runtime, including normal
+Virtual Desktop launches and shortcuts. Controls does not need to stay open or select the
+profile before launch. Choose the actual game process EXE rather than a launcher or shortcut;
+Controls does not scan installed games or infer a running game from process names. Two EXEs
+with the same basename in different folders have separate profiles. Case, slash and dot-path
+variations share a profile. Moving the executable to another folder needs a new profile;
+updating its contents at the same path preserves its profile.
+
+Saving NR overrides refreshes a running game's NR settings through the existing registry
+watcher. FG mode and backend are captured when the session starts: restart the game after
+changing either. A profile never temporarily replaces the global gameplay values.
+
+Malformed types or out-of-range values are rejected explicitly. The runtime disables the
+affected NR or FG group rather than silently inheriting an enabled global value. Controls
+shows a rejected profile and blocks Save; Reset removes malformed value overrides and can
+recover an interrupted creation whose identity metadata is missing. Present but mismatched
+or incorrectly typed identity metadata blocks replacement and Reset. Corrupt list entries
+are reported and skipped without hiding other valid game profiles.
+Profiles live below the existing 64-bit OpenXR registry key at `Profiles/<path identity>`;
+their `ExecutablePath` metadata guards against hash collisions. An older runtime that does
+not support profiles continues to use globals, so install the matching host before relying
+on per-game settings. OFXR 4× also requires the matching new FG module.
 
 ## Controls and when they apply
 
@@ -61,10 +108,11 @@ NR component.
 | Skin detail | NR skin-detail strength, 0–100 | During play |
 | NR processing resolution (%) | NR working dimensions relative to the selected coverage rectangle, **50–100%**; start at **80%**, native default **100%** | During play, saved after a short pause while dragging |
 | NR coverage (%) | Centered per-eye rectangle for NR, independent of processing resolution; slider **0–100%**, runtime minimum **10%** | During play, saved after a short pause while dragging |
-| Mode | Off, OFXR 2× or OFXR 3× | After restarting the game |
+| Mode | Off, OFXR 2×, OFXR 3× or OFXR 4× | After restarting the game |
 | Optical-flow backend | NVIDIA or experimental FidelityFX at full resolution | After restarting the game |
 
-There is no Apply button. The status line confirms a saved change or reports an error.
+Globals saves immediately. Game scope uses **Save game profile**. The status line confirms
+a saved change or reports an error.
 The NR sliders are disabled while NR is off; FG remains selectable. Closing the app
 flushes pending processing/coverage changes and leaves the saved settings in place.
 
@@ -97,7 +145,7 @@ processing and automatic transition. Coverage 100% with processing 100% retains 
 native path. Zero NR strength preserves the original RGB. Compare faces,
 hair, dark areas and movement before settling on a pair.
 
-**NR + MFG requires coverage of at least 90%** for eligibility. Keep OFXR 2× or 3× selected while
+**NR + MFG requires coverage of at least 90%** for eligibility. Select OFXR 2×, 3× or 4× while
 comparing 95/80, 90/80 or 90/85. FG consumes complete native stereo output; the saved selection does
 not guarantee that every submission is eligible or that generated frames meet the deadline.
 
@@ -128,7 +176,7 @@ continue to use `HKEY_LOCAL_MACHINE\SOFTWARE\Virtual Desktop, Inc.\OpenXR`.
 
 ## Frame generation without NR
 
-Leave **Enable NR** off, choose OFXR 2× or 3×, and restart the game. OFXR then processes
+Leave **Enable NR** off, choose OFXR 2×, 3× or 4×, and restart the game. OFXR then processes
 the ordinary final stereo images. Selecting **Off** disables OFXR while retaining the
 selected ordinary or NR processing path.
 
@@ -139,7 +187,7 @@ remains experimental; compare head motion, occlusions and image stability before
 choosing it for regular play. Changing the backend does not change game resolution,
 NR coverage or the NR appearance sliders.
 
-OFXR 2× can add one generated frame between real frames; 3× can add two. Eligibility
+OFXR 2× can add one generated frame between real frames; 3× can add two, and 4× can add three. Eligibility
 and timing still matter: unsupported submissions or missed deadlines retain real
 frames. **The selectors show saved requests, not active runtime status or proof that
 every synthetic frame reached the headset.** Use runtime capture/log evidence when
@@ -167,6 +215,10 @@ the frames.
 ## Build and local verification
 
 From a full source checkout on Windows x64 with Python 3.13 and Tcl/Tk:
+
+Building Controls needs the pinned Python requirements below. The full regression
+command also compiles sampler shaders and requires Windows SDK **10.0.26100.0**
+(including FXC); see the [FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.27/tests/frame-generation.md).
 
 ```powershell
 python -m venv bin/controls-build-env

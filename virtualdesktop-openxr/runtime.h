@@ -930,7 +930,7 @@ namespace virtualdesktop_openxr {
         OwnedFrameTransaction m_fgTransactionForFrame, m_fgTransactionForSubmission;
         OwnedFrameTransaction m_fgFailedTransaction;
         std::vector<ovrLayer_Union> m_fgFailedLayers;
-        std::array<std::array<SwapchainSlice, 3>, 2> m_fgPresentationBanks;
+        std::array<std::array<SwapchainSlice, 4>, 2> m_fgPresentationBanks;
         PredictionReservation m_fgReservationForSubmission;
         ovrSizei m_fgEyeResolution{};
         DXGI_FORMAT m_fgFormat{DXGI_FORMAT_UNKNOWN};
