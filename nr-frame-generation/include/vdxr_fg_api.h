@@ -119,6 +119,50 @@ typedef struct VDXRFG_ApiV2 {
 
 typedef HRESULT(WINAPI* VDXRFG_GetApiV2Fn)(VDXRFG_ApiV2*) VDXRFG_NOEXCEPT;
 
+/* V3 is a separate negotiated envelope. V1/V2 sizes and semantics stay fixed.
+ * Roles retain their legacy indices/bits: S1=0/1, S2=1/2, B=2/4, S3=3/8.
+ * Presentation order for 4X is S1,S2,S3,B. Every published role shares the
+ * full completion fence; retirement still requires all host consumers. */
+#define VDXRFG_API_VERSION_3 3u
+#define VDXRFG_CREATE_OMIT_REAL_OUTPUTS 8u
+
+typedef struct VDXRFG_CreateInfoV3 {
+    uint32_t struct_size, api_version;
+    void* device;
+    void* queue;
+    void* input;
+    void* outputs[2][4]; /* S1, S2, B, S3. Unused synthetic roles must be null. */
+    uint32_t width, height, format, multiplier;
+    uint32_t release_state;
+    uint32_t flags;
+    /* OMIT_REAL_OUTPUTS requires HOST_OWNS_REAL and null B in both banks.
+     * Without it, B remains required even under HOST_OWNS_REAL. */
+} VDXRFG_CreateInfoV3;
+
+typedef struct VDXRFG_SubmitInfoV3 {
+    uint32_t struct_size, api_version;
+    void* input;
+    void* producer_fence;
+    uint64_t producer_value, serial;
+    int64_t display_time_ns, display_period_ns;
+    int64_t target_time_ns[4]; /* Presentation order, ending in real B. */
+    float fractions[3];
+    VDXRFG_ViewV1 views[2];
+} VDXRFG_SubmitInfoV3;
+
+typedef struct VDXRFG_ApiV3 {
+    uint32_t struct_size, api_version;
+    uint32_t supported_create_flags, max_multiplier;
+    HRESULT(WINAPI* Create)(const VDXRFG_CreateInfoV3*, void**) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Submit)(void*, const VDXRFG_SubmitInfoV3*, VDXRFG_TicketV1*) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Retire)(void*, uint64_t) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Reset)(void*, uint32_t) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* GetStatistics)(void*, VDXRFG_StatisticsV1*) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Destroy)(void*) VDXRFG_NOEXCEPT;
+} VDXRFG_ApiV3;
+
+typedef HRESULT(WINAPI* VDXRFG_GetApiV3Fn)(VDXRFG_ApiV3*) VDXRFG_NOEXCEPT;
+
 #ifdef __cplusplus
 }
 #endif

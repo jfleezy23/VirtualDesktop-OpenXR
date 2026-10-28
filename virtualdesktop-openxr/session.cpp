@@ -24,6 +24,7 @@
 
 #include "log.h"
 #include "runtime.h"
+#include "game_profiles.h"
 #include "utils.h"
 
 namespace virtualdesktop_openxr {
@@ -398,28 +399,18 @@ namespace virtualdesktop_openxr {
         m_useAsyncSubmission = !m_isHeadless && !m_useApplicationDeviceForSubmission &&
                                !getSetting("quirk_disable_async_submission").value_or(false);
         m_needStartAsyncSubmissionThread = m_useAsyncSubmission;
-        const auto requestedFrameGeneration =
-            RegGetDword(HKEY_LOCAL_MACHINE, RegPrefix, "FrameGenerationMode").value_or(0);
-        m_frameGenerationMode = m_useAsyncSubmission && (requestedFrameGeneration == 2 || requestedFrameGeneration == 3)
+        const auto startupSettings = vdxr_profiles::readCurrent(xr::utf8_to_wide(RegPrefix));
+        const auto requestedFrameGeneration = startupSettings.get("FrameGenerationMode").value_or(0);
+        m_frameGenerationMode = m_useAsyncSubmission && (requestedFrameGeneration == 2 ||
+                                                         requestedFrameGeneration == 3 || requestedFrameGeneration == 4)
                                     ? static_cast<uint32_t>(requestedFrameGeneration)
                                     : 0;
-        // Missing means NVIDIA. A malformed value/read error disables FG;
-        // never silently choose another backend after an explicit request.
-        DWORD backend{}, backendSize = sizeof(backend);
-        const auto backendStatus = RegGetValueW(HKEY_LOCAL_MACHINE,
-                                                xr::utf8_to_wide(RegPrefix).c_str(),
-                                                L"FrameGenerationBackend",
-                                                RRF_SUBKEY_WOW6464KEY | RRF_RT_REG_DWORD,
-                                                nullptr,
-                                                &backend,
-                                                &backendSize);
-        const bool missingBackend = backendStatus == ERROR_FILE_NOT_FOUND || backendStatus == ERROR_PATH_NOT_FOUND;
-        m_frameGenerationBackend = missingBackend ? 0 : backend;
-        if ((!missingBackend && backendStatus != ERROR_SUCCESS) || m_frameGenerationBackend > 1) {
-            ErrorLog("Invalid frame-generation backend setting (status %u, value %u); disabling FG.\n",
-                     static_cast<unsigned>(backendStatus),
-                     static_cast<unsigned>(backend));
-            m_frameGenerationMode = 0;
+        // Snapshot both FG requests together. Registry notifications only refresh live NR;
+        // mode and backend remain fixed until the next session begins.
+        m_frameGenerationBackend = startupSettings.get("FrameGenerationBackend").value_or(0);
+        if (!startupSettings.fgValid) {
+            ErrorLog("Invalid frame-generation profile/global setting %s; disabling FG.\n",
+                     startupSettings.invalidName.c_str());
         }
 #ifndef _WIN64
         m_frameGenerationMode = 0;
@@ -647,15 +638,19 @@ namespace virtualdesktop_openxr {
 
         m_controllerLingerTimeout = getSetting("controller_linger_timeout").value_or(5000) * (int64_t)1'000'000;
 
+        const auto effectiveSettings = vdxr_profiles::readCurrent(xr::utf8_to_wide(RegPrefix));
+        if (!effectiveSettings.nrValid) {
+            ErrorLog("Invalid NR profile/global setting %s; disabling NR.\n", effectiveSettings.invalidName.c_str());
+        }
         DlssnrSettings settings;
-        settings.enabled = getSetting("DLSSNR_Enabled").value_or(0);
-        settings.style = getSetting("DLSSNR_Style").value_or(0);
-        settings.intensity = getSetting("DLSSNR_Intensity").value_or(100) / 100.0f;
-        settings.localToneStrength = getSetting("DLSSNR_LocalToneStrength").value_or(20) / 100.0f;
-        settings.localStructureStrength = getSetting("DLSSNR_LocalStructureStrength").value_or(70) / 100.0f;
-        settings.skinStructureStrength = getSetting("DLSSNR_SkinStructureStrength").value_or(50) / 100.0f;
-        settings.foveationSize = getSetting("FoveationSize").value_or(66) / 100.0f;
-        const auto processingResolution = getSetting("DLSSNR_ProcessingResolution").value_or(100);
+        settings.enabled = effectiveSettings.get("DLSSNR_Enabled").value_or(0);
+        settings.style = effectiveSettings.get("DLSSNR_Style").value_or(0);
+        settings.intensity = effectiveSettings.get("DLSSNR_Intensity").value_or(100) / 100.0f;
+        settings.localToneStrength = effectiveSettings.get("DLSSNR_LocalToneStrength").value_or(20) / 100.0f;
+        settings.localStructureStrength = effectiveSettings.get("DLSSNR_LocalStructureStrength").value_or(70) / 100.0f;
+        settings.skinStructureStrength = effectiveSettings.get("DLSSNR_SkinStructureStrength").value_or(50) / 100.0f;
+        settings.foveationSize = effectiveSettings.get("FoveationSize").value_or(100) / 100.0f;
+        const auto processingResolution = effectiveSettings.get("DLSSNR_ProcessingResolution").value_or(100);
         settings.processingResolution =
             processingResolution >= 50 && processingResolution <= 100 ? processingResolution : 100;
 

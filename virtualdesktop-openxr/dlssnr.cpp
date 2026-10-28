@@ -278,8 +278,29 @@ namespace virtualdesktop_openxr {
                                     const bool* depthInverted,
                                     ovrLayerEyeFov& layer,
                                     bool finalColour) {
+        // Recovery precedes route selection: changing processing/format must not
+        // bypass an uncertain submission's retained descriptors and resources.
+        if (m_nrNativeNeedsDrain || m_nrNativeNeedsFeatureReset || m_nrSpatialNeedsDrain ||
+            m_nrSpatialNeedsFeatureReset) {
+            m_dlssnrContext->Flush();
+            if (m_nrNativePipeline)
+                m_nrNativePipeline->DiscardRecording();
+            if (m_nrSpatialPipeline)
+                m_nrSpatialPipeline->DiscardRecording();
+            releaseDlssnrFeatures();
+            m_nrNativeNeedsDrain = false;
+            m_nrNativeNeedsFeatureReset = false;
+            m_nrSpatialNeedsDrain = false;
+            m_nrSpatialNeedsFeatureReset = false;
+        }
         if (m_precompositor.dlssnrSettings.processingResolution < 100 &&
             upliftSpatialLayer(views, depth, depthInverted, layer, finalColour)) {
+            // Entering spatial mode already drained the previous native features
+            // before preparing its own generation. Retire the inactive scratch.
+            if (m_nrNativePipeline) {
+                m_nrNativePipeline->DiscardRecording();
+                m_nrNativePipeline.reset();
+            }
             return;
         }
         // Retire an optional generation before returning to the unchanged native route.
@@ -335,7 +356,10 @@ namespace virtualdesktop_openxr {
             // Finish in-flight work before releasing the resources.
             flushSubmissionContext();
             m_dlssnrContext->Flush();
-
+            if (m_nrNativePipeline) {
+                m_nrNativePipeline->DiscardRecording();
+                m_nrNativePipeline->Clear();
+            }
             ensureDlssnrSwapchainResources(format, resolution);
         }
         if (m_dlssnrFeatureResolution.w < foveatedResolution.w || m_dlssnrFeatureResolution.h < foveatedResolution.h) {
@@ -355,57 +379,118 @@ namespace virtualdesktop_openxr {
             m_dlssnrFeatureResolution = foveatedResolution;
         }
 
-        // Serialize inputs.
-        m_submissionFenceValue++;
-        CHECK_HRCMD(m_ovrSubmissionContext->Signal(m_ovrSubmissionCompletionFence.Get(), m_submissionFenceValue));
-        CHECK_HRCMD(m_dlssnrContext->GetCommandQueue()->Wait(m_dlssnrInFence.Get(), m_submissionFenceValue));
-
-        // Time to apply the effect.
-        auto cmdList = m_dlssnrContext->GetCommandList();
         int imageIndex = 0;
         CHECK_OVRCMD(ovr_GetTextureSwapChainCurrentIndex(m_ovrSession, m_dlssnrOutputSwapchain, &imageIndex));
-        for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
-            const ovrSizei eyeResolution = {views[eye]->imageRect.extent.width, views[eye]->imageRect.extent.height};
-            const ovrSizei eyeFoveatedResolution = {
-                std::min(eyeResolution.w, (int)xr::math::AlignTo<4>((uint32_t)(eyeResolution.w * foveatedScale))),
-                std::min(eyeResolution.h, (int)xr::math::AlignTo<4>((uint32_t)(eyeResolution.h * foveatedScale)))};
-            const ovrVector2i offset = {(eyeResolution.w - eyeFoveatedResolution.w) / 2,
-                                        (eyeResolution.h - eyeFoveatedResolution.h) / 2};
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthInverted, depthInverted[eye]);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Enabled, true);
+        nr_spatial::FrameInput nativeInput{};
+        nativeInput.nativeAnswer = true;
+        nativeInput.output = m_dlssnrOutputSwapchainImages.at(imageIndex).Get();
+        nativeInput.outputFormat = ovrToDxgiTextureFormat(format);
+        nativeInput.outputEyeStride = resolution.w;
+        bool guard = nr_spatial::IsSupportedColorFormat(nativeInput.outputFormat);
+        for (uint32_t eye = 0; eye < 2 && guard; ++eye) {
+            auto& swapchain = *reinterpret_cast<Swapchain*>(views[eye]->swapchain);
+            auto& source = swapchain.resolvedSlices[views[eye]->imageArrayIndex];
+            const auto& rect = views[eye]->imageRect;
+            auto& target = nativeInput.eyes[eye];
+            target.colorFormat = swapchain.dxgiFormatForSubmission;
+            guard = rect.offset.x >= 0 && rect.offset.y >= 0 && rect.extent.width > 0 && rect.extent.height > 0 &&
+                    source.lastCommittedIndex >= 0 &&
+                    static_cast<size_t>(source.lastCommittedIndex) < source.dlssnrImages.size();
+            if (!guard)
+                break;
+            target.color = source.dlssnrImages[source.lastCommittedIndex].Get();
+            target.colorRect = {static_cast<uint32_t>(rect.offset.x),
+                                static_cast<uint32_t>(rect.offset.y),
+                                static_cast<uint32_t>(rect.extent.width),
+                                static_cast<uint32_t>(rect.extent.height)};
+            // Exactly the legacy vendor crop, including its alignment and centering.
+            const uint32_t width = std::min(
+                target.colorRect.width, xr::math::AlignTo<4>(static_cast<uint32_t>(rect.extent.width * foveatedScale)));
+            const uint32_t height =
+                std::min(target.colorRect.height,
+                         xr::math::AlignTo<4>(static_cast<uint32_t>(rect.extent.height * foveatedScale)));
+            target.processingRect = {
+                (target.colorRect.width - width) / 2, (target.colorRect.height - height) / 2, width, height};
+        }
+        if (guard) {
+            try {
+                if (!m_nrNativePipeline)
+                    m_nrNativePipeline = std::make_unique<nr_spatial::Pipeline>(m_dlssnrDevice.Get(),
+                                                                                m_dlssnrContext->GetCompletionFence());
+            } catch (const std::bad_alloc&) {
+                guard = false;
+            }
+            if (guard && m_nrNativePipeline->GetNativeAnswer() && !m_nrNativePipeline->Matches(nativeInput)) {
+                m_dlssnrContext->Flush();
+                m_nrNativePipeline->DiscardRecording();
+                m_nrNativePipeline->Clear();
+            }
+            if (guard) {
+                const auto prepared = m_nrNativePipeline->Prepare(nativeInput);
+                if (prepared == DXGI_ERROR_DEVICE_REMOVED || prepared == DXGI_ERROR_DEVICE_RESET)
+                    CHECK_HRCMD(prepared);
+                guard = SUCCEEDED(prepared);
+            }
+        }
+        if (m_nrNativeStatus != (guard ? 1 : 2)) {
+            Log("NR native color protection: %s",
+                guard ? "direct resolve active" : "unqualified format/view or unavailable resources; legacy fallback");
+            m_nrNativeStatus = guard ? 1 : 2;
+        }
 
-            createDlssnrFeature(eye, foveatedResolution, cmdList.Commands.Get());
+        bool submitAttempted{}, registered{};
+        try {
+            // Serialize inputs.
+            m_submissionFenceValue++;
+            CHECK_HRCMD(m_ovrSubmissionContext->Signal(m_ovrSubmissionCompletionFence.Get(), m_submissionFenceValue));
+            CHECK_HRCMD(m_dlssnrContext->GetCommandQueue()->Wait(m_dlssnrInFence.Get(), m_submissionFenceValue));
 
-            // Prepare feature evaluation.
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Output, m_dlssnrOutputSwapchainImages[imageIndex].Get());
+            // Time to apply the effect.
+            auto cmdList = m_dlssnrContext->GetCommandList();
+            for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
+                const ovrSizei eyeResolution = {views[eye]->imageRect.extent.width,
+                                                views[eye]->imageRect.extent.height};
+                const ovrSizei eyeFoveatedResolution = {
+                    std::min(eyeResolution.w, (int)xr::math::AlignTo<4>((uint32_t)(eyeResolution.w * foveatedScale))),
+                    std::min(eyeResolution.h, (int)xr::math::AlignTo<4>((uint32_t)(eyeResolution.h * foveatedScale)))};
+                const ovrVector2i offset = {(eyeResolution.w - eyeFoveatedResolution.w) / 2,
+                                            (eyeResolution.h - eyeFoveatedResolution.h) / 2};
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthInverted, depthInverted[eye]);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Enabled, true);
 
-            Swapchain& xrSwapchain = *(Swapchain*)views[eye]->swapchain;
-            ID3D12Resource* inputImage =
-                xrSwapchain.resolvedSlices[views[eye]->imageArrayIndex]
-                    .dlssnrImages[xrSwapchain.resolvedSlices[views[eye]->imageArrayIndex].lastCommittedIndex]
-                    .Get();
-            BOX colorBox{};
-            colorBox.left = views[eye]->imageRect.offset.x + offset.x;
-            colorBox.top = views[eye]->imageRect.offset.y + offset.y;
-            colorBox.right = colorBox.left + eyeFoveatedResolution.w;
-            colorBox.bottom = colorBox.top + eyeFoveatedResolution.h;
-            SafeClamp(colorBox, inputBox[eye]);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Color, inputImage);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_ColorSubrectBaseX, colorBox.left);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_ColorSubrectBaseY, colorBox.top);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_ColorSubrectWidth, colorBox.right - colorBox.left);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_ColorSubrectHeight, colorBox.bottom - colorBox.top);
+                createDlssnrFeature(eye, foveatedResolution, cmdList.Commands.Get());
 
-            BOX destBox{};
-            destBox.left = eye * resolution.w + offset.x; // Double-wide.
-            destBox.top = offset.y;
-            destBox.right = destBox.left + eyeFoveatedResolution.w;
-            destBox.bottom = destBox.top + eyeFoveatedResolution.h;
-            SafeClamp(destBox, outputBox[eye]);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_OutputSubrectBaseX, destBox.left);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_OutputSubrectBaseY, destBox.top);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_OutputSubrectWidth, destBox.right - destBox.left);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_OutputSubrectHeight, destBox.bottom - destBox.top);
+                // Prepare feature evaluation.
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Output,
+                                     guard ? m_nrNativePipeline->GetNativeAnswer() : nativeInput.output);
+
+                Swapchain& xrSwapchain = *(Swapchain*)views[eye]->swapchain;
+                ID3D12Resource* inputImage =
+                    xrSwapchain.resolvedSlices[views[eye]->imageArrayIndex]
+                        .dlssnrImages[xrSwapchain.resolvedSlices[views[eye]->imageArrayIndex].lastCommittedIndex]
+                        .Get();
+                BOX colorBox{};
+                colorBox.left = views[eye]->imageRect.offset.x + offset.x;
+                colorBox.top = views[eye]->imageRect.offset.y + offset.y;
+                colorBox.right = colorBox.left + eyeFoveatedResolution.w;
+                colorBox.bottom = colorBox.top + eyeFoveatedResolution.h;
+                SafeClamp(colorBox, inputBox[eye]);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Color, inputImage);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_ColorSubrectBaseX, colorBox.left);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_ColorSubrectBaseY, colorBox.top);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_ColorSubrectWidth, colorBox.right - colorBox.left);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_ColorSubrectHeight, colorBox.bottom - colorBox.top);
+
+                BOX destBox{};
+                destBox.left = eye * resolution.w + offset.x; // Double-wide.
+                destBox.top = offset.y;
+                destBox.right = destBox.left + eyeFoveatedResolution.w;
+                destBox.bottom = destBox.top + eyeFoveatedResolution.h;
+                SafeClamp(destBox, outputBox[eye]);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_OutputSubrectBaseX, destBox.left);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_OutputSubrectBaseY, destBox.top);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_OutputSubrectWidth, destBox.right - destBox.left);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_OutputSubrectHeight, destBox.bottom - destBox.top);
 
 #if 0
             // TODO: Use NVOFA to estimate motion.
@@ -418,110 +503,128 @@ namespace virtualdesktop_openxr {
             m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_MVecScaleY, motionVectorScaleY);
 #endif
 
-            if (depth[0] && depth[1]) {
-                Swapchain& xrDepthSwapchain = *(Swapchain*)depth[eye]->swapchain;
-                m_ngxParameters->Set(
-                    NVSDK_NGX_Parameter_DLSSNR_Depth,
-                    xrDepthSwapchain.resolvedSlices[depth[eye]->imageArrayIndex]
-                        .dlssnrImages[xrDepthSwapchain.resolvedSlices[depth[eye]->imageArrayIndex].lastCommittedIndex]
-                        .Get());
-                BOX depthBox{};
-                const auto& rect = depth[eye]->imageRect;
-                // Map the color crop into the depth image's own coordinates, including its offset.
-                depthBox.left = rect.offset.x + (int)((int64_t)offset.x * rect.extent.width / eyeResolution.w);
-                depthBox.top = rect.offset.y + (int)((int64_t)offset.y * rect.extent.height / eyeResolution.h);
-                depthBox.right =
-                    rect.offset.x +
-                    (int)(((int64_t)(offset.x + eyeFoveatedResolution.w) * rect.extent.width + eyeResolution.w - 1) /
-                          eyeResolution.w);
-                depthBox.bottom =
-                    rect.offset.y +
-                    (int)(((int64_t)(offset.y + eyeFoveatedResolution.h) * rect.extent.height + eyeResolution.h - 1) /
-                          eyeResolution.h);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseX, depthBox.left);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseY, depthBox.top);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectWidth, depthBox.right - depthBox.left);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectHeight, depthBox.bottom - depthBox.top);
-            } else {
-                // The parameter map persists across frames. Clear all optional depth bindings when unavailable.
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Depth, (ID3D12Resource*)nullptr);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseX, 0);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseY, 0);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectWidth, 0);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectHeight, 0);
+                if (depth[0] && depth[1]) {
+                    Swapchain& xrDepthSwapchain = *(Swapchain*)depth[eye]->swapchain;
+                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Depth,
+                                         xrDepthSwapchain.resolvedSlices[depth[eye]->imageArrayIndex]
+                                             .dlssnrImages[xrDepthSwapchain.resolvedSlices[depth[eye]->imageArrayIndex]
+                                                               .lastCommittedIndex]
+                                             .Get());
+                    BOX depthBox{};
+                    const auto& rect = depth[eye]->imageRect;
+                    // Map the color crop into the depth image's own coordinates, including its offset.
+                    depthBox.left = rect.offset.x + (int)((int64_t)offset.x * rect.extent.width / eyeResolution.w);
+                    depthBox.top = rect.offset.y + (int)((int64_t)offset.y * rect.extent.height / eyeResolution.h);
+                    depthBox.right =
+                        rect.offset.x + (int)(((int64_t)(offset.x + eyeFoveatedResolution.w) * rect.extent.width +
+                                               eyeResolution.w - 1) /
+                                              eyeResolution.w);
+                    depthBox.bottom =
+                        rect.offset.y + (int)(((int64_t)(offset.y + eyeFoveatedResolution.h) * rect.extent.height +
+                                               eyeResolution.h - 1) /
+                                              eyeResolution.h);
+                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseX, depthBox.left);
+                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseY, depthBox.top);
+                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectWidth, depthBox.right - depthBox.left);
+                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectHeight, depthBox.bottom - depthBox.top);
+                } else {
+                    // The parameter map persists across frames. Clear all optional depth bindings when unavailable.
+                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Depth, (ID3D12Resource*)nullptr);
+                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseX, 0);
+                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseY, 0);
+                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectWidth, 0);
+                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectHeight, 0);
+                }
+
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Reset, false);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_UseAutoMask, true);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Style, settings.style);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Intensity, settings.intensity);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_LocalToneStrength, settings.localToneStrength);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_LocalStructureStrength,
+                                     settings.localStructureStrength);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_SkinStructureStrength, settings.skinStructureStrength);
+                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_UICorrection, 0);
+
+                if (foveatedScale < 1.f && !guard) {
+                    D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+                    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                    src.SubresourceIndex = 0;
+                    src.pResource = inputImage;
+                    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                    dst.SubresourceIndex = 0;
+                    dst.pResource = m_dlssnrOutputSwapchainImages[imageIndex].Get();
+
+                    const auto ToD3dBox = [](D3D12_BOX& d3dBox, const BOX& box) {
+                        d3dBox.left = box.left;
+                        d3dBox.top = box.top;
+                        d3dBox.front = 0;
+                        d3dBox.right = box.right;
+                        d3dBox.bottom = box.bottom;
+                        d3dBox.back = 1;
+                    };
+
+                    D3D12_BOX d3dBox;
+                    BOX box{};
+                    box.left = views[eye]->imageRect.offset.x;
+                    box.top = views[eye]->imageRect.offset.y;
+                    box.right = box.left + eyeResolution.w;
+                    box.bottom = box.top + offset.y;
+                    SafeClamp(box, inputBox[eye]);
+                    ToD3dBox(d3dBox, box);
+                    cmdList.Commands->CopyTextureRegion(&dst, eye * resolution.w, 0, 0, &src, &d3dBox);
+                    box.top = views[eye]->imageRect.offset.y + offset.y + eyeFoveatedResolution.h;
+                    box.bottom = views[eye]->imageRect.offset.y + eyeResolution.h;
+                    SafeClamp(box, inputBox[eye]);
+                    ToD3dBox(d3dBox, box);
+                    cmdList.Commands->CopyTextureRegion(
+                        &dst, eye * resolution.w, eyeResolution.h - (box.bottom - box.top), 0, &src, &d3dBox);
+
+                    box.left = views[eye]->imageRect.offset.x;
+                    box.top = views[eye]->imageRect.offset.y + offset.y;
+                    box.right = box.left + offset.x;
+                    box.bottom = box.top + eyeFoveatedResolution.h;
+                    SafeClamp(box, inputBox[eye]);
+                    ToD3dBox(d3dBox, box);
+                    cmdList.Commands->CopyTextureRegion(
+                        &dst, eye * resolution.w, box.top - views[eye]->imageRect.offset.y, 0, &src, &d3dBox);
+                    box.left = views[eye]->imageRect.offset.x + offset.x + eyeFoveatedResolution.w;
+                    box.right = views[eye]->imageRect.offset.x + eyeResolution.w;
+                    SafeClamp(box, inputBox[eye]);
+                    ToD3dBox(d3dBox, box);
+                    cmdList.Commands->CopyTextureRegion(&dst,
+                                                        eye * resolution.w + eyeResolution.w - (box.right - box.left),
+                                                        box.top - views[eye]->imageRect.offset.y,
+                                                        0,
+                                                        &src,
+                                                        &d3dBox);
+                }
+
+                // Go!
+                CHECK_NGXCMD(m_dlssnrFeatureEvaluate[eye](
+                    cmdList.Commands.Get(), m_dlssnrFeature[eye], m_ngxParameters, nullptr));
             }
 
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Reset, false);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_UseAutoMask, true);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Style, settings.style);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Intensity, settings.intensity);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_LocalToneStrength, settings.localToneStrength);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_LocalStructureStrength, settings.localStructureStrength);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_SkinStructureStrength, settings.skinStructureStrength);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_UICorrection, 0);
-
-            if (foveatedScale < 1.f) {
-                D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
-                src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                src.SubresourceIndex = 0;
-                src.pResource = inputImage;
-                dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                dst.SubresourceIndex = 0;
-                dst.pResource = m_dlssnrOutputSwapchainImages[imageIndex].Get();
-
-                const auto ToD3dBox = [](D3D12_BOX& d3dBox, const BOX& box) {
-                    d3dBox.left = box.left;
-                    d3dBox.top = box.top;
-                    d3dBox.front = 0;
-                    d3dBox.right = box.right;
-                    d3dBox.bottom = box.bottom;
-                    d3dBox.back = 1;
-                };
-
-                D3D12_BOX d3dBox;
-                BOX box{};
-                box.left = views[eye]->imageRect.offset.x;
-                box.top = views[eye]->imageRect.offset.y;
-                box.right = box.left + eyeResolution.w;
-                box.bottom = box.top + offset.y;
-                SafeClamp(box, inputBox[eye]);
-                ToD3dBox(d3dBox, box);
-                cmdList.Commands->CopyTextureRegion(&dst, eye * resolution.w, 0, 0, &src, &d3dBox);
-                box.top = views[eye]->imageRect.offset.y + offset.y + eyeFoveatedResolution.h;
-                box.bottom = views[eye]->imageRect.offset.y + eyeResolution.h;
-                SafeClamp(box, inputBox[eye]);
-                ToD3dBox(d3dBox, box);
-                cmdList.Commands->CopyTextureRegion(
-                    &dst, eye * resolution.w, eyeResolution.h - (box.bottom - box.top), 0, &src, &d3dBox);
-
-                box.left = views[eye]->imageRect.offset.x;
-                box.top = views[eye]->imageRect.offset.y + offset.y;
-                box.right = box.left + offset.x;
-                box.bottom = box.top + eyeFoveatedResolution.h;
-                SafeClamp(box, inputBox[eye]);
-                ToD3dBox(d3dBox, box);
-                cmdList.Commands->CopyTextureRegion(
-                    &dst, eye * resolution.w, box.top - views[eye]->imageRect.offset.y, 0, &src, &d3dBox);
-                box.left = views[eye]->imageRect.offset.x + offset.x + eyeFoveatedResolution.w;
-                box.right = views[eye]->imageRect.offset.x + eyeResolution.w;
-                SafeClamp(box, inputBox[eye]);
-                ToD3dBox(d3dBox, box);
-                cmdList.Commands->CopyTextureRegion(&dst,
-                                                    eye * resolution.w + eyeResolution.w - (box.right - box.left),
-                                                    box.top - views[eye]->imageRect.offset.y,
-                                                    0,
-                                                    &src,
-                                                    &d3dBox);
+            // Serialize and commit output.
+            if (guard)
+                m_nrNativePipeline->RecordResolve(cmdList.Commands.Get());
+            submitAttempted = true;
+            const auto fenceValue = m_dlssnrContext->SubmitCommandList(std::move(cmdList));
+            CHECK_MSG(fenceValue && fenceValue != UINT64_MAX, "NR submission did not return a valid completion fence");
+            if (guard)
+                m_nrNativePipeline->MarkSubmitted(fenceValue);
+            registered = true;
+            CHECK_HRCMD(m_ovrSubmissionContext->Wait(m_dlssnrOutFence.Get(), fenceValue));
+        } catch (...) {
+            m_nrNativeNeedsFeatureReset = true;
+            if (!submitAttempted) {
+                if (guard)
+                    m_nrNativePipeline->DiscardRecording();
+            } else if (!registered) {
+                m_nrNativeNeedsDrain = true;
             }
-
-            // Go!
-            CHECK_NGXCMD(
-                m_dlssnrFeatureEvaluate[eye](cmdList.Commands.Get(), m_dlssnrFeature[eye], m_ngxParameters, nullptr));
+            throw;
         }
-
-        // Serialize and commit output.
-        const auto fenceValue = m_dlssnrContext->SubmitCommandList(std::move(cmdList));
-        CHECK_HRCMD(m_ovrSubmissionContext->Wait(m_dlssnrOutFence.Get(), fenceValue));
         // Later sharpening/upscaling can replace this intermediate. Commit only
         // if a final submitted layer still references the NR chain.
         m_precompositor.pendingColourCommits[0] = m_dlssnrOutputSwapchain;

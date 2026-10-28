@@ -2,14 +2,23 @@
 
 This x64 experimental integration uses the retained OFXR D3D12 synthesis core
 as an optional adjacent DLL, vdxr-frame-generation.dll. It runs after final stereo processing, including NR when enabled, sharpening and upscaling. Each real input receives NR once per eye; synthesized
-outputs are not fed through NR again. When NR is enabled, coverage must be at least 90%.
-The validated local configuration retains 100% coverage.
+outputs are not fed through NR again. When NR is enabled, coverage must be at least 90%
+for FG eligibility. Coverage and processing resolution remain independent; the recorded
+Moss headset check used 90% coverage and 85% processing with NVIDIA 4X.
 
 ## Controls and activation
 
-The existing VDXR NR Settings panel offers **Off**, **OFXR 2X** and **OFXR 3X**.
-Selection saves automatically to the 64-bit runtime registry view. Restart the
-game to apply a different FG mode. The selector shows the saved request, not a
+The VDXR NR/FG Controls app offers **Off**, **OFXR 2X**, **OFXR 3X** and **OFXR 4X**.
+Globals save automatically to the 64-bit runtime registry view. Game-scope edits
+remain drafts until **Save game profile**, which saves all ten displayed NR/FG values.
+Profiles are selected automatically by the actual game executable's normalized full path;
+Controls does not scan the game library or need to remain open. **Reset game profile**
+removes the overrides and restores global inheritance. Use the game process EXE rather
+than a launcher. See the [Controls guide](../docs/NR-FG-CONTROLS.md) for profile semantics.
+
+FG mode and backend are captured at session start. Restart the game to apply either
+change; saved NR enable, coverage, processing and appearance controls remain live.
+The selector shows the saved request, not a
 claim that generation is currently active. Changing FG does not reset NR
 settings. Installing the package does not enable FG or change the registry.
 
@@ -22,9 +31,16 @@ allocation rather than masking the required flag or retrying NVIDIA. Unsupported
 or malformed saved values disable FG for the session; the real/NR path remains.
 This is an existing color-only backend option, not OFXR's newer DLSS hybrid path.
 
+4X requires the matching new host and module with the separately negotiated V3 API.
+V1/V2 layouts and role indices stay unchanged. V3 adds S3 at role index 3/bit 8,
+retaining S1/S2/B at indices 0/1/2. Presentation order is S1, S2, S3, B, with
+synthetic fractions 1/4, 1/2 and 3/4. All published roles share the full completion
+fence, and retirement still waits for every host consumer. An unsupported 4X request
+fails closed to the ordinary path rather than silently selecting another multiplier.
+
 Turn Virtual Desktop's headset-side SSW off for OFXR tests. Keep any external
 OFXR generation layer off for these comparisons. SSW is a separate 2X mechanism;
-this package adds PC-side 2X and 3X rather than stacking generators.
+this package adds optional PC-side 2X, 3X and 4X. Do not stack generators.
 
 The initial integration accepts one complete color-only stereo projection with
 matching RGBA eye dimensions, runtime-owned asynchronous submission and valid
@@ -86,8 +102,8 @@ inputs use matching target-center coverage for cropped views. GPU fixtures
 check full/three-quarter/half scale, padded dimensions, both eyes and view edges.
 Synthetic pixels, input-consumption/output-readiness fences, retained banks and
 retirement remain unchanged. A prime ticket may advertise no packed roles while
-still owning GPU work and requiring retirement. The new host accepts older
-V1-only modules; a present but invalid V2 export fails closed.
+still owning GPU work and requiring retirement. For 2X/3X, the host accepts older
+V1-only modules; a present but invalid V2 export fails closed. 4X requires V3.
 
 Use PowerShell on Windows with Git, CMake, Python and the pinned MSVC/Windows SDK
 installed. The default v145 selects MSVC14.51.36231 and SDK10.0.26100.0; explicit v143 selects
@@ -118,7 +134,7 @@ successfully with a nonempty PASS marker and no failure/assertion markers.
 GPU checks require NVIDIA hardware; WARP or initialization failure is not a
 passing substitute. Run controlled cadence tests without competing GPU suites.
 
-The retained test suite exercises C/C++ ABI rejection, real moving-pixel 2X/3X,
+The retained test suite exercises C/C++ ABI rejection, real moving-pixel 2X/3X/4X,
 gamma/alpha, cropped-eye and opposite-eye isolation, D3D11/D3D12 transfer,
 blocked consumer/stale ticket, initialization and queue Signal faults,
 prediction quantization, actual post-NR/upscaler capture, native role
@@ -154,12 +170,26 @@ synthetic colors in the current real frame's camera plane; do not interpolate
 the submitted pose to a different plane. Depth-unaware translation and
 disocclusions need visual acceptance.
 
-Use a compatible OpenXR title with identical scene, refresh, resolution and 100% NR settings
-in fresh Off/2X/3X sessions. Verify stereo fusion, face/hair detail in motion,
+Use a compatible OpenXR title with identical scene, refresh, resolution and NR settings
+in fresh Off/2X/3X/4X sessions. With NR enabled, keep coverage at least 90% for FG eligibility.
+Verify stereo fusion, face/hair detail in motion,
 occlusions and controller response. Record real/generated/repeated/dropped
 frames, GPU times, queue age and actual native presentation cadence. Compare
 SSW separately with OFXR off. A higher FPS counter alone proves no latency gain.
-Headset acceptance remains pending until those observations are recorded.
+Acceptance for each additional game and setting remains dependent on those observations.
+
+### October 27 release validation scope
+
+The exact MSVC 14.51 release binary inputs passed **225 module checks**, **110 native
+checks**, **165 Python tests** and **70 Controls self-test assertions**. Both NVIDIA and
+FidelityFX passed 4X fixtures at **4096 × 4096 per eye**. Those fixture results establish
+the exercised contracts, rather than game throughput or delivery to a physical headset.
+
+The recorded Moss headset check used **NVIDIA 4X with NR at 90% coverage / 85% processing**
+and passed stereo, controller and motion checks. This is a bounded game observation;
+it does not establish a 4X game-FPS gain, motion-to-photon latency improvement, universal
+compatibility or artifact-free motion. FidelityFX remains experimental at full resolution.
+See the [release notes](../docs/releases/2026.10.27.md) for the public release scope.
 
 ## Source, licenses and rollback
 

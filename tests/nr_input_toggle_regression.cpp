@@ -16,6 +16,7 @@ namespace {
     DWORD coverage = 100;
     DWORD nrProcessingResolution = 100;
     DWORD requestedFrameGeneration{}, nrSharpenSetting{}, nrUpscalingSetting{100};
+    std::optional<DWORD> globalFrameGenerationReadOverride;
     DWORD requestedFrameGenerationBackend{};
     bool preserveNrAppearance{};
     DWORD nrDepthSubmissionSetting{1};
@@ -76,7 +77,7 @@ namespace {
         else if (setting == L"upscaling")
             value = nrUpscalingSetting;
         else if (setting == L"FrameGenerationMode")
-            value = requestedFrameGeneration;
+            value = globalFrameGenerationReadOverride.value_or(requestedFrameGeneration);
         else if (setting == L"FrameGenerationBackend")
             value = requestedFrameGenerationBackend;
         else if (preserveNrAppearance && setting == L"DLSSNR_Style")
@@ -514,20 +515,38 @@ namespace virtualdesktop_openxr {
             ID3D11DeviceContext4* consumer;
             ID3D11Fence* consumerFence;
         };
-        static SpatialSubmissionBoundary spatialSubmissionBoundary() {
+        static SpatialSubmissionBoundary spatialSubmissionBoundary(bool native = false) {
             const auto& runtime = *static_cast<OpenXrRuntime*>(GetInstance());
-            require(runtime.m_dlssnrContext && runtime.m_nrSpatialPipeline,
-                    "native submission observation requires a warm spatial frame");
+            require(runtime.m_dlssnrContext &&
+                        (native ? bool(runtime.m_nrNativePipeline) : bool(runtime.m_nrSpatialPipeline)),
+                    "submission observation requires a warm pipeline for the requested route");
             return {runtime.m_dlssnrContext->GetCommandQueue(),
                     runtime.m_dlssnrContext->GetCompletionFence(),
                     runtime.m_ovrSubmissionContext.Get(),
                     runtime.m_dlssnrOutFence.Get()};
         }
-        static bool spatialFailureOwnsResources(bool uncertain) {
+        static bool spatialFailureOwnsResources(bool uncertain, bool native = false) {
             const auto& runtime = *static_cast<OpenXrRuntime*>(GetInstance());
+            if (native)
+                return runtime.m_nrNativePipeline && runtime.m_nrNativePipeline->GetNativeAnswer() &&
+                       runtime.m_nrNativeNeedsFeatureReset && runtime.m_nrNativeNeedsDrain == uncertain &&
+                       !runtime.m_precompositor.pendingColourCommits[0];
             return runtime.m_nrSpatialPipeline && runtime.m_nrSpatialNeedsFeatureReset &&
                    runtime.m_nrSpatialNeedsDrain == uncertain && !runtime.m_precompositor.pendingColourCommits[0] &&
                    runtime.m_nrSpatialLastFrame + 1 == runtime.m_frameBegun;
+        }
+        static ID3D12Resource* nativeAnswerResource() {
+            const auto& runtime = *static_cast<OpenXrRuntime*>(GetInstance());
+            require(runtime.m_nrNativePipeline && runtime.m_nrNativePipeline->GetNativeAnswer(),
+                    "native failure observation requires a prepared direct answer scratch");
+            return runtime.m_nrNativePipeline->GetNativeAnswer();
+        }
+        static ID3D12Resource* publishedNrOutputResource() {
+            const auto& runtime = *static_cast<OpenXrRuntime*>(GetInstance());
+            const auto index = runtime.m_dlssnrOutputSwapchainLastWrittenIndex;
+            require(index >= 0 && static_cast<size_t>(index) < runtime.m_dlssnrOutputSwapchainImages.size(),
+                    "published NR output observation requires a successfully written output bank");
+            return runtime.m_dlssnrOutputSwapchainImages[index].Get();
         }
         static void checkSpatialPipeline(bool expected) {
             const auto& runtime = *static_cast<OpenXrRuntime*>(GetInstance());
@@ -537,7 +556,10 @@ namespace virtualdesktop_openxr {
                       << " status=" << runtime.m_nrSpatialStatus << " pipeline=" << bool(runtime.m_nrSpatialPipeline)
                       << '\n';
             require(bool(runtime.m_nrSpatialPipeline) == expected,
-                    "spatial pipeline allocation must agree with active route (native100 is lazy bypass)");
+                    "spatial pipeline allocation must agree with active route");
+            if (!expected)
+                require(runtime.m_nrNativePipeline && runtime.m_nrNativePipeline->GetNativeAnswer(),
+                        "qualified native100 must prepare its direct answer guard");
         }
 #endif
         static void checkDirectDepth(XrSwapchain handle, bool submitted) {

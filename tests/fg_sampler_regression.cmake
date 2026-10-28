@@ -1,0 +1,16 @@
+# Included by the FG CMake owner. Freeze the pre-sampler prepared shader once,
+# outside the build tree; never point this at the current generated derivative.
+set(FG_SAMPLER_BASELINE "" CACHE FILEPATH "Frozen pre-hardware-sampler frame_synthesis.hlsl")
+add_executable(fg_sampler_shader_regression ../tests/fg_sampler_shader_regression.cpp)
+target_compile_features(fg_sampler_shader_regression PRIVATE cxx_std_20)
+target_compile_options(fg_sampler_shader_regression PRIVATE /W4 /WX /permissive- /EHsc /fp:precise)
+target_compile_definitions(fg_sampler_shader_regression PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_link_libraries(fg_sampler_shader_regression PRIVATE d3d11 d3dcompiler dxgi)
+if(EXISTS "${FG_SAMPLER_BASELINE}")
+    add_test(NAME fg_sampler_compile COMMAND fg_sampler_shader_regression "${FG_SAMPLER_BASELINE}" "${SHADER}" --compile-only)
+    set_tests_properties(fg_sampler_compile PROPERTIES TIMEOUT 60)
+    add_test(NAME fg_sampler_differential COMMAND fg_sampler_shader_regression "${FG_SAMPLER_BASELINE}" "${SHADER}")
+    set_tests_properties(fg_sampler_differential PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
+else()
+    message(STATUS "Sampler differential gate needs -DFG_SAMPLER_BASELINE=<frozen pre-sampler shader>")
+endif()

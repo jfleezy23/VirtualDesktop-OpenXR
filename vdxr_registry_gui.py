@@ -4,10 +4,11 @@ import subprocess
 import sys
 import tkinter as tk
 from tkinter import font as tkfont
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 import winreg
 
 import vdxr_runtime_selection as runtime_selection
+import vdxr_game_profiles as game_profiles
 
 
 REGISTRY_PATH = r"SOFTWARE\Virtual Desktop, Inc.\OpenXR"
@@ -25,7 +26,7 @@ VALUE_MAXIMUMS = (2, 100, 100, 100, 100, 100)
 VALUE_DEFAULTS = (0, 100, 20, 70, 50, 100)
 VALUE_LABELS = ("NR style (0–2)", "NR strength", "Local tone", "Structure detail", "Skin detail", "NR coverage (%)")
 FRAME_GENERATION_VALUE_NAME = "FrameGenerationMode"
-FRAME_GENERATION_MODES = {"Off": 0, "OFXR 2×": 2, "OFXR 3×": 3}
+FRAME_GENERATION_MODES = {"Off": 0, "OFXR 2×": 2, "OFXR 3×": 3, "OFXR 4×": 4}
 FRAME_GENERATION_BACKEND_NAME = "FrameGenerationBackend"
 FRAME_GENERATION_BACKENDS = {"NVIDIA (default)": 0, "FidelityFX (full resolution)": 1}
 
@@ -204,7 +205,7 @@ def read_frame_generation_mode():
     except FileNotFoundError:
         return 0
     if kind != winreg.REG_DWORD or value not in FRAME_GENERATION_MODES.values():
-        raise ValueError("Invalid saved frame-generation setting; select Off, OFXR 2× or OFXR 3×.")
+        raise ValueError("Invalid saved frame-generation setting; select Off, OFXR 2×, OFXR 3× or OFXR 4×.")
     return value
 
 
@@ -301,20 +302,32 @@ def write_value(name, value):
 
 
 class VDXRRegistryApp:
-    def __init__(self, root):
+    def __init__(self, root, profile_store=None):
         self.root = root
         self.root.title("VDXR NR/FG Controls")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         apply_dark_theme(root)
         self.updating = True
+        self.profile_store = profile_store or game_profiles.ProfileStore()
+        self.profile_executable = None
+        self.profile_dirty = False
+        self.profile_valid = True
         errors = []
-        self.saved_values = read_values(errors)
         self.saved_enabled = read_enabled(errors)
-        self.saved_processing_resolution = read_processing_resolution(errors)
+        self.load_processing_resolution(errors)
+        self.saved_values = read_values(errors)
 
-        frame = ttk.Frame(root, padding=(20, 16), style="App.TFrame")
-        frame.grid()
+        # A bounded viewport keeps the existing cards reachable on scaled displays.
+        self.viewport = tk.Canvas(root, background=COLORS["background"], highlightthickness=0, borderwidth=0)
+        self.viewport.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(root, orient="vertical", command=self.viewport.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.viewport.configure(yscrollcommand=scrollbar.set)
+        frame = ttk.Frame(self.viewport, padding=(20, 16), style="App.TFrame")
+        self.viewport.create_window(0, 0, anchor="nw", window=frame)
+        frame.bind("<Configure>", lambda _event: self.viewport.configure(scrollregion=self.viewport.bbox("all")))
+        root.bind("<MouseWheel>", lambda event: self.viewport.yview_scroll(-int(event.delta / 120), "units"), add="+")
         frame.columnconfigure(0, minsize=592)
 
         ttk.Label(frame, text="VDXR Controls", style="Title.TLabel").grid(
@@ -347,8 +360,24 @@ class VDXRRegistryApp:
             row=1, column=0, columnspan=2, sticky="w", pady=(10, 0)
         )
 
+        scope_panel = RoundedPanel(frame)
+        scope_panel.grid(row=3, column=0, sticky="ew", pady=(0, 14))
+        scope = scope_panel.content
+        scope.columnconfigure(0, weight=1)
+        ttk.Label(scope, text="Settings scope", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        self.scope_selection = tk.StringVar(value="Globals")
+        self.scope_selector = ttk.Combobox(scope, textvariable=self.scope_selection, values=("Globals",),
+                                            state="readonly", width=48, style="Dark.TCombobox")
+        self.scope_selector.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        self.scope_selector.bind("<<ComboboxSelected>>", self.on_scope_changed)
+        ttk.Button(scope, text="Add game EXE…", command=self.add_profile, style="Soft.TButton").grid(
+            row=1, column=1, padx=(12, 0), pady=(8, 0))
+        self.scope_feedback = tk.StringVar(value="Globals · changes save immediately. Game profiles apply automatically at launch.")
+        ttk.Label(scope, textvariable=self.scope_feedback, style="Hint.TLabel", wraplength=592).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
         nr_panel = RoundedPanel(frame)
-        nr_panel.grid(row=3, column=0, sticky="ew")
+        nr_panel.grid(row=4, column=0, sticky="ew")
         nr = nr_panel.content
         nr.columnconfigure(1, weight=1)
         nr_header = ttk.Frame(nr, style="Card.TFrame")
@@ -364,7 +393,7 @@ class VDXRRegistryApp:
             variable=self.enabled,
             command=self.on_enabled_changed,
         ).grid(row=0, column=1, sticky="e")
-        ttk.Label(nr, text="Live adjustments", style="Live.TLabel").grid(
+        ttk.Label(nr, text="Saved NR changes apply during play", style="Live.TLabel").grid(
             row=1, column=0, columnspan=3, sticky="w", pady=(0, 8)
         )
 
@@ -425,17 +454,19 @@ class VDXRRegistryApp:
         ttk.Label(nr, textvariable=self.processing_resolution, style="Value.TLabel", width=3, anchor="e").grid(
             row=8, column=2, sticky="e", padx=(14, 0)
         )
-        ttk.Label(nr, text="Model grid, not Coverage area. Native 100%; try 80% experimentally.\n"
-                  "Requires Coverage 100% and a supported custom runtime; otherwise native NR.",
+        ttk.Label(nr, text="Both percentages scale linear dimensions. Native processing 100%; try 80%.\n"
+                  "Combined coverage + processing requires an updated custom runtime.",
                   style="Hint.TLabel", wraplength=592).grid(
             row=9, column=0, columnspan=3, sticky="w", pady=(10, 0)
         )
-        ttk.Label(nr, text="Changes apply during play.  100% coverage recommended.", style="Hint.TLabel").grid(
+        ttk.Label(nr, text="Reduced processing with partial coverage adds an automatic inside transition;\n"
+                  "the fully enhanced center is smaller.",
+                  style="Hint.TLabel", wraplength=592).grid(
             row=10, column=0, columnspan=3, sticky="w", pady=(6, 0)
         )
 
         fg_panel = RoundedPanel(frame)
-        fg_panel.grid(row=4, column=0, sticky="ew", pady=(14, 0))
+        fg_panel.grid(row=5, column=0, sticky="ew", pady=(14, 0))
         fg = fg_panel.content
         fg.columnconfigure(0, weight=1)
         fg.columnconfigure(1, weight=1)
@@ -471,22 +502,167 @@ class VDXRRegistryApp:
         )
         backend_selector.grid(row=2, column=1, sticky="ew")
         backend_selector.bind("<<ComboboxSelected>>", self.on_frame_generation_backend_changed)
-        ttk.Label(fg, text="Works with NR on or off. Turn SSW off in Virtual Desktop.", style="Hint.TLabel").grid(
+        ttk.Label(fg, text="NR + MFG requires coverage at least 90%. Turn SSW off in Virtual Desktop.",
+                  style="Hint.TLabel", wraplength=592).grid(
             row=3, column=0, columnspan=2, sticky="w", pady=(12, 4)
         )
         ttk.Label(fg, text="Selections are saved requests, not active runtime status.", style="Hint.TLabel").grid(
             row=4, column=0, columnspan=2, sticky="w"
         )
-        ttk.Button(
+        self.reset_button = ttk.Button(
             frame, text="Reset NR settings", command=self.reset_defaults, style="Soft.TButton",
-        ).grid(row=5, column=0, sticky="w", pady=(14, 0))
+        )
+        self.reset_button.grid(row=6, column=0, sticky="w", pady=(14, 0))
+        self.save_profile_button = ttk.Button(frame, text="Save game profile", command=self.save_profile,
+                                               style="Soft.TButton", state="disabled")
+        self.save_profile_button.grid(row=6, column=0, sticky="e", pady=(14, 0))
         self.status = tk.StringVar(value="; ".join(errors) or "Ready · changes save automatically")
         ttk.Label(frame, textvariable=self.status, style="Subtitle.TLabel", wraplength=592).grid(
-            row=6, column=0, sticky="w", pady=(8, 0)
+            row=7, column=0, sticky="w", pady=(8, 0)
         )
         root.bind("<Map>", lambda event: root.after_idle(dark_title_bar, root) if event.widget is root else None, add="+")
         self.set_slider_state()
         self.updating = False
+        self.refresh_profile_choices()
+        root.update_idletasks()
+        self.viewport.configure(width=frame.winfo_reqwidth(),
+                                height=min(frame.winfo_reqheight(), max(200, root.winfo_screenheight() - 120)))
+
+    def refresh_profile_choices(self):
+        errors = []
+        try:
+            profiles = self.profile_store.list_profiles(errors)
+        except (OSError, ValueError) as error:
+            self.status.set(f"Profile list error: {error}")
+            profiles = []
+        if self.profile_executable and self.profile_executable not in profiles:
+            profiles.append(self.profile_executable)
+        self.scope_selector.configure(values=("Globals", *profiles))
+        if errors:
+            self.status.set(f"{self.status.get()}; {len(errors)} game profile(s) skipped: invalid or unreadable identity metadata.")
+
+    def confirm_profile_switch(self):
+        if not self.profile_dirty:
+            return True
+        choice = messagebox.askyesnocancel("Unsaved game profile", "Save this game's changes before switching?",
+                                          parent=self.root)
+        if choice is None:
+            return False
+        return self.save_profile() if choice else True
+
+    def on_scope_changed(self, _event=None):
+        selection = self.scope_selection.get()
+        if self.confirm_profile_switch():
+            self.load_scope(None if selection == "Globals" else selection)
+        else:
+            self.scope_selection.set(self.profile_executable or "Globals")
+
+    def add_profile(self):
+        if not self.confirm_profile_switch():
+            return
+        executable = filedialog.askopenfilename(parent=self.root, title="Select the game executable",
+                                                filetypes=(("Windows executable", "*.exe"),))
+        if executable:
+            try:
+                self.load_scope(game_profiles.normalize_executable(executable))
+                self.refresh_profile_choices()
+            except (OSError, ValueError) as error:
+                self.status.set(f"Profile identity error: {error}")
+
+    def load_scope(self, executable):
+        # Leaving Globals must keep its existing debounced autosave contract.
+        if self.profile_executable is None and executable is not None:
+            if self.processing_resolution_save_id is not None and not self.save_processing_resolution():
+                self.scope_selection.set("Globals")
+                return False
+            if self.foveation_save_id is not None and not self.save_foveation_size(self.variables[-1]):
+                self.scope_selection.set("Globals")
+                return False
+        self.cancel_foveation_save()
+        self.cancel_processing_resolution_save()
+        self.profile_executable = executable
+        self.scope_selection.set(executable or "Globals")
+        self.reset_button.configure(text="Reset game profile" if executable else "Reset NR settings")
+        self.profile_dirty = False
+        self.profile_valid = True
+        errors = []
+        self.updating = True
+        try:
+            if executable is None:
+                # Preserve existing global autosave semantics and displayed defaults.
+                self.saved_enabled = read_enabled(errors)
+                self.saved_values = read_values(errors)
+                self.load_processing_resolution(errors)
+                try:
+                    mode, backend = read_frame_generation_mode(), read_frame_generation_backend()
+                except (OSError, ValueError) as error:
+                    mode, backend = 0, 0
+                    errors.append(str(error))
+                self.scope_feedback.set("Globals · changes save immediately. Game profiles apply automatically at launch.")
+            else:
+                try:
+                    values, sources = self.profile_store.load(executable)
+                except (OSError, ValueError) as error:
+                    values, sources = game_profiles.DEFAULTS.copy(), {}
+                    self.profile_valid = False
+                    errors.append(f"Profile rejected: {error} Reset profile to inherit globals before saving.")
+                self.saved_enabled = bool(values[ENABLE_VALUE_NAME])
+                self.saved_values = [values[name] for name in VALUE_NAMES]
+                self.saved_processing_resolution = values[PROCESSING_RESOLUTION_VALUE_NAME]
+                self.processing_resolution_verified = self.profile_valid
+                mode, backend = values[FRAME_GENERATION_VALUE_NAME], values[FRAME_GENERATION_BACKEND_NAME]
+                overrides = sum(source == "profile" for source in sources.values())
+                self.scope_feedback.set(
+                    f"{executable}\n{overrides} game overrides · {len(sources) - overrides} inherited "
+                    "from globals/defaults. New games inherit globals; Save locks current setup; Reset returns to globals."
+                    if self.profile_valid else
+                    f"{executable}\nProfile rejected · controls show safe display defaults. Reset overrides to recover.")
+            self.enabled.set(self.saved_enabled)
+            for variable, value in zip(self.variables, self.saved_values):
+                variable.set(value)
+            self.processing_resolution.set(self.saved_processing_resolution)
+            self.saved_frame_generation = next(label for label, value in FRAME_GENERATION_MODES.items() if value == mode)
+            self.saved_frame_generation_backend = next(label for label, value in FRAME_GENERATION_BACKENDS.items() if value == backend)
+            self.frame_generation.set(self.saved_frame_generation)
+            self.frame_generation_backend.set(self.saved_frame_generation_backend)
+            self.save_profile_button.configure(state="normal" if executable is not None and self.profile_valid else "disabled")
+            self.set_slider_state()
+            self.status.set("; ".join(errors) or ("Showing effective game settings · missing values inherit globals/defaults."
+                                                   if executable else "Globals · changes save automatically"))
+        finally:
+            self.updating = False
+        return True
+
+    def stage_profile_change(self):
+        if self.profile_executable is None:
+            return False
+        if not self.profile_valid:
+            self.status.set("Profile rejected · Save is blocked. Reset malformed overrides before editing.")
+            return True
+        if not self.updating:
+            self.profile_dirty = True
+            self.set_slider_state()
+            self.status.set("Unsaved game profile · Save applies NR during play; FG changes require a game restart.")
+        return True
+
+    def save_profile(self):
+        if self.profile_executable is None or not self.profile_valid:
+            return False
+        values = {name: variable.get() for name, variable in zip(VALUE_NAMES, self.variables)}
+        values.update({ENABLE_VALUE_NAME: int(self.enabled.get()),
+                       PROCESSING_RESOLUTION_VALUE_NAME: self.processing_resolution.get(),
+                       FRAME_GENERATION_VALUE_NAME: FRAME_GENERATION_MODES[self.frame_generation.get()],
+                       FRAME_GENERATION_BACKEND_NAME: FRAME_GENERATION_BACKENDS[self.frame_generation_backend.get()]})
+        try:
+            # Save locks the complete displayed setup, including inherited values.
+            self.profile_store.save(self.profile_executable, values)
+            self.load_scope(self.profile_executable)
+            self.refresh_profile_choices()
+            self.status.set("Game setup saved and locked · NR applies during play; restart game for FG changes.")
+            return True
+        except (OSError, ValueError) as error:
+            self.status.set(f"Game profile save error: {error}. Some values may have been written; reload the scope to verify.")
+            return False
 
     def on_runtime_changed(self, _event=None):
         selection = self.runtime_selection.get()
@@ -507,6 +683,8 @@ class VDXRRegistryApp:
             self.status.set(f"Saved {selection} for the next game launch. Keep VDXR selected in Streamer.")
 
     def on_frame_generation_backend_changed(self, _event=None):
+        if self.stage_profile_change():
+            return
         selection = self.frame_generation_backend.get()
         try:
             write_frame_generation_backend(FRAME_GENERATION_BACKENDS[selection])
@@ -521,6 +699,8 @@ class VDXRRegistryApp:
             self.status.set(f"Saved {selection}; restart the game.")
 
     def on_frame_generation_changed(self, _event=None):
+        if self.stage_profile_change():
+            return
         selection = self.frame_generation.get()
         try:
             write_frame_generation_mode(FRAME_GENERATION_MODES[selection])
@@ -534,6 +714,13 @@ class VDXRRegistryApp:
             self.saved_frame_generation = selection
             self.status.set(f"Saved {selection}; restart the game.")
 
+    def load_processing_resolution(self, errors):
+        read_errors = []
+        self.saved_processing_resolution = read_processing_resolution(read_errors)
+        # Keep read warnings honest without gating independent coverage edits.
+        self.processing_resolution_verified = not read_errors
+        errors.extend(read_errors)
+
     def set_slider_state(self):
         state = tk.NORMAL if self.enabled.get() else tk.DISABLED
         for slider in self.slider_widgets:
@@ -541,9 +728,11 @@ class VDXRRegistryApp:
         self.processing_resolution_slider.configure(state=state)
 
     def on_enabled_changed(self):
+        if self.stage_profile_change():
+            return
         try:
             if self.enabled.get():
-                # Runtime's missing-value default is 66%, so persist the displayed coverage first.
+                # Persist the displayed coverage before explicitly enabling NR.
                 self.cancel_foveation_save()
                 if not self.save_foveation_size(self.variables[-1]):
                     self.enabled.set(self.saved_enabled)
@@ -576,6 +765,15 @@ class VDXRRegistryApp:
             self.status.set(f"Registry error: {error}")
 
     def reset_defaults(self):
+        if self.profile_executable is not None:
+            try:
+                self.profile_store.reset(self.profile_executable)
+                self.load_scope(self.profile_executable)
+                self.refresh_profile_choices()
+                self.status.set("Game overrides reset · inheriting globals/defaults; restart game for FG changes.")
+            except (OSError, ValueError) as error:
+                self.status.set(f"Profile reset error: {error}")
+            return
         self.cancel_foveation_save()
         self.cancel_processing_resolution_save()
         self.updating = True
@@ -605,6 +803,8 @@ class VDXRRegistryApp:
     def save(self, index, variable):
         if self.updating:
             return
+        if self.stage_profile_change():
+            return
         if VALUE_NAMES[index] == "FoveationSize":
             self.cancel_foveation_save()
             self.foveation_save_id = self.root.after(
@@ -615,6 +815,8 @@ class VDXRRegistryApp:
         return self.save_nr_value(index, variable)
 
     def save_nr_value(self, index, variable):
+        if VALUE_NAMES[index] == "FoveationSize":
+            return self.save_foveation_size(variable)
         try:
             write_value(VALUE_NAMES[index], variable.get())
             self.saved_values[index] = variable.get()
@@ -632,8 +834,18 @@ class VDXRRegistryApp:
         return False
 
     def save_foveation_size(self, variable):
-        self.foveation_save_id = None
-        return self.save_nr_value(len(VALUE_NAMES) - 1, variable)
+        self.cancel_foveation_save()
+        value = variable.get()
+        try:
+            write_value("FoveationSize", value)
+        except OSError as error:
+            self.spatial_save_failed("NR coverage", error)
+            return False
+        self.saved_values[-1] = value
+        self.status.set(f"Saved NR coverage = {value}% · applies during play")
+        if not self.processing_resolution_verified:
+            self.status.set(f"Saved NR coverage = {value}%; NR processing resolution is unverified; showing its default.")
+        return True
 
     def cancel_foveation_save(self):
         if self.foveation_save_id is not None:
@@ -643,25 +855,43 @@ class VDXRRegistryApp:
     def on_processing_resolution_changed(self, *_args):
         if self.updating:
             return
+        if self.stage_profile_change():
+            return
         self.cancel_processing_resolution_save()
+        self.set_slider_state()
         self.processing_resolution_save_id = self.root.after(400, self.save_processing_resolution)
 
     def save_processing_resolution(self):
-        self.processing_resolution_save_id = None
+        self.cancel_processing_resolution_save()
         try:
             value = self.processing_resolution.get()
             write_processing_resolution(value)
-        except PermissionError:
-            self.refresh_processing_resolution()
-            self.status.set("Administrator access is required to save NR processing resolution.")
         except (OSError, ValueError) as error:
-            self.refresh_processing_resolution()
-            self.status.set(f"NR processing resolution error: {error}")
+            self.spatial_save_failed("NR processing resolution", error)
         else:
             self.saved_processing_resolution = value
+            self.processing_resolution_verified = True
+            self.set_slider_state()
             self.status.set(f"Saved NR processing resolution = {value}% · supported custom runtime required")
             return True
         return False
+
+    def spatial_save_failed(self, setting, error):
+        """Reconcile both settings after a possibly partial, unverified write."""
+        errors = [f"{setting} error: " + (
+            "administrator access is required." if isinstance(error, PermissionError) else str(error)
+        )]
+        self.cancel_foveation_save()
+        was_updating = self.updating
+        self.updating = True
+        try:
+            self.saved_values[-1] = read_nr_value("FoveationSize", 100, 100, errors)
+            self.variables[-1].set(self.saved_values[-1])
+            self.refresh_processing_resolution(errors)
+        finally:
+            self.updating = was_updating
+        self.set_slider_state()
+        self.status.set("; ".join(errors))
 
     def cancel_processing_resolution_save(self):
         if self.processing_resolution_save_id is not None:
@@ -670,15 +900,25 @@ class VDXRRegistryApp:
 
     def refresh_processing_resolution(self, errors=None):
         self.cancel_processing_resolution_save()
-        self.saved_processing_resolution = read_processing_resolution(errors)
+        read_errors = []
+        self.load_processing_resolution(read_errors)
+        if errors is not None:
+            errors.extend(read_errors)
+        elif read_errors:
+            self.status.set("; ".join(read_errors))
         was_updating = self.updating
         self.updating = True
         try:
             self.processing_resolution.set(self.saved_processing_resolution)
         finally:
             self.updating = was_updating
+        self.set_slider_state()
 
     def on_close(self):
+        if self.profile_executable is not None:
+            if self.confirm_profile_switch():
+                self.root.destroy()
+            return
         pending_processing = self.processing_resolution_save_id is not None
         pending_coverage = self.foveation_save_id is not None
         self.cancel_processing_resolution_save()
@@ -686,7 +926,7 @@ class VDXRRegistryApp:
         error_status = None
         if pending_processing:
             if not self.save_processing_resolution():
-                error_status = self.status.get()
+                return
         if pending_coverage:
             if not self.save_foveation_size(self.variables[-1]):
                 error_status = self.status.get()

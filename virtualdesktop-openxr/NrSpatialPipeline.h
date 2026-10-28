@@ -13,6 +13,8 @@ namespace virtualdesktop_openxr::nr_spatial {
         ID3D12Resource* depth{};
         DXGI_FORMAT depthFormat{DXGI_FORMAT_UNKNOWN};
         Rect depthRect{};
+        Rect processingRect{};      // Local to the full valid colorRect; empty means the complete eye.
+        uint32_t transitionWidth{}; // Native pixels, inside processingRect only.
     };
     struct FrameInput {
         std::array<EyeInput, 2> eyes{};
@@ -20,6 +22,7 @@ namespace virtualdesktop_openxr::nr_spatial {
         DXGI_FORMAT outputFormat{DXGI_FORMAT_UNKNOWN};
         uint32_t outputEyeStride{}; // Horizontal native output offset of eye 1; eye 0 starts at (0,0).
         uint32_t processingPercent{100};
+        bool nativeAnswer{}; // Direct packed vendor answer; requires 100%, no downsample/depth scratch.
     };
     struct WorkingEye {
         ID3D12Resource* proxy{};
@@ -32,6 +35,9 @@ namespace virtualdesktop_openxr::nr_spatial {
     // Between RecordInputs and RecordResolve, the vendor owns proxy/answer/depth
     // access and must return them to COMMON. Proxy/answer are RGBA8 UNORM storage
     // containing the declared input encoding. Depth is R32_FLOAT, unchanged in sign.
+    // In nativeAnswer mode there are no input/depth scratch passes: the vendor
+    // writes the packed GetNativeAnswer() crop and returns it to COMMON before
+    // RecordResolve. Original sources remain separate from the final render target.
     // All resources must be single-sample, single-mip 2D resources. Native inputs
     // read slice zero, including the host's array alias for resolved slice zero;
     // other eye slices are flattened by the host. Output must be single-slice.
@@ -51,6 +57,7 @@ namespace virtualdesktop_openxr::nr_spatial {
         bool Matches(const FrameInput&) const;
         HRESULT Prepare(const FrameInput&);
         WorkingEye GetWorkingEye(uint32_t) const;
+        ID3D12Resource* GetNativeAnswer() const;
         void RecordInputs(ID3D12GraphicsCommandList*);
         void RecordResolve(ID3D12GraphicsCommandList*);
         void MarkSubmitted(uint64_t);

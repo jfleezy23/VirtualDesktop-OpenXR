@@ -586,6 +586,173 @@ NvidiaShared3xTargets SynthesizeNvidiaShared3xPS(FullscreenVertex input) {
 """
 
 
+def prepare_four_frame_outputs(output: Path, modified: str) -> str:
+    """Bounded V558 extra outputs on the retained derivative, with 3X MRT intact."""
+    header_path = output / "xrfg/d3d12_frame_synthesizer.hpp"
+    header = header_path.read_text(encoding="utf-8")
+    start = header.index("    [[nodiscard]] HRESULT submit_pair(")
+    end = header.index(") noexcept;", start) + len(") noexcept;")
+    declaration = header[start:end]
+    # Keep the optional one-extra source contract used by retained tests.
+    # The new explicitly named overload carries up to two bounded outputs.
+    span_declaration = declaration.replace("submit_pair(", "submit_pair_outputs(")
+    span_declaration = span_declaration.replace(" = std::nullopt", "").replace(" = {}", "")
+    span_declaration = span_declaration.replace(" = false", "").replace(" = 0.5F", "")
+    span_declaration = span_declaration.replace("std::optional<D3D12ExtraSynthetic> extra_synthetic",
+                                              "std::span<const D3D12ExtraSynthetic> extra_synthetics")
+    header = header[:end] + "\n\n" + span_declaration + header[end:]
+    header_path.write_text(header, encoding="utf-8")
+    replacements = [
+        ("    std::optional<std::uint32_t> extra_synthetic_destination;\n    float extra_synthetic_fraction{0.5F};",
+         "    static constexpr UINT kMaxExtraSynthetics = 2;\n"
+         "    std::array<std::uint32_t, kMaxExtraSynthetics> extra_synthetic_destinations{};\n"
+         "    std::array<float, kMaxExtraSynthetics> extra_synthetic_fractions{};\n"
+         "    UINT extra_synthetic_count{};"),
+        ("return extra_synthetic_destination ? 2U : 1U;", "return 1U + extra_synthetic_count;"),
+        ("return output == 0U ? synthetic_fraction : extra_synthetic_fraction;",
+         "return output == 0U ? synthetic_fraction : extra_synthetic_fractions[output - 1U];"),
+        ("return output == 0U ? first_destination : *extra_synthetic_destination;",
+         "return output == 0U ? first_destination : extra_synthetic_destinations[output - 1U];"),
+        ("const std::optional<D3D12ExtraSynthetic>& extra_synthetic) noexcept {",
+         "std::span<const D3D12ExtraSynthetic> extra_synthetics) noexcept {"),
+        ("        extra_synthetic_destination.reset();", "        extra_synthetic_count = 0;"),
+        ("""        if (extra_synthetic) {
+            if (extra_synthetic->destination_index >= synthetic_destinations.size() ||
+                extra_synthetic->destination_index == synthetic_destination_index) {
+                return E_INVALIDARG;
+            }
+            extra_synthetic_destination = extra_synthetic->destination_index;
+            extra_synthetic_fraction =
+                usable_fraction(extra_synthetic->interpolation_fraction);
+        }""", """        if (extra_synthetics.size() > kMaxExtraSynthetics) {
+            return E_INVALIDARG;
+        }
+        for (const auto& extra : extra_synthetics) {
+            if (extra.destination_index >= synthetic_destinations.size() ||
+                extra.destination_index == synthetic_destination_index) {
+                return E_INVALIDARG;
+            }
+            for (UINT earlier = 0; earlier < extra_synthetic_count; ++earlier) {
+                if (extra_synthetic_destinations[earlier] == extra.destination_index) {
+                    return E_INVALIDARG;
+                }
+            }
+            extra_synthetic_destinations[extra_synthetic_count] = extra.destination_index;
+            extra_synthetic_fractions[extra_synthetic_count] = usable_fraction(extra.interpolation_fraction);
+            ++extra_synthetic_count;
+        }"""),
+        ("""        if (extra_synthetic_destination) {
+            result = destination_available(
+                synthetic_destinations[*extra_synthetic_destination]);
+            if (FAILED(result)) {
+                return result;
+            }
+        }
+        ID3D12Resource* const extra_destination = extra_synthetic_destination
+            ? synthetic_destinations[*extra_synthetic_destination].resource.Get()
+            : nullptr;""", """        for (UINT extra = 0; extra < extra_synthetic_count; ++extra) {
+            result = destination_available(synthetic_destinations[extra_synthetic_destinations[extra]]);
+            if (FAILED(result)) return result;
+        }
+        const auto aliases_extra = [&](ID3D12Resource* resource) {
+            for (UINT extra = 0; extra < extra_synthetic_count; ++extra)
+                if (resource == synthetic_destinations[extra_synthetic_destinations[extra]].resource.Get())
+                    return true;
+            return false;
+        };"""),
+        ("repeated_resource == extra_destination", "aliases_extra(repeated_resource)"),
+        ("""(extra_destination != nullptr &&
+             (previous.resource.Get() == extra_destination ||
+              next.resource.Get() == extra_destination))""",
+         "(aliases_extra(previous.resource.Get()) || aliases_extra(next.resource.Get()))"),
+    ]
+    for old, new in replacements:
+        if modified.count(old) != 1:
+            raise ValueError(f"Pinned 4X context differs: {old!r}")
+        modified = modified.replace(old, new)
+    for indent in ("        ", "            "):
+        old = (indent + "if (extra_synthetic_destination) {\n" + indent +
+               "    synthetic_destinations[*extra_synthetic_destination].fence_value =\n" + indent +
+               "        fence_value;\n" + indent + "}")
+        if modified.count(old) != 1:
+            raise ValueError("Pinned 4X completion context differs")
+        modified = modified.replace(old, indent + "for (UINT extra = 0; extra < extra_synthetic_count; ++extra) {\n" +
+            indent + "    synthetic_destinations[extra_synthetic_destinations[extra]].fence_value = fence_value;\n" + indent + "}")
+    # MRT accesses the first extra only behind synthetic_output_count()==2.
+    modified = modified.replace("*extra_synthetic_destination", "extra_synthetic_destinations[0]")
+    start = modified.index("HRESULT D3D12FrameSynthesizer::submit_pair(")
+    end = modified.index("\nHRESULT D3D12FrameSynthesizer::flush_current_copy", start)
+    original = modified[start:end]
+    bounded = original.replace("::submit_pair(", "::submit_pair_outputs(", 1).replace(
+        "std::optional<D3D12ExtraSynthetic> extra_synthetic)",
+        "std::span<const D3D12ExtraSynthetic> extra_synthetics)").replace(
+        "            extra_synthetic);", "            extra_synthetics);")
+    signature = original[:original.index("    try {")]
+    wrapper = signature + """    const std::span<const D3D12ExtraSynthetic> extras = extra_synthetic
+        ? std::span<const D3D12ExtraSynthetic>(&*extra_synthetic, 1)
+        : std::span<const D3D12ExtraSynthetic>{};
+    return submit_pair_outputs(current, current_source_views, synthetic_target_views,
+        synthetic_destination_index, current_destination_index, ticket, debug_marker,
+        std::move(motion_vectors), defer_current_copy, interpolation_fraction, extras);
+}
+"""
+    modified = modified[:start] + wrapper + "\n" + bounded + modified[end:]
+    return modified
+
+
+def prepare_linear_clamp_root(modified: str) -> str:
+    """Backport only V477's zero-root-DWORD linear-clamp static sampler."""
+    old = ("        root_description.NumStaticSamplers = 0;\n"
+           "        root_description.pStaticSamplers = nullptr;")
+    new = """        // Static samplers do not consume the full 64-DWORD root budget.
+        D3D12_STATIC_SAMPLER_DESC linear_clamp{};
+        linear_clamp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        linear_clamp.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        linear_clamp.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        linear_clamp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        linear_clamp.MaxAnisotropy = 1;
+        linear_clamp.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+        linear_clamp.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK;
+        linear_clamp.MinLOD = 0.0F;
+        linear_clamp.MaxLOD = 0.0F;
+        linear_clamp.ShaderRegister = 0;
+        linear_clamp.RegisterSpace = 0;
+        linear_clamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        root_description.NumStaticSamplers = 1;
+        root_description.pStaticSamplers = &linear_clamp;"""
+    if modified.count(old) != 1:
+        raise ValueError("Pinned static sampler root context does not match uniquely")
+    return modified.replace(old, new)
+
+
+def prepare_linear_clamp_shader(shader: str) -> str:
+    """Replace manual source taps while retaining caller crop and slice policy."""
+    declaration = "Texture2DArray<float4> PreviousFrame : register(t0);"
+    if shader.count(declaration) != 1:
+        raise ValueError("Pinned sampler declaration context does not match uniquely")
+    shader = shader.replace(declaration, declaration + "\nSamplerState LinearClamp : register(s0);")
+    for endpoint, resource in (("previous", "PreviousFrame"), ("current", "CurrentFrame")):
+        signature = f"float4 bilinear_{endpoint}_source(float2 coordinate, uint slice) {{"
+        if shader.count(signature) != 1:
+            raise ValueError("Pinned bilinear helper does not match uniquely")
+        start = shader.index(signature)
+        end = shader.index("\n}", start) + len("\n}")
+        if shader[start:end].count(f"{resource}.Load(") != 4:
+            raise ValueError("Pinned bilinear helper no longer has four manual taps")
+        replacement = signature + f"""
+    float2 bounded = clamp(
+        coordinate,
+        float2(0.0, 0.0),
+        float2(float(Width - 1), float(Height - 1)));
+    // Source coordinates are pixel centers in an eye-local array slice.
+    // Caller clamps to active SourceRect remain in force before normalization.
+    float2 uv = (bounded + 0.5) / float2(float(Width), float(Height));
+    return {resource}.SampleLevel(LinearClamp, float3(uv, float(slice)), 0.0);
+}}"""
+        shader = shader[:start] + replacement + shader[end:]
+    return shader
+
+
 def prepare(source: Path, output: Path) -> None:
     manifest = json.loads((source / "manifest.json").read_text())
     if manifest["commit"] != "07449429c139e5d2070b6f0855ed5323de7cee00":
@@ -777,6 +944,8 @@ def prepare(source: Path, output: Path) -> None:
     modified = prepare_pair_real_output(source, output, modified)
     modified = prepare_synthetic_atlas_output(output, modified)
     modified = prepare_shared_nvidia_3x(output, modified)
+    modified = prepare_four_frame_outputs(output, modified)
+    modified = prepare_linear_clamp_root(modified)
     (output / path.name).write_text(modified, encoding="utf-8")
     (output / "initialization-ownership.patch").write_text("".join(difflib.unified_diff(
         original.splitlines(keepends=True), modified.splitlines(keepends=True),
@@ -1082,6 +1251,7 @@ NvidiaFlowSample nvidia_confidence_flow_for_pixel(
         raise ValueError("Pinned NVIDIA current pack context does not match uniquely")
     shader = shader.replace(old, new)
     shader += shared_nvidia_3x_shader()
+    shader = prepare_linear_clamp_shader(shader)
     (output / shader_path.name).write_text(shader, encoding="utf-8")
     (output / "endpoint-validation.patch").write_text("".join(difflib.unified_diff(
         original_shader.splitlines(keepends=True), shader.splitlines(keepends=True),

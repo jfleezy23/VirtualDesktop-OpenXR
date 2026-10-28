@@ -10,7 +10,7 @@ namespace virtualdesktop_openxr {
                                                           uint64_t nextNativeId) const noexcept {
         PredictionReservation result{};
         if (now < 0 || nextNativeTarget <= 0 || displayPeriod <= 0 || displayPeriod > 1000000000 ||
-            (multiplier != 1 && multiplier != 2 && multiplier != 3) || nextNativeTarget < now ||
+            (multiplier != 1 && multiplier != 2 && multiplier != 3 && multiplier != 4) || nextNativeTarget < now ||
             nextNativeTarget > std::numeric_limits<int64_t>::max() - (multiplier - 1) * displayPeriod ||
             nextNativeId > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - multiplier) {
             return result;
@@ -44,9 +44,11 @@ namespace virtualdesktop_openxr {
         auto candidate = result;
         for (uint32_t slot = 0; slot < reservation.multiplier; ++slot) {
             candidate.targets[slot] = reservation.firstTarget + slot * reservation.period;
-            candidate.roles[slot] = slot == reservation.multiplier - 1 ? FrameGenerationRole::real
-                                                                       : (slot == 0 ? FrameGenerationRole::synthetic1
-                                                                                    : FrameGenerationRole::synthetic2);
+            candidate.roles[slot] = slot == reservation.multiplier - 1
+                                        ? FrameGenerationRole::real
+                                        : (slot == 0   ? FrameGenerationRole::synthetic1
+                                           : slot == 1 ? FrameGenerationRole::synthetic2
+                                                       : FrameGenerationRole::synthetic3);
             if (slot < reservation.multiplier - 1) {
                 const auto target = candidate.targets[slot];
                 if (target <= previousTime || target >= reservation.currentTarget ||

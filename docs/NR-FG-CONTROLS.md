@@ -5,7 +5,7 @@ Adjust neural rendering (NR) during play, or select PC-side OFXR frame generatio
 for the next game session. Frame generation also works with NR off. The Runtime
 selector chooses stock or custom VDXR for the next VR launch.
 
-![The actual Controls app showing processing resolution, full coverage and OFXR settings](images/controls-overview.png)
+![The actual Controls app showing processing resolution, coverage and OFXR settings](images/controls-overview.png)
 
 *The screenshots show the actual app with example settings. The appearance sliders are
 examples, not a preset applied by installation.*
@@ -27,22 +27,73 @@ examples, not a preset applied by installation.*
    in this app's Runtime card. **Stock VDXR** returns to Streamer's official runtime.
    Streamer and the Controls app can stay open; restart an already running game to
    use the newly selected runtime.
-5. Choose **Off**, **OFXR 2×** or **OFXR 3×**, then an optical-flow backend.
+5. Choose **Off**, **OFXR 2×**, **OFXR 3×** or **OFXR 4×**, then an optical-flow backend.
    Start with **NVIDIA (default)**. Fully close and relaunch the game after changing
    either FG selector.
-6. For the first NR comparison, enable **Enable NR**, set **NR processing resolution (%) to 80**,
-   and keep **NR coverage (%) at 100**. The toggle, processing, coverage and appearance controls
-   save automatically and can be adjusted during play. Compare processing 100% and 80% in the same scene.
+6. With the updated custom runtime installed, enable **Enable NR**, set **NR coverage (%) to 95**,
+   and set **NR processing resolution (%) to 80** for the first comparison. The toggle, processing,
+   coverage and appearance controls save automatically and can be adjusted during play. Compare
+   processing 100% and 80% in the same scene.
 
-Opening the app preserves existing saved settings. Fresh settings show NR off, FG off,
-NVIDIA selected, NR processing resolution at **100%** and NR coverage at **100%**. If coverage has never been saved, the status
-message asks you to toggle NR off/on to persist the displayed defaults. Enabling NR
-saves the displayed coverage before turning NR on.
+Opening the app preserves all valid saved coverage/processing pairs, including **95/80**, **90/85**
+and **100/80**, without changing settings. Both sliders remain independent. Fresh settings show
+NR off, FG off, NVIDIA selected, processing **100%** and coverage **100%**. Missing, malformed or
+unreadable settings show a warning and a displayed fallback without overwriting the saved values.
+If coverage has never been saved, the status message asks you to toggle NR off/on to persist the
+displayed defaults. Enabling NR saves and verifies the displayed coverage before turning NR on,
+so the saved request matches the displayed 100%.
 
 NR requires compatible NVIDIA hardware and a separately supplied, compatible licensed
 NR component. **No DLSSNR DLLs or models are included or downloaded.** The controls
 package also contains no VR runtime DLLs or games. FG with NR off does not require the
 NR component.
+
+## Automatic game profiles
+
+**Globals** retains the existing immediate-save controls and your saved appearance values.
+Use **Add game EXE…** to select the actual game executable, then edit its effective NR/FG
+values and click **Save game profile**. Adding or selecting an executable writes nothing.
+Game edits remain drafts until saved; switching or closing offers Save, Discard or Cancel.
+**New games inherit globals; Save locks current setup; Reset returns to globals.** Save is
+available even without edits so you can lock a working global setup for one game.
+**Reset game profile** removes that game's overrides and restores inheritance immediately.
+Global **Reset NR settings** continues to reset only NR and preserves the FG selections.
+
+![The actual Controls app showing an example 4× game profile](images/controls-game-profile.png)
+
+*Example executable path and settings; no personal game inventory is included in the download.*
+
+The scope displays the executable's full path, the number of overrides and inherited values.
+All appearance controls, NR enable, coverage, processing resolution, FG mode and optical-flow
+backend support overrides. **Save game profile** stores all ten displayed values, so later
+global edits do not change that game's saved setup. New or manually partial profiles inherit
+each missing value from the current global value, then the runtime default. Reset removes
+all saved overrides and restores that inheritance. Missing coverage defaults to **100%** in
+both Controls and the runtime. A saved global coverage value, including 90%, always takes
+precedence over that fallback; this default change does not overwrite any saved value.
+
+Profiles apply automatically when that executable uses the custom runtime, including normal
+Virtual Desktop launches and shortcuts. Controls does not need to stay open or select the
+profile before launch. Choose the actual game process EXE rather than a launcher or shortcut;
+Controls does not scan installed games or infer a running game from process names. Two EXEs
+with the same basename in different folders have separate profiles. Case, slash and dot-path
+variations share a profile. Moving the executable to another folder needs a new profile;
+updating its contents at the same path preserves its profile.
+
+Saving NR overrides refreshes a running game's NR settings through the existing registry
+watcher. FG mode and backend are captured when the session starts: restart the game after
+changing either. A profile never temporarily replaces the global gameplay values.
+
+Malformed types or out-of-range values are rejected explicitly. The runtime disables the
+affected NR or FG group rather than silently inheriting an enabled global value. Controls
+shows a rejected profile and blocks Save; Reset removes malformed value overrides and can
+recover an interrupted creation whose identity metadata is missing. Present but mismatched
+or incorrectly typed identity metadata blocks replacement and Reset. Corrupt list entries
+are reported and skipped without hiding other valid game profiles.
+Profiles live below the existing 64-bit OpenXR registry key at `Profiles/<path identity>`;
+their `ExecutablePath` metadata guards against hash collisions. An older runtime that does
+not support profiles continues to use globals, so install the matching host before relying
+on per-game settings. OFXR 4× also requires the matching new FG module.
 
 ## Controls and when they apply
 
@@ -55,20 +106,48 @@ NR component.
 | Local tone | NR local-tone strength, 0–100 | During play |
 | Structure detail | NR structure-detail strength, 0–100 | During play |
 | Skin detail | NR skin-detail strength, 0–100 | During play |
-| NR processing resolution (%) | Whole-eye NR working resolution, **50–100%**; start at **80%**, native default **100%** | During play, saved after a short pause while dragging |
-| NR coverage (%) | The portion of the image processed by NR; keep **100%** | During play, saved after a short pause while dragging |
-| Mode | Off, OFXR 2× or OFXR 3× | After restarting the game |
+| NR processing resolution (%) | NR working dimensions relative to the selected coverage rectangle, **50–100%**; start at **80%**, native default **100%** | During play, saved after a short pause while dragging |
+| NR coverage (%) | Centered per-eye rectangle for NR, independent of processing resolution; slider **0–100%**, runtime minimum **10%** | During play, saved after a short pause while dragging |
+| Mode | Off, OFXR 2×, OFXR 3× or OFXR 4× | After restarting the game |
 | Optical-flow backend | NVIDIA or experimental FidelityFX at full resolution | After restarting the game |
 
-There is no Apply button. The status line confirms a saved change or reports an error.
+Globals saves immediately. Game scope uses **Save game profile**. The status line confirms
+a saved change or reports an error.
 The NR sliders are disabled while NR is off; FG remains selectable. Closing the app
 flushes pending processing/coverage changes and leaves the saved settings in place.
 
-**Processing resolution is independent of coverage.** Reducing processing to 80% runs NR on a smaller
-whole-eye working image and reconstructs the result at native output size. Coverage 100% still includes
-the whole eye. It does not lower game pixel density, alter final output dimensions or replace the appearance
-settings. Processing 100% uses the native path and bypasses the new spatial work. Zero NR strength preserves
-the original RGB. Compare faces, hair, dark areas and movement before settling on a processing percentage.
+**Combined coverage and processing requires the updated custom runtime.** Older custom runtimes
+may not support a partial crop with reduced processing. Install the matching runtime before using
+mixed settings. The sliders save independently after a short pause; changing either one preserves
+the other. A failed save rereads the actual stored pair, reports any readback error, and cancels
+pending spatial saves so an old callback cannot overwrite the reconciled values. Displayed
+fallbacks and saved requests do not prove which path a running game is using.
+
+Both percentages describe **linear dimensions**, not pixel area. Coverage 95% selects a centered
+rectangle 95% as wide and 95% as tall as each native eye. Processing 80% scales the NR working
+width and height of that rectangle by 80%, subject to runtime alignment. At 95/80, theoretical
+working pixels are approximately `(0.95 × 0.80)² = 57.8%` of a full native eye; 90/85 gives
+about 58.5%, and 90/80 gives about 51.8%. These are work estimates, not measured timings or an
+FPS guarantee. Model cost, scaling, synchronization and the rest of the rendering pipeline also matter.
+
+With reduced processing, partial coverage includes an **automatic smooth transition inside the
+selected rectangle**. Its width
+is about 1% of the shorter native eye dimension at 95% coverage and 2% at 90%; lower coverage caps
+that width at 2%, with a cap for very small crops. NR strength fades to zero at the crop boundary,
+so the fully enhanced center is smaller than the selected coverage. There is no transition slider.
+At 100% coverage there is no crop-edge transition.
+
+The runtime returns complete native-resolution stereo output, preserving the original image and
+alpha outside coverage. Reduced processing reconstructs NR within that rectangle; it does not lower
+game pixel density, final output dimensions or replace the appearance settings. Processing 100%
+retains the existing native NR path and its partial-coverage behavior; it bypasses the new spatial
+processing and automatic transition. Coverage 100% with processing 100% retains the original full-eye
+native path. Zero NR strength preserves the original RGB. Compare faces,
+hair, dark areas and movement before settling on a pair.
+
+**NR + MFG requires coverage of at least 90%** for eligibility. Select OFXR 2×, 3× or 4× while
+comparing 95/80, 90/80 or 90/85. FG consumes complete native stereo output; the saved selection does
+not guarantee that every submission is eligible or that generated frames meet the deadline.
 
 **Reset NR settings** disables NR and saves its defaults, including 100% processing resolution and 100% coverage.
 It replaces the saved NR appearance choices but preserves the FG mode and backend.
@@ -97,7 +176,7 @@ continue to use `HKEY_LOCAL_MACHINE\SOFTWARE\Virtual Desktop, Inc.\OpenXR`.
 
 ## Frame generation without NR
 
-Leave **Enable NR** off, choose OFXR 2× or 3×, and restart the game. OFXR then processes
+Leave **Enable NR** off, choose OFXR 2×, 3× or 4×, and restart the game. OFXR then processes
 the ordinary final stereo images. Selecting **Off** disables OFXR while retaining the
 selected ordinary or NR processing path.
 
@@ -108,7 +187,7 @@ remains experimental; compare head motion, occlusions and image stability before
 choosing it for regular play. Changing the backend does not change game resolution,
 NR coverage or the NR appearance sliders.
 
-OFXR 2× can add one generated frame between real frames; 3× can add two. Eligibility
+OFXR 2× can add one generated frame between real frames; 3× can add two, and 4× can add three. Eligibility
 and timing still matter: unsupported submissions or missed deadlines retain real
 frames. **The selectors show saved requests, not active runtime status or proof that
 every synthetic frame reached the headset.** Use runtime capture/log evidence when
@@ -129,7 +208,7 @@ the frames.
   NR can remain enabled independently. Rapid head motion can still reveal interpolation
   artifacts; this is an experimental build.
 - If NR loses too much detail at a reduced percentage, return processing to **100%**
-  while keeping coverage at 100%, or disable NR to compare. Installation preserves saved appearance settings.
+  while retaining your chosen coverage, or disable NR to compare. Installation preserves saved appearance settings.
 - You can close the controls window during gameplay. To remove the app, delete its
   extracted folder; the saved runtime settings remain.
 
@@ -137,11 +216,15 @@ the frames.
 
 From a full source checkout on Windows x64 with Python 3.13 and Tcl/Tk:
 
+Building Controls needs the pinned Python requirements below. The full regression
+command also compiles sampler shaders and requires Windows SDK **10.0.26100.0**
+(including FXC); see the [FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.27/tests/frame-generation.md).
+
 ```powershell
 python -m venv bin/controls-build-env
 bin/controls-build-env/Scripts/python -m pip install --require-hashes -r scripts/controls-build-requirements.txt
 bin/controls-build-env/Scripts/python scripts/build-controls.py --output bin/controls-build
-python -m unittest discover -s scripts/tests -p test_fg_controls.py -v
+python -m unittest discover -s scripts/tests -v
 ```
 
 The build uses pinned PyInstaller dependencies and creates a folder bundle, its ZIP,

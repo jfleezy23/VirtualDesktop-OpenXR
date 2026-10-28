@@ -28,6 +28,15 @@ int main(int argc, char** argv) {
         info.enableGpuTiming = option == "diagnostics" || option == "ffx-diagnostics";
         info.useFidelityFxFull = option == "ffx" || option == "ffx-diagnostics" || option == "v1-ffx";
         const bool legacyOnly = option == "v1" || option == "v1-ffx";
+        if (option == "v1-4x" || option == "v2-4x") {
+            info.multiplier = 4;
+            check(fg.initialize(info) == VDXRFG_E_REJECTED && !fg.initialized(), "legacy module rejects explicit 4X");
+            check(count(0) == 0 && count(1) == 0, "4X rejection precedes any legacy Create");
+            success(fg.shutdown(), "shutdown rejected 4X");
+            FreeLibrary(module);
+            std::puts("PASS: new host rejects 4X with old module before creation");
+            return 0;
+        }
         const auto result = fg.initialize(info);
         if (legacyOnly || info.useFidelityFxFull) {
             const bool unsupported = info.useFidelityFxFull && (legacyOnly || mode != 8);

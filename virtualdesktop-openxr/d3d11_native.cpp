@@ -352,6 +352,13 @@ namespace virtualdesktop_openxr {
             m_nrSpatialPipeline->DiscardRecording();
             m_nrSpatialPipeline.reset();
         }
+        if (m_nrNativePipeline) {
+            m_nrNativePipeline->DiscardRecording();
+            m_nrNativePipeline.reset();
+        }
+        m_nrNativeNeedsDrain = false;
+        m_nrNativeNeedsFeatureReset = false;
+        m_nrNativeStatus = 0;
         m_nrSpatialNeedsDrain = false;
         m_nrSpatialNeedsFeatureReset = false;
         m_nrSpatialFeatures = false;

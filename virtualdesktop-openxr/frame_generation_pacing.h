@@ -4,7 +4,7 @@
 #include <cstdint>
 
 namespace virtualdesktop_openxr {
-    enum class FrameGenerationRole { synthetic1, synthetic2, real };
+    enum class FrameGenerationRole { synthetic1, synthetic2, real, synthetic3 };
 
     struct PredictionReservation {
         int64_t currentTarget{};
@@ -19,9 +19,9 @@ namespace virtualdesktop_openxr {
     };
 
     struct FrameGenerationSlotPlan {
-        std::array<FrameGenerationRole, 3> roles{};
-        std::array<int64_t, 3> targets{};
-        std::array<float, 2> fractions{};
+        std::array<FrameGenerationRole, 4> roles{};
+        std::array<int64_t, 4> targets{};
+        std::array<float, 3> fractions{};
         uint32_t count{1};
     };
 

@@ -78,13 +78,14 @@ class ControlsPackageTests(unittest.TestCase):
             snapshot, bundle = root / "snapshot", root / "bundle"
             (snapshot / "docs/images").mkdir(parents=True)
             bundle.mkdir()
-            guide = b"![Controls](images/controls-overview.png)\n![Backend](images/controls-fg-only.png)\n"
+            guide = b"![Controls](images/controls-overview.png)\n![Backend](images/controls-fg-only.png)\n![Profile](images/controls-game-profile.png)\n"
             (snapshot / "docs/NR-FG-CONTROLS.md").write_bytes(guide)
             runtime_guide = b"# Runtime selection\nUse the Runtime selector for the next game launch.\n"
             (snapshot / "docs/SIDE-BY-SIDE-RUNTIME.md").write_bytes(runtime_guide)
             game_guide = b"# Game routing\nKeep a working original launch route.\n"
             (snapshot / "docs/GAME-COMPATIBILITY.md").write_bytes(game_guide)
-            images = {"controls-overview.png": b"overview\r\nbytes", "controls-fg-only.png": b"backend\r\nbytes"}
+            images = {"controls-overview.png": b"overview\r\nbytes", "controls-fg-only.png": b"backend\r\nbytes",
+                      "controls-game-profile.png": b"profile\r\nbytes"}
             for name, data in images.items():
                 (snapshot / "docs/images" / name).write_bytes(data)
             module.copy_documentation(snapshot, bundle)

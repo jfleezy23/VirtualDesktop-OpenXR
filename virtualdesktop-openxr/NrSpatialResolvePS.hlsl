@@ -3,8 +3,13 @@
 float4 main(float4 position : SV_POSITION) : SV_TARGET {
     uint2 pixel = uint2(position.xy) - uint2(outputX, 0);
     float4 raw = nativeColor.Load(int4(sourceRect.xy + pixel, 0, 0));
+    if (any(pixel < processingRect.xy) || any(pixel >= processingRect.xy + processingRect.zw))
+        return raw;
+    if (all(raw.rgb == 0))
+        return raw;
     float3 nativeLinear = Decode(raw.rgb);
-    float2 q = (float2(pixel) + 0.5) * float2(workExtent) / float2(sourceRect.zw) - 0.5;
+    float2 localPoint = float2(pixel - processingRect.xy) + 0.5;
+    float2 q = localPoint * float2(workExtent) / float2(processingRect.zw) - 0.5;
     int2 base = int2(floor(q));
     float2 fraction = frac(q);
     float3 edit = 0, bilinearEdit = 0;
@@ -17,6 +22,7 @@ float4 main(float4 position : SV_POSITION) : SV_TARGET {
             float3 answerRaw = answer.Load(int3(p, 0)).rgb;
             float3 guide = Decode(guideRaw);
             float3 residual = Decode(answerRaw) - guide;
+            residual = ProtectNrResidual(nativeLinear, guide, residual);
             zero = zero && all(guideRaw == answerRaw);
             float weight = (x ? fraction.x : 1 - fraction.x) * (y ? fraction.y : 1 - fraction.y);
             float3 distance = guide - nativeLinear;
@@ -30,5 +36,10 @@ float4 main(float4 position : SV_POSITION) : SV_TARGET {
     if (zero)
         return raw;
     float3 residual = normalization > 0 && isfinite(normalization) ? edit / normalization : bilinearEdit;
-    return float4(Encode(nativeLinear + residual), raw.a);
+    float strength = 1;
+    if (transitionWidth) {
+        float2 edge = min(localPoint, float2(processingRect.zw) - localPoint);
+        strength = smoothstep(0, float(transitionWidth), min(edge.x, edge.y));
+    }
+    return float4(Encode(nativeLinear + strength * residual), raw.a);
 }

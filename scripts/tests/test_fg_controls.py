@@ -86,6 +86,9 @@ class FrameGenerationControlsTests(unittest.TestCase):
         self.patch = mock.patch.object(gui, "winreg", self.registry)
         self.patch.start()
         self.addCleanup(self.patch.stop)
+        profile_patch = mock.patch.object(gui.game_profiles, "winreg", self.registry)
+        profile_patch.start()
+        self.addCleanup(profile_patch.stop)
         if hasattr(gui, "runtime_selection"):
             runtime_patch = mock.patch.object(gui.runtime_selection, "winreg", self.registry)
             runtime_patch.start()
@@ -121,17 +124,17 @@ class FrameGenerationControlsTests(unittest.TestCase):
 
     def test_saving_three_modes_preserves_nr_settings_and_uses_64bit_view(self):
         app = self.app()
-        for label, value in [("OFXR 2×", 2), ("OFXR 3×", 3), ("Off", 0)]:
+        for label, value in [("OFXR 2×", 2), ("OFXR 3×", 3), ("OFXR 4×", 4), ("Off", 0)]:
             self.select(app, label)
             self.assertEqual(self.registry.values["FrameGenerationMode"], (value, 4))
             self.assertIn("restart", app.status.get().lower())
         self.assertEqual(self.registry.values["FoveationSize"], (100, 4))
         self.assertEqual(self.registry.values["DLSSNR_Enabled"], (1, 4))
-        self.assertEqual([name for name, _, _ in self.registry.writes], ["FrameGenerationMode"] * 3)
+        self.assertEqual([name for name, _, _ in self.registry.writes], ["FrameGenerationMode"] * 4)
         self.assertTrue(all(access & 256 for operation, access in self.registry.access if operation == "write"))
 
     def test_invalid_stored_type_or_mode_is_reported_without_writing(self):
-        for stored in [(4, 4), ("3", 1)]:
+        for stored in [(5, 4), ("3", 1)]:
             with self.subTest(stored=stored):
                 self.registry.values["FrameGenerationMode"] = stored
                 with self.assertRaises(ValueError):

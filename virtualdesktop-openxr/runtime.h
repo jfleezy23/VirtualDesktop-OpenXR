@@ -930,7 +930,7 @@ namespace virtualdesktop_openxr {
         OwnedFrameTransaction m_fgTransactionForFrame, m_fgTransactionForSubmission;
         OwnedFrameTransaction m_fgFailedTransaction;
         std::vector<ovrLayer_Union> m_fgFailedLayers;
-        std::array<std::array<SwapchainSlice, 3>, 2> m_fgPresentationBanks;
+        std::array<std::array<SwapchainSlice, 4>, 2> m_fgPresentationBanks;
         PredictionReservation m_fgReservationForSubmission;
         ovrSizei m_fgEyeResolution{};
         DXGI_FORMAT m_fgFormat{DXGI_FORMAT_UNKNOWN};
@@ -1012,6 +1012,10 @@ namespace virtualdesktop_openxr {
         std::unique_ptr<D3D12Utils::CommandContext> m_dlssnrContext;
         ovrSizei m_dlssnrFeatureResolution{0, 0};
         std::unique_ptr<nr_spatial::Pipeline> m_nrSpatialPipeline;
+        std::unique_ptr<nr_spatial::Pipeline> m_nrNativePipeline;
+        bool m_nrNativeNeedsDrain{};
+        bool m_nrNativeNeedsFeatureReset{};
+        int m_nrNativeStatus{};
         std::array<ovrSizei, 2> m_nrSpatialFeatureExtents{};
         std::array<ovrTextureSwapChain, 4> m_nrSpatialSourceChains{};
         bool m_nrSpatialFeatures{};

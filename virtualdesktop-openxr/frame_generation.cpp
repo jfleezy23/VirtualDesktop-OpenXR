@@ -36,6 +36,7 @@ namespace virtualdesktop_openxr {
     struct FrameGeneration::State {
         HMODULE module{};
         VDXRFG_ApiV1 api{};
+        VDXRFG_ApiV3 api3{};
         void* context{};
         InitInfo info;
         ComPtr<ID3D11Device5> device11;
@@ -44,16 +45,16 @@ namespace virtualdesktop_openxr {
         ComPtr<ID3D12CommandQueue> queue;
         ComPtr<ID3D11Texture2D> input11;
         ComPtr<ID3D12Resource> input12;
-        std::array<std::array<ComPtr<ID3D11Texture2D>, 3>, 2> outputs11;
-        std::array<std::array<ComPtr<ID3D12Resource>, 3>, 2> outputs12;
+        std::array<std::array<ComPtr<ID3D11Texture2D>, 4>, 2> outputs11;
+        std::array<std::array<ComPtr<ID3D12Resource>, 4>, 2> outputs12;
         ComPtr<ID3D11Fence> producer11, consumed11, ready11, consumer11;
         ComPtr<ID3D12Fence> producer12;
         std::array<uint64_t, 2> liveTokens{};
         std::array<uint64_t, 2> consumerValues{};
-        std::array<std::array<uint64_t, 3>, 2> roleConsumerValues{};
-        std::array<std::array<uint64_t, 3>, 2> registeredCopyValues{};
+        std::array<std::array<uint64_t, 4>, 2> roleConsumerValues{};
+        std::array<std::array<uint64_t, 4>, 2> registeredCopyValues{};
         std::array<VDXRFG_TicketV1, 2> tickets{};
-        std::array<std::array<ComPtr<ID3D11Texture2D>, 3>, 2> retainedDestinations;
+        std::array<std::array<ComPtr<ID3D11Texture2D>, 4>, 2> retainedDestinations;
         std::array<std::array<ComPtr<ID3D11Texture2D>, 2>, 2> capturedSources;
         std::array<std::array<VDXRFG_ViewV1, 2>, 2> capturedViews{};
         std::array<uint32_t, 2> capturedBgraMask{};
@@ -243,7 +244,7 @@ namespace virtualdesktop_openxr {
 #else
         if (m_state || !info.device11 || !info.context11 || !info.device12 || !info.modulePath.is_absolute() ||
             !info.eyeWidth || info.eyeWidth > UINT32_MAX / 2 || !info.height ||
-            (info.multiplier != 2 && info.multiplier != 3) ||
+            (info.multiplier != 2 && info.multiplier != 3 && info.multiplier != 4) ||
             (info.format != DXGI_FORMAT_R8G8B8A8_UNORM && info.format != DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)) {
             return VDXRFG_E_REJECTED;
         }
@@ -307,10 +308,35 @@ namespace virtualdesktop_openxr {
                 state->api.GetStatistics = api2.GetStatistics;
                 state->api.Destroy = api2.Destroy;
             }
+            const auto getApi3 = reinterpret_cast<VDXRFG_GetApiV3Fn>(GetProcAddress(state->module, "VDXRFG_GetApiV3"));
+            auto& api3 = state->api3;
+            if (getApi3) {
+                api3.struct_size = sizeof(api3);
+                api3.api_version = VDXRFG_API_VERSION_3;
+                hr = getApi3(&api3);
+                if (FAILED(hr) || api3.struct_size != sizeof(api3) || api3.api_version != VDXRFG_API_VERSION_3 ||
+                    api3.max_multiplier < info.multiplier || !api3.Create || !api3.Submit || !api3.Retire ||
+                    !api3.Reset || !api3.GetStatistics || !api3.Destroy)
+                    return VDXRFG_E_REJECTED;
+                state->api.Retire = api3.Retire;
+                state->api.Reset = api3.Reset;
+                state->api.GetStatistics = api3.GetStatistics;
+                state->api.Destroy = api3.Destroy;
+            }
+            if (info.multiplier == 4 && !getApi3)
+                return VDXRFG_E_REJECTED;
+            const uint32_t supportedFlags = getApi3 ? api3.supported_create_flags : api2.supported_create_flags;
+            uint32_t createFlags = supportedFlags & (VDXRFG_CREATE_HOST_OWNS_REAL |
+                                                     (info.enableGpuTiming ? VDXRFG_CREATE_GPU_TIMING : 0u));
+            if (info.useFidelityFxFull)
+                createFlags |= VDXRFG_CREATE_FIDELITYFX_FULL;
+            if (getApi3 && (createFlags & VDXRFG_CREATE_HOST_OWNS_REAL) &&
+                (supportedFlags & VDXRFG_CREATE_OMIT_REAL_OUTPUTS))
+                createFlags |= VDXRFG_CREATE_OMIT_REAL_OUTPUTS;
+            state->hostOwnsReal = (createFlags & VDXRFG_CREATE_HOST_OWNS_REAL) != 0;
             // Backend choice is required, unlike optional diagnostics/real
             // ownership. An old module must not silently substitute NVIDIA.
-            if (info.useFidelityFxFull &&
-                (!getApi2 || !(api2.supported_create_flags & VDXRFG_CREATE_FIDELITYFX_FULL))) {
+            if (info.useFidelityFxFull && (!(supportedFlags & VDXRFG_CREATE_FIDELITYFX_FULL))) {
                 return VDXRFG_E_REJECTED;
             }
             D3D12_COMMAND_QUEUE_DESC queue{};
@@ -334,9 +360,10 @@ namespace virtualdesktop_openxr {
             if (FAILED(hr)) {
                 return hr;
             }
-            VDXRFG_CreateInfoV1 create{};
+            VDXRFG_CreateInfoV3 create{};
             create.struct_size = sizeof(create);
-            create.api_version = VDXRFG_API_VERSION;
+            create.api_version = VDXRFG_API_VERSION_3;
+            create.flags = createFlags;
             create.device = info.device12;
             create.queue = state->queue.Get();
             create.input = state->input12.Get();
@@ -345,8 +372,9 @@ namespace virtualdesktop_openxr {
             create.format = info.format;
             create.multiplier = info.multiplier;
             for (uint32_t bank = 0; bank < 2; ++bank) {
-                for (uint32_t role = 0; role < 3; ++role) {
-                    if (role == 1 && info.multiplier == 2) {
+                for (uint32_t role = 0; role < 4; ++role) {
+                    if ((role == 1 && info.multiplier == 2) || (role == 3 && info.multiplier != 4) ||
+                        (role == 2 && (createFlags & VDXRFG_CREATE_OMIT_REAL_OUTPUTS))) {
                         continue;
                     }
                     hr = info.device11->CreateTexture2D(&texture, nullptr, &state->outputs11[bank][role]);
@@ -378,22 +406,32 @@ namespace virtualdesktop_openxr {
             if (FAILED(hr)) {
                 return hr;
             }
-            if (getApi2) {
-                VDXRFG_CreateInfoV2 options{};
-                options.struct_size = sizeof(options);
-                options.api_version = VDXRFG_API_VERSION_2;
-                options.base = create;
-                const uint32_t requested =
-                    VDXRFG_CREATE_HOST_OWNS_REAL | (info.enableGpuTiming ? VDXRFG_CREATE_GPU_TIMING : 0u);
-                options.flags = api2.supported_create_flags & requested;
-                if (info.useFidelityFxFull)
-                    options.flags |= VDXRFG_CREATE_FIDELITYFX_FULL;
-                state->hostOwnsReal = (options.flags & VDXRFG_CREATE_HOST_OWNS_REAL) != 0;
-                // V2 gameplay defaults to no GPU timing; diagnostic callers opt
-                // in before creation. V1-only modules retain their defaults.
-                hr = api2.Create(&options, &state->context);
+            if (getApi3) {
+                hr = api3.Create(&create, &state->context);
             } else {
-                hr = state->api.Create(&create, &state->context);
+                VDXRFG_CreateInfoV1 legacy{};
+                legacy.struct_size = sizeof(legacy);
+                legacy.api_version = VDXRFG_API_VERSION;
+                legacy.device = create.device;
+                legacy.queue = create.queue;
+                legacy.input = create.input;
+                legacy.width = create.width;
+                legacy.height = create.height;
+                legacy.format = create.format;
+                legacy.multiplier = create.multiplier;
+                for (unsigned bank = 0; bank < 2; ++bank)
+                    for (unsigned role = 0; role < 3; ++role)
+                        legacy.outputs[bank][role] = create.outputs[bank][role];
+                if (getApi2) {
+                    VDXRFG_CreateInfoV2 options{};
+                    options.struct_size = sizeof(options);
+                    options.api_version = VDXRFG_API_VERSION_2;
+                    options.base = legacy;
+                    options.flags = createFlags;
+                    hr = api2.Create(&options, &state->context);
+                } else {
+                    hr = state->api.Create(&legacy, &state->context);
+                }
             }
             if (FAILED(hr)) {
                 if (state->context) {
@@ -424,7 +462,7 @@ namespace virtualdesktop_openxr {
         if (state.poisoned || transaction.ticket.token) {
             return VDXRFG_E_REJECTED;
         }
-        if (state.producerValue == UINT64_MAX || input.slots.count == 0 || input.slots.count > 3 ||
+        if (state.producerValue == UINT64_MAX || input.slots.count == 0 || input.slots.count > 4 ||
             (input.slots.count != 1 && input.slots.count != state.info.multiplier) || !input.serial ||
             input.time <= 0 || input.period <= 0 ||
             input.slots.roles[input.slots.count - 1] != FrameGenerationRole::real ||
@@ -439,9 +477,9 @@ namespace virtualdesktop_openxr {
             std::all_of(state.liveTokens.begin(), state.liveTokens.end(), [](uint64_t token) { return token != 0; })) {
             return VDXRFG_E_BUSY;
         }
-        VDXRFG_SubmitInfoV1 submit{};
+        VDXRFG_SubmitInfoV3 submit{};
         submit.struct_size = sizeof(submit);
-        submit.api_version = VDXRFG_API_VERSION;
+        submit.api_version = VDXRFG_API_VERSION_3;
         submit.input = state.input12.Get();
         submit.producer_fence = state.producer12.Get();
         submit.serial = input.serial;
@@ -507,8 +545,9 @@ namespace virtualdesktop_openxr {
         for (uint32_t slot = 0; slot < input.slots.count; ++slot) {
             submit.target_time_ns[slot] = input.slots.targets[slot];
             if (slot < input.slots.count - 1) {
-                if (input.slots.roles[slot] !=
-                        (slot == 0 ? FrameGenerationRole::synthetic1 : FrameGenerationRole::synthetic2) ||
+                if (input.slots.roles[slot] != (slot == 0   ? FrameGenerationRole::synthetic1
+                                                : slot == 1 ? FrameGenerationRole::synthetic2
+                                                            : FrameGenerationRole::synthetic3) ||
                     !std::isfinite(input.slots.fractions[slot]) || input.slots.fractions[slot] <= 0 ||
                     input.slots.fractions[slot] >= 1 || input.slots.targets[slot] >= input.slots.targets[slot + 1]) {
                     return VDXRFG_E_REJECTED;
@@ -553,7 +592,26 @@ namespace virtualdesktop_openxr {
             return VDXRFG_E_POISONED;
         }
         state.context11->Flush(); // Dispatch the cross-API producer dependency; does not drain the GPU.
-        hr = state.api.Submit(state.context, &submit, &transaction.ticket);
+        if (state.api3.Submit) {
+            hr = state.api3.Submit(state.context, &submit, &transaction.ticket);
+        } else {
+            VDXRFG_SubmitInfoV1 legacy{};
+            legacy.struct_size = sizeof(legacy);
+            legacy.api_version = VDXRFG_API_VERSION;
+            legacy.input = submit.input;
+            legacy.producer_fence = submit.producer_fence;
+            legacy.producer_value = submit.producer_value;
+            legacy.serial = submit.serial;
+            legacy.display_time_ns = submit.display_time_ns;
+            legacy.display_period_ns = submit.display_period_ns;
+            for (unsigned i = 0; i < 3; ++i)
+                legacy.target_time_ns[i] = submit.target_time_ns[i];
+            for (unsigned i = 0; i < 2; ++i) {
+                legacy.fractions[i] = submit.fractions[i];
+                legacy.views[i] = submit.views[i];
+            }
+            hr = state.api.Submit(state.context, &legacy, &transaction.ticket);
+        }
         if (transaction.ticket.token) {
             transaction.ownerGeneration = state.generation;
             transaction.slots = input.slots;
@@ -573,6 +631,7 @@ namespace virtualdesktop_openxr {
         }
         const bool prime = state.previousSerial == 0;
         const uint32_t expectedMask = (state.hostOwnsReal ? 0u : 4u) | (prime                        ? 0u
+                                                                        : state.info.multiplier == 4 ? 11u
                                                                         : state.info.multiplier == 3 ? 3u
                                                                                                      : 1u);
         if (!transaction.ticket.token || transaction.ticket.prime != static_cast<uint32_t>(prime) ||
@@ -672,11 +731,10 @@ namespace virtualdesktop_openxr {
         }
         auto& state = *m_state;
         if (role != FrameGenerationRole::real && role != FrameGenerationRole::synthetic1 &&
-            role != FrameGenerationRole::synthetic2) {
+            role != FrameGenerationRole::synthetic2 && role != FrameGenerationRole::synthetic3) {
             return VDXRFG_E_REJECTED;
         }
-        const uint32_t index =
-            role == FrameGenerationRole::real ? 2 : (role == FrameGenerationRole::synthetic1 ? 0 : 1);
+        const uint32_t index = static_cast<unsigned>(role);
         const auto& ticket = state.tickets[transaction.ticket.bank];
         const bool available =
             (role == FrameGenerationRole::real && state.hostOwnsReal) || (ticket.role_mask & (1u << index));
@@ -780,11 +838,10 @@ namespace virtualdesktop_openxr {
             transaction.ownerGeneration != m_state->generation ||
             m_state->liveTokens[transaction.ticket.bank] != transaction.ticket.token ||
             (role != FrameGenerationRole::real && role != FrameGenerationRole::synthetic1 &&
-             role != FrameGenerationRole::synthetic2)) {
+             role != FrameGenerationRole::synthetic2 && role != FrameGenerationRole::synthetic3)) {
             return false;
         }
-        const unsigned index =
-            role == FrameGenerationRole::real ? 2 : (role == FrameGenerationRole::synthetic1 ? 0 : 1);
+        const unsigned index = static_cast<unsigned>(role);
         const auto value = m_state->roleConsumerValues[transaction.ticket.bank][index];
         const auto completed = m_state->consumer11->GetCompletedValue();
         return value && completed != UINT64_MAX && completed >= value;
@@ -797,11 +854,10 @@ namespace virtualdesktop_openxr {
             transaction.ownerGeneration != m_state->generation ||
             m_state->liveTokens[transaction.ticket.bank] != transaction.ticket.token ||
             (role != FrameGenerationRole::real && role != FrameGenerationRole::synthetic1 &&
-             role != FrameGenerationRole::synthetic2)) {
+             role != FrameGenerationRole::synthetic2 && role != FrameGenerationRole::synthetic3)) {
             return VDXRFG_E_REJECTED;
         }
-        const unsigned index =
-            role == FrameGenerationRole::real ? 2 : (role == FrameGenerationRole::synthetic1 ? 0 : 1);
+        const unsigned index = static_cast<unsigned>(role);
         auto& state = *m_state;
         const auto value = state.roleConsumerValues[transaction.ticket.bank][index];
         if (!value || timeoutMs == INFINITE) {
