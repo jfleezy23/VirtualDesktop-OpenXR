@@ -1,4 +1,4 @@
-# VirtualDesktop-OpenXR — NR and frame generation
+# VirtualDesktop-OpenXR — NR and OFXR 4× frame generation
 
 An independent Windows runtime fork maintained by [jfleezy23](https://github.com/jfleezy23), built on
 [VirtualDesktop-OpenXR](https://github.com/mbucchia/VirtualDesktop-OpenXR). Run compatible OpenXR games through
