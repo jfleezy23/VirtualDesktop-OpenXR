@@ -10,6 +10,10 @@ selector chooses stock or custom VDXR for the next VR launch.
 *The screenshots show the actual app with example settings. The appearance sliders are
 examples, not a preset applied by installation.*
 
+The 2026.10.27.1 release includes this same Controls executable with refreshed guides. The earlier-handoff
+improvement is in the runtime and FG module; install the matching runtime package. Your saved global and game
+profiles remain in place.
+
 ## Get started
 
 1. Install the matching guarded NR/FG runtime using the
@@ -30,7 +34,7 @@ examples, not a preset applied by installation.*
 5. Choose **Off**, **OFXR 2×**, **OFXR 3×** or **OFXR 4×**, then an optical-flow backend.
    Start with **NVIDIA (default)**. Fully close and relaunch the game after changing
    either FG selector.
-6. With the updated custom runtime installed, enable **Enable NR**, set **NR coverage (%) to 95**,
+6. With the updated custom runtime installed, enable **Enable NR**, set **NR coverage (%) to 100**,
    and set **NR processing resolution (%) to 80** for the first comparison. The toggle, processing,
    coverage and appearance controls save automatically and can be adjusted during play. Compare
    processing 100% and 80% in the same scene.
@@ -145,7 +149,7 @@ processing and automatic transition. Coverage 100% with processing 100% retains 
 native path. Zero NR strength preserves the original RGB. Compare faces,
 hair, dark areas and movement before settling on a pair.
 
-**NR + MFG requires coverage of at least 90%** for eligibility. Select OFXR 2×, 3× or 4× while
+**NR + FG requires coverage of at least 90%** for eligibility. Select OFXR 2×, 3× or 4× while
 comparing 95/80, 90/80 or 90/85. FG consumes complete native stereo output; the saved selection does
 not guarantee that every submission is eligible or that generated frames meet the deadline.
 
@@ -218,7 +222,7 @@ From a full source checkout on Windows x64 with Python 3.13 and Tcl/Tk:
 
 Building Controls needs the pinned Python requirements below. The full regression
 command also compiles sampler shaders and requires Windows SDK **10.0.26100.0**
-(including FXC); see the [FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.27/tests/frame-generation.md).
+(including FXC); see the [FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.27.1/tests/frame-generation.md).
 
 ```powershell
 python -m venv bin/controls-build-env

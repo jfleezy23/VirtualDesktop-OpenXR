@@ -178,7 +178,7 @@ frames, GPU times, queue age and actual native presentation cadence. Compare
 SSW separately with OFXR off. A higher FPS counter alone proves no latency gain.
 Acceptance for each additional game and setting remains dependent on those observations.
 
-### October 27 release validation scope
+### Original October 27 release validation scope
 
 The exact MSVC 14.51 release binary inputs passed **225 module checks**, **110 native
 checks**, **165 Python tests** and **70 Controls self-test assertions**. Both NVIDIA and
@@ -189,7 +189,7 @@ The recorded Moss headset check used **NVIDIA 4X with NR at 90% coverage / 85% p
 and passed stereo, controller and motion checks. This is a bounded game observation;
 it does not establish a 4X game-FPS gain, motion-to-photon latency improvement, universal
 compatibility or artifact-free motion. FidelityFX remains experimental at full resolution.
-See the [release notes](../docs/releases/2026.10.27.md) for the public release scope.
+See the [original release notes](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.27/docs/releases/2026.10.27.md) for the public release scope.
 
 ## Source, licenses and rollback
 
@@ -252,3 +252,17 @@ adds no extra SDK prediction calls. These controlled-clock tests establish
 scheduler and GPU ordering, not physical headset scanout or a fixed VD submission
 margin. Check real native calls separately with a bounded game capture, then
 stop the ETW session for normal play.
+
+### Earlier-handoff release validation
+
+The 2026.10.27.1 tested binary inputs passed 243 module CTests, 74 native runtime cases,
+54 strict handoff outcomes (30 positives and 24 deliberately rejecting controls), and
+166 tooling tests. Controlled clocks cover 120/144 Hz on both backends; six enabled
+trace runs contain 306 native phase records. The unchanged Controls executable passed
+70 self-test assertions.
+
+Moss headset checks at 120 Hz with NVIDIA and NR on covered 2X/3X/4X; the user confirmed
+smooth motion, stereo and controls. Captures contained 1,280 complete generated groups
+at 2X, 1,189 at 3X and a short startup window of 79 at 4X. These are bounded observations,
+not sustained throughput or scanout qualification. Some native Begin/End delays remain.
+See the [current release notes](../docs/releases/2026.10.27.1.md).

@@ -23,20 +23,20 @@ C:\Program Files\VDXR-NR-FG\OpenXR\
     nvngx_dlssnr.dll            (separately supplied, licensed NR component)
 ```
 
-Keep the matching host and FG module together. OFXR 4× requires both new DLLs; an older
-FG module cannot supply its third generated output. NR requires the compatible licensed
-NR component beside them; it is not distributed by this project. Keep the folder
+Use this release's matching host, FG module and metadata. Older combinations may run without the earlier-handoff
+improvement or lack support for the requested FG mode. NR requires the compatible licensed component beside them;
+it is not distributed by this project. Keep the folder
 protected by normal Program Files permissions. Do not redirect to a build directory
 that unprivileged programs can modify.
 
 ## Install from the release
 
-The [**2026.10.27 release**](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.27) supplies the guarded runtime and
+The [**2026.10.27.1 release**](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.27.1) supplies the guarded runtime and
 `CUSTOM-RUNTIME.json` together. Older runtime packages without this metadata are
 not the switcher package. Download the dated runtime ZIP and dated Controls ZIP
-from that release, and verify them against `SHA256SUMS-2026.10.27.txt` before continuing.
-Use `VDXR-NR-FG-Windows-x64-2026.10.27.zip` and
-`VDXR-NR-FG-Controls-Windows-x64-2026.10.27.zip` together.
+from that release, and verify them against `SHA256SUMS-2026.10.27.1.txt` before continuing.
+Use `VDXR-NR-FG-Windows-x64-2026.10.27.1.zip` and
+`VDXR-NR-FG-Controls-Windows-x64-2026.10.27.1.zip` together.
 
 1. Close VR games. Keep Virtual Desktop Streamer's **official** runtime installed.
    If you previously replaced its DLL with a community build, restore the original
@@ -51,7 +51,7 @@ Use `VDXR-NR-FG-Windows-x64-2026.10.27.zip` and
    `nvngx_dlssnr.dll` beside them. No NR DLL is included or downloaded. FG with NR
    off does not require it.
 4. Open **64-bit PowerShell as Administrator** and run the following block. It
-   verifies the copied host against the supplied metadata, then records its
+   verifies both copied DLLs against the supplied metadata, then records its
    location for Controls. It does not activate the redirect or change NR/FG
    settings. Stop on any error.
 
@@ -61,9 +61,11 @@ $hostPath = Join-Path $env:ProgramFiles 'VDXR-NR-FG\OpenXR\virtualdesktop-openxr
 $manifestPath = Join-Path (Split-Path $hostPath) 'CUSTOM-RUNTIME.json'
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $hostHash = (Get-FileHash -LiteralPath $hostPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$fgPath = Join-Path (Split-Path $hostPath) 'vdxr-frame-generation.dll'
+$fgHash = (Get-FileHash -LiteralPath $fgPath -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($manifest.schema -ne 1 -or $manifest.self_redirect_guard -ne $true -or
-    $manifest.host_sha256 -cne $hostHash) {
-    throw 'The host and guarded-runtime metadata do not match. Recheck the download.'
+    $manifest.host_sha256 -cne $hostHash -or $manifest.fg_sha256 -cne $fgHash) {
+    throw 'The host, FG module and guarded-runtime metadata do not match. Recheck the download.'
 }
 $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
     [Microsoft.Win32.RegistryHive]::LocalMachine,
@@ -87,17 +89,17 @@ try {
    in the Runtime card, keep **VDXR** selected in Streamer, then launch a game
    through its supported VDXR route. For OFXR, turn VD's SSW off. For the first NR
    comparison, enable NR, set processing resolution to **80%**, keep coverage at
-   **100%**, and choose **OFXR 3× / NVIDIA**. Fresh NR settings use native 100%
+   **100%**, and choose **OFXR 4× / NVIDIA**. Fresh NR settings use native 100%
    processing and NR off; installation preserves existing preferences.
 6. To compare with the official runtime, choose **Stock VDXR** and relaunch the
    game. Neither Streamer nor Controls needs to restart.
 
 The packaged metadata has schema `1`, `self_redirect_guard: true`, the exact host
-`host_sha256`, and `source_revision`. It binds the guarded DLL to the supplied
+`host_sha256`, `fg_sha256`, and `source_revision`. It binds the guarded DLL to the supplied
 metadata; it is not a digital signature. Do not manufacture this marker for an
 older DLL or copy it from a different build. The Controls app checks the hash
-without loading runtime code. The source revision identifies the compiled host;
-the Controls app can have a later documentation/application revision.
+without loading runtime code. The source revision identifies the published source snapshot; `build_base_revision` records the revision
+embedded in the tested host. The build receipts retain its exact as-built inputs. Controls has its own build base.
 
 ### Upgrade an existing managed installation
 
