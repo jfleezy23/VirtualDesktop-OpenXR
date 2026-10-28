@@ -48,7 +48,7 @@ title/build instructions and retain a way to restore the original files.
    the runtime in a process that is already running.
 3. Check stereo, controller poses/buttons and stability before enabling NR or FG. If these fail with NR and FG
    off, resolve the game's route/input compatibility first.
-4. Try the [80% processing / 100% coverage setup](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.25/docs/NR-FG-QUICKSTART.md). Keep game pixel density fixed when
+4. Try the [current NR/FG setup](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.27/docs/NR-FG-QUICKSTART.md). Keep game pixel density fixed when
    comparing. Enable OFXR separately, with SSW off, and restart after changing FG mode/backend.
 
 The Controls selectors show requests, not proof that NR/FG executed or that every synthetic frame reached the
