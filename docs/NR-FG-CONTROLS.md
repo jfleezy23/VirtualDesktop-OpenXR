@@ -34,7 +34,7 @@ profiles remain in place.
 5. Choose **Off**, **OFXR 2×**, **OFXR 3×** or **OFXR 4×**, then an optical-flow backend.
    Start with **NVIDIA (default)**. Fully close and relaunch the game after changing
    either FG selector.
-6. With the updated custom runtime installed, enable **Enable NR**, set **NR coverage (%) to 95**,
+6. With the updated custom runtime installed, enable **Enable NR**, set **NR coverage (%) to 100**,
    and set **NR processing resolution (%) to 80** for the first comparison. The toggle, processing,
    coverage and appearance controls save automatically and can be adjusted during play. Compare
    processing 100% and 80% in the same scene.
@@ -149,7 +149,7 @@ processing and automatic transition. Coverage 100% with processing 100% retains 
 native path. Zero NR strength preserves the original RGB. Compare faces,
 hair, dark areas and movement before settling on a pair.
 
-**NR + MFG requires coverage of at least 90%** for eligibility. Select OFXR 2×, 3× or 4× while
+**NR + FG requires coverage of at least 90%** for eligibility. Select OFXR 2×, 3× or 4× while
 comparing 95/80, 90/80 or 90/85. FG consumes complete native stereo output; the saved selection does
 not guarantee that every submission is eligible or that generated frames meet the deadline.
 
