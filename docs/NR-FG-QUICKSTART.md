@@ -1,7 +1,8 @@
 # Try VDXR NR and OFXR frame generation
 
-The [October 27 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.27)
-adds **OFXR 4× PC frame generation** and automatic per-game NR/FG profiles to Virtual Desktop's OpenXR runtime.
+The [October 27 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.27.1)
+improves the first generated frame's handoff to Virtual Desktop. **OFXR 2×/3×/4×** and automatic per-game
+NR/FG profiles are included; there is no new switch to enable the handoff improvement.
 NR processing resolution and coverage are independent, including **95% coverage / 80% processing** and
 **90% coverage / 85% processing**. FG offers Off, 2×, 3× and 4× and also works with NR off.
 
@@ -21,10 +22,10 @@ it does not provide Steam Frame or ALVR streaming. Frame Launcher's separate Ste
 
 ## Install once
 
-1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.10.27.zip` and
-   `VDXR-NR-FG-Controls-Windows-x64-2026.10.27.zip` from the
-   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.27).
-   Check them against `SHA256SUMS-2026.10.27.txt`.
+1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.10.27.1.zip` and
+   `VDXR-NR-FG-Controls-Windows-x64-2026.10.27.1.zip` from the
+   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.27.1).
+   Check them against `SHA256SUMS-2026.10.27.1.txt`.
 2. Follow the [complete side-by-side setup](SIDE-BY-SIDE-RUNTIME.md). It installs the matching host DLL, FG DLL
    and `CUSTOM-RUNTIME.json` under `%ProgramFiles%\VDXR-NR-FG\OpenXR`, then registers the managed path.
    Keep this release's host, FG module and metadata together: 4× requires the matching new host and module.
@@ -41,7 +42,7 @@ app can live in its own extracted folder. Existing NR, appearance and FG setting
 
 1. Turn Virtual Desktop's **SSW Off**, and disable any separate external FG layer.
 2. Choose **Globals** for defaults, or select the actual game EXE with **Add game EXE…** for a game profile.
-   Enable NR, set **NR coverage (%) to 95** and **NR processing resolution (%) to 80**.
+   Enable NR, set **NR coverage (%) to 100** and **NR processing resolution (%) to 80**.
    Keep your face, hair, tone and detail choices as they are. NR may also remain off for FG-only use.
 3. Select **OFXR 4×** and **NVIDIA (default)**. Globals save automatically; in game scope, click
    **Save game profile**. Close and relaunch the game after changing FG mode, backend or runtime.
@@ -125,9 +126,9 @@ not automatically converted by selecting VDXR. Routing a game successfully does 
 
 Rapid head turns, ghosting and exposure-change artifacts can remain. This release does not establish universal
 game compatibility, artifact-free motion or identical perceived detail at every processing percentage.
-The recorded Moss check used NVIDIA 4× with NR at **90% coverage / 85% processing** and passed stereo, controller
-and motion checks. Both backends also passed 4× fixtures at **4096 × 4096 per eye**; that resolution result is a
-fixture check, not a headset performance result. See the [release notes](releases/2026.10.27.md) for validation scope.
+Moss was checked at 120 Hz with NVIDIA and NR enabled in 2×, 3× and 4×; stereo and controls worked and
+motion was reported smooth. The 4× startup capture was brief. These observations do not establish sustained
+FPS, reduced headset latency or universal compatibility. See the [release notes](releases/2026.10.27.1.md).
 
 ## Source and licenses
 
