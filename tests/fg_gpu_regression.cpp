@@ -1,7 +1,9 @@
 #include "fg_gpu_helpers.h"
 #include <cstdlib>
 
-void run(const char* modulePath, uint32_t multiplier, const std::string& scenario = "motion") {
+void run(const char* modulePath, uint32_t multiplier, const std::string& requestedScenario = "motion") {
+    const bool early = requestedScenario.rfind("early-", 0) == 0;
+    const auto scenario = early ? requestedScenario.substr(6) : requestedScenario;
     const bool stationary = scenario == "stationary";
     Gpu gpu;
     HMODULE module =
@@ -14,7 +16,21 @@ void run(const char* modulePath, uint32_t multiplier, const std::string& scenari
     api.api_version = 1;
     success(getApi(&api), "negotiate ABI");
     VDXRFG_ApiV3 api3{};
-    if (multiplier == 4) {
+    if (early) {
+        auto get4 = reinterpret_cast<VDXRFG_GetApiV4Fn>(GetProcAddress(module, "VDXRFG_GetApiV4"));
+        check(get4 != nullptr, "early-readiness API export");
+        VDXRFG_ApiV4 api4{};
+        api4.struct_size = sizeof(api4);
+        api4.api_version = VDXRFG_API_VERSION_4;
+        success(get4(&api4), "negotiate early-readiness pixel fixture");
+        // V4 creation/submission deliberately reuse the V3 payloads.
+        api3.Create = api4.Create;
+        api3.Submit = api4.Submit;
+        api3.Retire = api4.Retire;
+        api3.Reset = api4.Reset;
+        api3.GetStatistics = api4.GetStatistics;
+        api3.Destroy = api4.Destroy;
+    } else if (multiplier == 4) {
         auto get3 = reinterpret_cast<VDXRFG_GetApiV3Fn>(GetProcAddress(module, "VDXRFG_GetApiV3"));
         check(get3 != nullptr, "four-frame API export");
         api3.struct_size = sizeof(api3);
@@ -49,7 +65,7 @@ void run(const char* modulePath, uint32_t multiplier, const std::string& scenari
     const auto selectedBackend = std::getenv("VDXR_FG_TEST_BACKEND");
     const bool fidelityFx = selectedBackend && std::string(selectedBackend) == "fidelityfx-full";
     check(!selectedBackend || fidelityFx || std::string(selectedBackend) == "nvidia", "known GPU fixture backend");
-    if (multiplier == 4) {
+    if (multiplier == 4 || early) {
         create3.struct_size = sizeof(create3);
         create3.api_version = VDXRFG_API_VERSION_3;
         create3.device = create.device;
@@ -60,9 +76,12 @@ void run(const char* modulePath, uint32_t multiplier, const std::string& scenari
         create3.format = create.format;
         create3.multiplier = multiplier;
         create3.flags = VDXRFG_CREATE_GPU_TIMING | (fidelityFx ? VDXRFG_CREATE_FIDELITYFX_FULL : 0);
-        auto alias = create3;
-        alias.outputs[1][3] = alias.outputs[0][1];
-        check(api3.Create(&alias, &context) == VDXRFG_E_REJECTED && !context, "S3 cannot alias another bank or phase");
+        if (multiplier == 4) {
+            auto alias = create3;
+            alias.outputs[1][3] = alias.outputs[0][1];
+            check(api3.Create(&alias, &context) == VDXRFG_E_REJECTED && !context,
+                  "S3 cannot alias another bank or phase");
+        }
         success(api3.Create(&create3, &context), "initialize four-frame synthesis");
     } else if (fidelityFx) {
         auto get2 = reinterpret_cast<VDXRFG_GetApiV2Fn>(GetProcAddress(module, "VDXRFG_GetApiV2"));
@@ -82,7 +101,7 @@ void run(const char* modulePath, uint32_t multiplier, const std::string& scenari
         success(api.Create(&create, &context), "initialize NVIDIA GPU synthesis");
     }
     const auto submit = [&](void* handle, const VDXRFG_SubmitInfoV3* value, VDXRFG_TicketV1* ticket) {
-        if (multiplier == 4)
+        if (multiplier == 4 || early)
             return api3.Submit(handle, value, ticket);
         VDXRFG_SubmitInfoV1 legacy{};
         legacy.struct_size = sizeof(legacy);

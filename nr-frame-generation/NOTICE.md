@@ -24,3 +24,9 @@ Use the release's source archive for the exact binary snapshot; the GitHub branc
 Build instructions are in [tests/frame-generation.md](../tests/frame-generation.md).
 
 The proprietary neural-rendering DLL `nvngx_dlssnr.dll` is supplied separately and is not part of this release.
+
+The optional V4 early-output readiness adaptation follows the first-output/tail
+command-list split in OFXR V569 (`8c10b136f78d3a764453d325b412e06e5ae79458`).
+`scripts/fg_early_readiness.py` applies it to the retained stereo-atlas derivative;
+full completion still owns resource lifetime. NVIDIA 3X shared composition stays
+joint rather than adding a redundant split.

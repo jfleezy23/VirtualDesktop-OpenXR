@@ -13,6 +13,7 @@ namespace {
 
     struct Lease {
         VDXRFG_TicketV1 ticket{};
+        uint64_t firstReadyValue{};
     };
 
     struct Context {
@@ -26,6 +27,7 @@ namespace {
         std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
         xrfg::D3D12FrameSynthesizer synthesizer;
         ComPtr<ID3D12Fence> ready;
+        ComPtr<ID3D12Fence> firstReady;
         ComPtr<ID3D12Fence> consumed;
         std::array<Lease, 2> leases;
         VDXRFG_StatisticsV1 statistics{};
@@ -37,6 +39,7 @@ namespace {
         bool initializationPoisoned{};
         bool hostOwnsReal{};
         bool version3{};
+        bool version4{};
     };
 
     template <typename T>
@@ -52,7 +55,8 @@ namespace {
                left.Get() == right.Get();
     }
 
-    HRESULT createImpl(const VDXRFG_CreateInfoV3* info, void** result, uint32_t flags, bool version3) noexcept {
+    HRESULT createImpl(
+        const VDXRFG_CreateInfoV3* info, void** result, uint32_t flags, bool version3, bool version4 = false) noexcept {
         if (!result) {
             return E_POINTER;
         }
@@ -69,6 +73,7 @@ namespace {
             context->input = static_cast<ID3D12Resource*>(info->input);
             context->multiplier = info->multiplier;
             context->version3 = version3;
+            context->version4 = version4;
             context->hostOwnsReal = (flags & VDXRFG_CREATE_HOST_OWNS_REAL) != 0;
             auto device = context->device.Get();
             if (!sameDevice(device, context->queue.Get()) || !sameDevice(device, context->input.Get()) ||
@@ -186,7 +191,8 @@ namespace {
                                                  (flags & VDXRFG_CREATE_GPU_TIMING) != 0,
                                                  !context->hostOwnsReal,
                                                  xrfg::D3D12SyntheticOutputLayout::shared_stereo_atlas,
-                                                 true);
+                                                 true,
+                                                 version4 && info->multiplier > 2);
             if (FAILED(hr)) {
                 if (hr == HRESULT_FROM_WIN32(ERROR_IO_INCOMPLETE)) {
                     context->initializationPoisoned = context->poisoned = true;
@@ -202,6 +208,11 @@ namespace {
             hr = device->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&context->consumed));
             if (FAILED(hr)) {
                 return hr;
+            }
+            if (version4 && info->multiplier > 2) {
+                hr = device->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&context->firstReady));
+                if (FAILED(hr))
+                    return hr;
             }
             *result = context.release();
             return S_OK;
@@ -255,6 +266,18 @@ namespace {
             ((info->flags & VDXRFG_CREATE_OMIT_REAL_OUTPUTS) && !(info->flags & VDXRFG_CREATE_HOST_OWNS_REAL)))
             return VDXRFG_E_REJECTED;
         return createImpl(info, result, info->flags, true);
+    }
+
+    HRESULT WINAPI createV4(const VDXRFG_CreateInfoV3* info, void** result) noexcept {
+        if (!result)
+            return E_POINTER;
+        *result = nullptr;
+        if (!info || info->struct_size < sizeof(*info) || info->api_version != VDXRFG_API_VERSION_3 ||
+            (info->flags & ~(VDXRFG_CREATE_GPU_TIMING | VDXRFG_CREATE_HOST_OWNS_REAL | VDXRFG_CREATE_FIDELITYFX_FULL |
+                             VDXRFG_CREATE_OMIT_REAL_OUTPUTS)) ||
+            ((info->flags & VDXRFG_CREATE_OMIT_REAL_OUTPUTS) && !(info->flags & VDXRFG_CREATE_HOST_OWNS_REAL)))
+            return VDXRFG_E_REJECTED;
+        return createImpl(info, result, info->flags, true, true);
     }
 
     bool viewsValid(const Context& context, const VDXRFG_SubmitInfoV3& info) {
@@ -447,11 +470,14 @@ namespace {
                     {},
                     false,
                     info->fractions[0],
-                    std::span<const xrfg::D3D12ExtraSynthetic>(extra.data(), extraCount));
+                    std::span<const xrfg::D3D12ExtraSynthetic>(extra.data(), extraCount),
+                    context->firstReady.Get(),
+                    context->firstReady ? lease->ticket.token : 0);
             }
             if (FAILED(hr)) {
                 return poison();
             }
+            lease->firstReadyValue = synthesis.first_output_signal_value;
             std::array<D3D12_RESOURCE_BARRIER, 6> packBarriers{};
             UINT packBarrierCount = 0;
             for (uint32_t role = 0; role < 4; ++role) {
@@ -548,6 +574,34 @@ namespace {
             normalized.views[i] = info->views[i];
         }
         return submitImpl(handle, &normalized, output);
+    }
+
+    HRESULT WINAPI outputReadiness(void* handle,
+                                   uint64_t token,
+                                   uint32_t role,
+                                   VDXRFG_OutputReadinessV4* output) noexcept {
+        if (!output)
+            return E_POINTER;
+        if (output->struct_size < sizeof(*output) || output->api_version != VDXRFG_API_VERSION_4)
+            return VDXRFG_E_REJECTED;
+        output->fence = nullptr;
+        output->value = 0;
+        const auto context = static_cast<Context*>(handle);
+        if (!context || !context->version4 || !token || role >= 4)
+            return VDXRFG_E_REJECTED;
+        if (context->poisoned)
+            return VDXRFG_E_POISONED;
+        for (const auto& lease : context->leases) {
+            if (lease.ticket.token != token)
+                continue;
+            if (!(lease.ticket.role_mask & (1u << role)))
+                return VDXRFG_E_REJECTED;
+            const bool first = role == 0 && lease.firstReadyValue != 0;
+            output->fence = first ? context->firstReady.Get() : context->ready.Get();
+            output->value = first ? lease.firstReadyValue : lease.ticket.output_ready_value;
+            return S_OK;
+        }
+        return VDXRFG_E_REJECTED;
     }
 
     HRESULT WINAPI retire(void* handle, uint64_t token) noexcept {
@@ -704,6 +758,25 @@ extern "C" __declspec(dllexport) HRESULT WINAPI VDXRFG_GetApiV3(VDXRFG_ApiV3* ou
                            reset,
                            statistics,
                            destroy};
+    *output = api;
+    return S_OK;
+}
+
+extern "C" __declspec(dllexport) HRESULT WINAPI VDXRFG_GetApiV4(VDXRFG_ApiV4* output) noexcept {
+    if (!output || output->struct_size < sizeof(*output) || output->api_version != VDXRFG_API_VERSION_4)
+        return VDXRFG_E_REJECTED;
+    const VDXRFG_ApiV4 api{sizeof(VDXRFG_ApiV4),
+                           VDXRFG_API_VERSION_4,
+                           VDXRFG_CREATE_GPU_TIMING | VDXRFG_CREATE_HOST_OWNS_REAL | VDXRFG_CREATE_FIDELITYFX_FULL |
+                               VDXRFG_CREATE_OMIT_REAL_OUTPUTS,
+                           4,
+                           createV4,
+                           submitV3,
+                           retire,
+                           reset,
+                           statistics,
+                           destroy,
+                           outputReadiness};
     *output = api;
     return S_OK;
 }

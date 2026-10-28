@@ -213,3 +213,42 @@ runtime/layer registration, vendor DLL, stock32 DLL and shortcut are captured
 and compared, never reset by installation. Restore those backed-up files with
 games closed to revert; remove a newly added optional DLL if absent originally.
 Public commits or distribution require separate authorization.
+
+## Early-output readiness qualification
+
+V4 adds authoritative per-role readiness while retaining the V3 creation/submission
+payloads and the full-completion ticket. V1/V2/V3 callers retain their original
+whole-transaction contract. Early S1 readiness never permits retirement, reset or
+resource reuse before full completion and consumer settlement.
+
+The module CTest suite includes `fg_early_*`, `nr_fg_early_*` and V4 moving-pixel
+cases. Test gates hold the tail after the early shared signal, prove both-eye S1
+pixels and consumer completion, preserve the tail's separate wait, and exercise
+a failure after S1. Keep the NVIDIA 3X joint-composition path and 2X unsplit path
+in the same qualification matrix.
+
+Build `nr_fg_early_handoff_regression` with the existing linked runtime-fixture
+builder against a matching **private** runtime cohort. Arguments are:
+
+```text
+<private-backend-folder> <module.dll> <2|3|4> <120|144> <nvidia|fidelityfx-full> <scenario>
+```
+
+`early-tail` checks 17 groups, exact native IDs and roles, every slot interval, and
+ordered GPU handoff markers. `late-tail` applies to split paths and checks real
+fallback without parking it behind the tail. `future-input` forces the next
+producer's unresolved dependency between native slots: current copies must
+complete ahead of it, while later same-context native markers deliberately remain
+blocked until that dependency is released. This exposes the existing overlap
+limit; it does not prove the private SDK's internal GPU queues are independent.
+`blocked-marker-control` and `burst-control` **must fail** their named handoff or
+interval assertion, proving that completed CPU calls and correct counts alone
+cannot qualify delivery. Release all GPU/CPU gates before joining on failures.
+
+`FG_NativeTiming` and `FG_ProducerContext` events are enabled only by the existing
+ETW provider. They record native Wait/Begin/Commit/End phases, context acquisition,
+readiness/copies and same-ID prediction drift without GPU readbacks. Trace-off
+adds no extra SDK prediction calls. These controlled-clock tests establish
+scheduler and GPU ordering, not physical headset scanout or a fixed VD submission
+margin. Check real native calls separately with a bounded game capture, then
+stop the ETW session for normal play.

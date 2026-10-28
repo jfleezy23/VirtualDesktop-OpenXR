@@ -331,8 +331,22 @@ namespace virtualdesktop_openxr {
                               getSetting("async_submission_priority").value_or(THREAD_PRIORITY_TIME_CRITICAL));
             bool begun{};
             bool started{};
+            struct NativeTiming {
+                bool enabled{};
+                double waitEnter{}, waitReturn{}, predictionBefore{}, predictionAfter{};
+                double beginLeaseEnter{}, beginLeaseAcquired{}, beginEnter{}, beginReturn{};
+                int waitResult{}, beginResult{};
+                unsigned waitAttempts{};
+            } timing;
+            const auto timingNow = [](bool enabled) { return enabled ? ovr_GetTimeInSeconds() : 0.; };
             const auto beginNative = [&] {
                 CHECK_MSG(nativeId != LLONG_MAX, "Frame-generation native ID exhausted");
+                timing = {};
+                timing.enabled = IsTraceEnabled();
+                if (timing.enabled) {
+                    timing.waitEnter = ovr_GetTimeInSeconds();
+                    timing.predictionBefore = ovr_GetPredictedDisplayTime(m_ovrSession, nativeId);
+                }
                 // Timing wait is the SDK's main-thread operation; only the
                 // render-thread Begin/End phases lease the immediate context.
                 while (true) {
@@ -343,6 +357,11 @@ namespace virtualdesktop_openxr {
                         }
                     }
                     const auto result = ovr_WaitToBeginFrame(m_ovrSession, nativeId);
+                    if (timing.enabled) {
+                        timing.waitReturn = ovr_GetTimeInSeconds();
+                        timing.waitResult = static_cast<int>(result);
+                        ++timing.waitAttempts;
+                    }
                     if (result == ovrError_NotInitialized) {
                         std::unique_lock lock(m_asyncSubmissionMutex);
                         if (m_asyncSubmissionCondVar.wait_for(lock, 1ms, [&] { return m_terminateAsyncThread; })) {
@@ -363,8 +382,16 @@ namespace virtualdesktop_openxr {
                         return false;
                     }
                 }
+                if (timing.enabled) {
+                    timing.predictionAfter = ovr_GetPredictedDisplayTime(m_ovrSession, nativeId);
+                    timing.beginLeaseEnter = ovr_GetTimeInSeconds();
+                }
                 std::unique_lock contextLease(m_fgContextMutex);
-                CHECK_OVRCMD(ovr_BeginFrame(m_ovrSession, nativeId));
+                timing.beginLeaseAcquired = timing.beginEnter = timingNow(timing.enabled);
+                const auto beginResult = ovr_BeginFrame(m_ovrSession, nativeId);
+                timing.beginReturn = timingNow(timing.enabled);
+                timing.beginResult = static_cast<int>(beginResult);
+                CHECK_OVRCMD(beginResult);
                 begun = true;
                 return true;
             };
@@ -408,6 +435,8 @@ namespace virtualdesktop_openxr {
                     m_asyncSubmissionCondVar.notify_all();
                 }
                 const bool hasGpuOutput = transaction.ticket.token != 0;
+                const bool traceGroup = IsTraceEnabled();
+                std::array<double, 4> readyEnter{}, readyReturn{}, copyQueued{}, copyObserved{};
                 std::array<int, 4> preparedImages{{-1, -1, -1, -1}};
                 const auto prepareRole = [&](FrameGenerationRole role) {
                     const unsigned index = static_cast<unsigned>(role);
@@ -417,6 +446,7 @@ namespace virtualdesktop_openxr {
                     CHECK_MSG(image >= 0 && static_cast<size_t>(image) < output.images.size(),
                               "Invalid FG compositor image");
                     CHECK_HRCMD(m_frameGeneration->copyOutput(transaction, role, output.images[image].Get()));
+                    copyQueued[index] = timingNow(traceGroup);
                 };
                 if (hasGpuOutput) {
                     std::unique_lock contextLease(m_fgContextMutex);
@@ -429,14 +459,19 @@ namespace virtualdesktop_openxr {
                 if (!reservation.valid || reservation.nativeId != static_cast<uint64_t>(nativeId)) {
                     m_fgNeedReprime = m_fgTimelineReanchor = true;
                 }
-                if (generated) {
-                    const auto deadline = xrTimeToOvrTime(transaction.slots.targets[0]);
-                    bool outputReady{};
+                const auto awaitRole = [&](FrameGenerationRole role, int64_t target) {
+                    const auto deadline = xrTimeToOvrTime(target);
+                    const auto index = static_cast<unsigned>(role);
+                    readyEnter[index] = timingNow(traceGroup);
+                    const auto finish = [&](bool result) {
+                        readyReturn[index] = timingNow(traceGroup);
+                        return result;
+                    };
                     while (true) {
                         {
                             std::unique_lock lock(m_asyncSubmissionMutex);
                             if (m_terminateAsyncThread) {
-                                break;
+                                return finish(false);
                             }
                         }
                         HANDLE completionEvent{};
@@ -446,17 +481,16 @@ namespace virtualdesktop_openxr {
                             // An expired group needs its existing real-frame
                             // fallback, not another fallible kernel registration.
                             if (ovr_GetTimeInSeconds() >= deadline) {
-                                break;
+                                return finish(false);
                             }
-                            result = m_frameGeneration->prepareOutputReadyWait(transaction, completionEvent);
+                            result = m_frameGeneration->prepareOutputReadyWait(transaction, completionEvent, role);
                         }
                         if (result != VDXRFG_E_BUSY) {
                             CHECK_HRCMD(result);
-                            outputReady = true;
-                            break;
+                            return finish(ovr_GetTimeInSeconds() <= deadline);
                         }
                         if (ovr_GetTimeInSeconds() >= deadline) {
-                            break;
+                            return finish(false);
                         }
                         // GPU completion wakes us immediately. Bound timeout
                         // retries for shutdown; neither context mutex is held.
@@ -466,23 +500,47 @@ namespace virtualdesktop_openxr {
                         }
                         CHECK_MSG(waited == WAIT_OBJECT_0 || waited == WAIT_TIMEOUT, "FG ready event wait failed");
                     }
-                    generated = outputReady && m_frameGenerationCadence.onTime(transaction.slots,
-                                                                               ovrTimeToXrTime(ovr_GetTimeInSeconds()));
+                };
+                if (generated) {
+                    generated =
+                        awaitRole(FrameGenerationRole::synthetic1, transaction.slots.targets[0]) &&
+                        m_frameGenerationCadence.onTime(transaction.slots, ovrTimeToXrTime(ovr_GetTimeInSeconds()));
                     if (!generated) {
                         m_fgNeedReprime = m_fgTimelineReanchor = true;
                     }
                 }
                 const unsigned cycles =
                     reservation.multiplier >= 1 && reservation.multiplier <= 4 ? reservation.multiplier : 1;
+                double leaseEnter = timingNow(traceGroup);
                 std::unique_lock contextLease(m_fgContextMutex);
+                double leaseAcquired = timingNow(traceGroup);
                 if (generated) {
-                    // All current destination copies precede the next NR/app
-                    // Wait on the shared immediate context. Do not commit a
-                    // synthetic role until its native slot actually uses it.
-                    for (unsigned slot = 0; slot < cycles - 1; ++slot) {
+                    // Only S1 may be complete. Do not queue an unresolved tail
+                    // dependency ahead of its native handoff or independent B.
+                    const unsigned copies = m_frameGeneration->ready(transaction) ? cycles - 1 : 1;
+                    for (unsigned slot = 0; slot < copies; ++slot) {
                         prepareRole(transaction.slots.roles[slot]);
                     }
                 }
+                bool admissionOpened{};
+                const auto openAdmission = [&] {
+                    if (admissionOpened)
+                        return;
+                    bool currentCopiesQueued = true;
+                    if (generated)
+                        for (unsigned slot = 0; slot < cycles - 1; ++slot)
+                            currentCopiesQueued &=
+                                preparedImages[static_cast<unsigned>(transaction.slots.roles[slot])] >= 0;
+                    const bool ready = !hasGpuOutput || (!m_fgNeedReprime && currentCopiesQueued &&
+                                                         m_frameGeneration->ready(transaction));
+                    if (ready) {
+                        std::unique_lock lock(m_asyncSubmissionMutex);
+                        m_lastWaitToBeginFrameTime = std::chrono::high_resolution_clock::now();
+                        m_asyncSubmissionReady = true;
+                        admissionOpened = true;
+                        m_asyncSubmissionCondVar.notify_all();
+                    }
+                };
                 bool stopping{};
                 if (!begun) {
                     // Prepare subsequent groups before the SDK's timing wait.
@@ -490,27 +548,55 @@ namespace virtualdesktop_openxr {
                     // cross-API destination copies and completion polling.
                     contextLease.unlock();
                     stopping = !beginNative();
+                    leaseEnter = timingNow(traceGroup);
                     contextLease.lock();
+                    leaseAcquired = timingNow(traceGroup);
                 }
                 // Retain the lease through the first Commit/End. Admission
                 // reopens only after selecting that first role below.
                 bool committedReal{};
                 ovrLayer_Union realLayer{};
                 for (unsigned slot = 0; slot < cycles && !stopping; ++slot) {
+                    if (generated && slot && slot < cycles - 1 &&
+                        preparedImages[static_cast<unsigned>(transaction.slots.roles[slot])] < 0) {
+                        // Prepare the tail as soon as it exists, before the
+                        // next native timing wait. Admission stays closed until
+                        // every current copy is ahead of the next NR/app Wait.
+                        if (contextLease.owns_lock())
+                            contextLease.unlock();
+                        const bool outputReady =
+                            awaitRole(transaction.slots.roles[slot], transaction.slots.targets[slot]);
+                        contextLease.lock();
+                        if (outputReady) {
+                            for (unsigned tail = slot; tail < cycles - 1; ++tail)
+                                prepareRole(transaction.slots.roles[tail]);
+                            openAdmission();
+                        } else {
+                            generated = false;
+                            m_fgNeedReprime = m_fgTimelineReanchor = true;
+                        }
+                        contextLease.unlock();
+                    }
                     if (!begun && !beginNative()) {
                         break;
                     }
                     if (!contextLease.owns_lock()) {
+                        leaseEnter = timingNow(traceGroup);
                         contextLease.lock();
+                        leaseAcquired = timingNow(traceGroup);
                     }
                     std::array<const ovrLayerHeader*, ovrMaxLayerCount> pointers{};
                     unsigned layerCount{};
                     ovrLayer_Union layer{};
+                    FrameGenerationRole selectedRole = FrameGenerationRole::real;
+                    double copyWaitEnter{}, copyWaitReturn{}, commitEnter{}, commitReturn{};
+                    int commitResult{};
                     if (hasGpuOutput) {
                         auto role = generated ? transaction.slots.roles[slot] : FrameGenerationRole::real;
                         // A missed later slot is real-only; never retime S2 with
                         // its original fraction or replay an already sent S1.
                         if (generated && slot < cycles - 1) {
+                            copyWaitEnter = timingNow(traceGroup);
                             const auto deadline = xrTimeToOvrTime(transaction.slots.targets[slot]);
                             while (!m_frameGeneration->copyReady(transaction, role) &&
                                    ovr_GetTimeInSeconds() < deadline) {
@@ -531,8 +617,12 @@ namespace virtualdesktop_openxr {
                                 role = FrameGenerationRole::real;
                                 m_fgNeedReprime = true;
                                 m_fgTimelineReanchor = true;
+                            } else {
+                                copyObserved[static_cast<unsigned>(role)] = timingNow(traceGroup);
                             }
+                            copyWaitReturn = timingNow(traceGroup);
                         }
+                        selectedRole = role;
                         const unsigned index = static_cast<unsigned>(role);
                         if (role == FrameGenerationRole::real && committedReal) {
                             layer = realLayer;
@@ -540,7 +630,11 @@ namespace virtualdesktop_openxr {
                             auto& output = m_fgPresentationBanks[transaction.ticket.bank][index];
                             const int image = preparedImages[index];
                             CHECK_MSG(image >= 0, "Unprepared FG compositor image");
-                            CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, output.ovrSwapchain));
+                            commitEnter = timingNow(traceGroup);
+                            const auto committed = ovr_CommitTextureSwapChain(m_ovrSession, output.ovrSwapchain);
+                            commitReturn = timingNow(traceGroup);
+                            commitResult = static_cast<int>(committed);
+                            CHECK_OVRCMD(committed);
                             output.lastCommittedIndex = image;
                             layer = ownedLayers[0];
                             layer.Header.Type = ovrLayerType_EyeFov;
@@ -570,16 +664,11 @@ namespace virtualdesktop_openxr {
                     scale.HmdToEyePose[1] = m_cachedEyeInfo[1].HmdToEyePose;
                     scale.HmdSpaceToWorldScaleInMeters = 1.f;
                     if (!slot) {
-                        std::unique_lock lock(m_asyncSubmissionMutex);
-                        m_lastWaitToBeginFrameTime = std::chrono::high_resolution_clock::now();
-                        // Independent B can be ready while the module is still
-                        // busy. Do not provoke a rejected next capture/reset;
-                        // an unready or missed group opens capacity on retire.
-                        m_asyncSubmissionReady =
-                            !hasGpuOutput || (!m_fgNeedReprime && m_frameGeneration->ready(transaction));
-                        m_asyncSubmissionCondVar.notify_all();
+                        openAdmission();
                     }
+                    const auto endEnter = timingNow(timing.enabled);
                     const auto result = ovr_EndFrame(m_ovrSession, nativeId, &scale, pointers.data(), layerCount);
+                    const auto endReturn = timingNow(timing.enabled);
                     TraceLoggingWrite(log::g_traceProvider,
                                       "FG_Present",
                                       TLArg(nativeId, "NativeId"),
@@ -589,6 +678,54 @@ namespace virtualdesktop_openxr {
                                       TLArg(generated && slot < cycles - 1, "Synthetic"),
                                       TLArg(!generated && slot < cycles - 1, "PaddingRepeat"),
                                       TLArg(static_cast<int>(result), "Result"));
+                    if (timing.enabled && traceGroup) {
+                        const auto role = static_cast<unsigned>(selectedRole);
+                        const auto requestedRole =
+                            slot < transaction.slots.count ? static_cast<unsigned>(transaction.slots.roles[slot]) : 2u;
+                        const int64_t target =
+                            reservation.valid ? reservation.firstTarget + slot * reservation.period : 0;
+                        const float fraction =
+                            selectedRole == FrameGenerationRole::real ? 1.f : transaction.slots.fractions[slot];
+                        TraceLoggingWrite(log::g_traceProvider,
+                                          "FG_NativeTiming",
+                                          TLArg(nativeId, "NativeId"),
+                                          TLArg(reservation.nativeId, "ReservedNativeId"),
+                                          TLArg(transaction.ticket.current_serial, "Serial"),
+                                          TLArg(slot, "Slot"),
+                                          TLArg(cycles, "Slots"),
+                                          TLArg(role, "Role"),
+                                          TLArg(requestedRole, "RequestedRole"),
+                                          TLArg(fraction, "Fraction"),
+                                          TLArg(target, "ReservedPhotonTarget"),
+                                          TLArg(reservation.period, "NativePeriod"),
+                                          TLArg(timing.waitEnter, "WaitEnter"),
+                                          TLArg(timing.waitReturn, "WaitReturn"),
+                                          TLArg(timing.waitResult, "WaitResult"),
+                                          TLArg(timing.waitAttempts, "WaitAttempts"),
+                                          TLArg(timing.predictionBefore, "PredictionBeforeWait"),
+                                          TLArg(timing.predictionAfter, "PredictionAfterWait"),
+                                          TLArg(timing.beginLeaseEnter, "BeginLeaseEnter"),
+                                          TLArg(timing.beginLeaseAcquired, "BeginLeaseAcquired"),
+                                          TLArg(timing.beginEnter, "BeginEnter"),
+                                          TLArg(timing.beginReturn, "BeginReturn"),
+                                          TLArg(timing.beginResult, "BeginResult"),
+                                          TLArg(leaseEnter, "PresentLeaseEnter"),
+                                          TLArg(leaseAcquired, "PresentLeaseAcquired"),
+                                          TLArg(readyEnter[role], "ReadyWaitEnter"),
+                                          TLArg(readyReturn[role], "ReadyWaitReturn"),
+                                          TLArg(readyEnter[requestedRole], "RequestedReadyWaitEnter"),
+                                          TLArg(readyReturn[requestedRole], "RequestedReadyWaitReturn"),
+                                          TLArg(copyQueued[role], "CopyQueued"),
+                                          TLArg(copyObserved[role], "CopyObservedComplete"),
+                                          TLArg(copyWaitEnter, "CopyWaitEnter"),
+                                          TLArg(copyWaitReturn, "CopyWaitReturn"),
+                                          TLArg(commitEnter, "CommitEnter"),
+                                          TLArg(commitReturn, "CommitReturn"),
+                                          TLArg(commitResult, "CommitResult"),
+                                          TLArg(endEnter, "EndEnter"),
+                                          TLArg(endReturn, "EndReturn"),
+                                          TLArg(static_cast<int>(result), "EndResult"));
+                    }
                     // An attempted cycle is never reused, including End failure.
                     ++nativeId;
                     begun = false;

@@ -62,6 +62,16 @@ class ResultTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.select_clock("spatial-combined-bgra-2", override=90)
 
+    def test_explicit_144hz_clock_is_selected_and_verified_for_all_multipliers(self):
+        runner = self.runner()
+        for multiplier in (2, 3, 4):
+            selected = runner.select_clock(f"spatial-steady-90-85-bgra-{multiplier}", inherited="120", override=144)
+            self.assertEqual(selected["selected_hz"], 144)
+            self.assertEqual(selected["profile_hz"], 120)
+            self.assertEqual(selected["selection"], "cli-override")
+            self.assertFalse(runner.clock_receipt(selected, "private backend test clock=120Hz\n")["matched"])
+            self.assertTrue(runner.clock_receipt(selected, "private backend test clock=144Hz\n")["matched"])
+
     def test_clock_receipt_rejects_missing_duplicate_and_mismatching_actual_rate(self):
         runner = self.runner()
         selected = runner.select_clock("spatial-steady-90-85-bgra-3", inherited="30")

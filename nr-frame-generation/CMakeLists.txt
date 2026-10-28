@@ -11,6 +11,7 @@ execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../
     --source "${OFXR}" --output "${DERIVATIVE}" COMMAND_ERROR_IS_FATAL ANY)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/prepare-fg-vendor.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/fg_early_readiness.py"
     "${OFXR}/src/d3d12/d3d12_frame_synthesizer.cpp" "${OFXR}/manifest.json"
     "${OFXR}/include/xrfg/d3d12_frame_synthesizer.hpp"
     "${OFXR}/src/d3d12/d3d12_history.cpp" "${OFXR}/include/xrfg/d3d12_history.hpp"
@@ -75,6 +76,39 @@ target_link_libraries(vdxr_frame_generation PRIVATE d3d12 dxgi
 include(CTest)
 option(VDXR_FG_DIAGNOSTIC_TESTS "Register strict stationary-flow diagnostics with known rendering failures" OFF)
 if(BUILD_TESTING)
+    add_executable(nr_fg_early_ready_regression ../tests/nr_fg_early_ready_regression.cpp
+        ../virtualdesktop-openxr/frame_generation.cpp ../virtualdesktop-openxr/frame_generation_pacing.cpp)
+    target_include_directories(nr_fg_early_ready_regression PRIVATE include ../packages/Detours.4.0.1/lib/native/include)
+    target_compile_features(nr_fg_early_ready_regression PRIVATE cxx_std_17)
+    target_compile_definitions(nr_fg_early_ready_regression PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(nr_fg_early_ready_regression PRIVATE d3d11 d3d12 dxgi
+        "${CMAKE_CURRENT_SOURCE_DIR}/../packages/Detours.4.0.1/lib/native/libs/x64/detours.lib")
+    foreach(BACKEND nvidia fidelityfx-full)
+        foreach(MULTIPLIER 2 3 4)
+            add_test(NAME fg_early_host_${BACKEND}_${MULTIPLIER}x
+                COMMAND nr_fg_early_ready_regression "$<TARGET_FILE:vdxr_frame_generation>" ${MULTIPLIER} ${BACKEND})
+            set_tests_properties(fg_early_host_${BACKEND}_${MULTIPLIER}x PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+                FAIL_REGULAR_EXPRESSION "FAIL:")
+        endforeach()
+    endforeach()
+    add_executable(fg_early_ready_regression ../tests/fg_early_ready_regression.cpp)
+    target_include_directories(fg_early_ready_regression PRIVATE include ../packages/Detours.4.0.1/lib/native/include)
+    target_compile_features(fg_early_ready_regression PRIVATE cxx_std_20)
+    target_compile_definitions(fg_early_ready_regression PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(fg_early_ready_regression PRIVATE d3d12 dxgi
+        "${CMAKE_CURRENT_SOURCE_DIR}/../packages/Detours.4.0.1/lib/native/libs/x64/detours.lib")
+    foreach(BACKEND nvidia fidelityfx-full)
+        foreach(MULTIPLIER 2 3 4)
+            add_test(NAME fg_early_ready_${BACKEND}_${MULTIPLIER}x
+                COMMAND fg_early_ready_regression "$<TARGET_FILE:vdxr_frame_generation>" ${MULTIPLIER} ${BACKEND})
+            set_tests_properties(fg_early_ready_${BACKEND}_${MULTIPLIER}x PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+                FAIL_REGULAR_EXPRESSION "FAIL:")
+        endforeach()
+        add_test(NAME fg_early_ready_${BACKEND}_tail_failure
+            COMMAND fg_early_ready_regression "$<TARGET_FILE:vdxr_frame_generation>" 4 ${BACKEND} fail-tail)
+        set_tests_properties(fg_early_ready_${BACKEND}_tail_failure PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+            FAIL_REGULAR_EXPRESSION "FAIL:")
+    endforeach()
     include("${CMAKE_CURRENT_SOURCE_DIR}/../tests/fg_sampler_regression.cmake")
     add_executable(nr_fg_bgra_regression ../tests/nr_fg_bgra_regression.cpp
         ../virtualdesktop-openxr/frame_generation.cpp ../virtualdesktop-openxr/frame_generation_pacing.cpp)
@@ -346,6 +380,12 @@ if(BUILD_TESTING)
         set_tests_properties(fg_gpu_${MULTIPLIER}x PROPERTIES TIMEOUT 60)
     endforeach()
     foreach(BACKEND nvidia fidelityfx-full)
+        foreach(MULTIPLIER 2 3 4)
+            add_test(NAME fg_early_pixels_${BACKEND}_${MULTIPLIER}x
+                COMMAND fg_gpu_regression "$<TARGET_FILE:vdxr_frame_generation>" ${MULTIPLIER} early-motion)
+            set_tests_properties(fg_early_pixels_${BACKEND}_${MULTIPLIER}x PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
+                ENVIRONMENT "VDXR_FG_TEST_BACKEND=${BACKEND}" FAIL_REGULAR_EXPRESSION "FAIL:")
+        endforeach()
         foreach(SCENARIO motion gamma-alpha cropped-eyes)
             add_test(NAME fg_gpu_${BACKEND}_4x_${SCENARIO}
                 COMMAND fg_gpu_regression "$<TARGET_FILE:vdxr_frame_generation>" 4 ${SCENARIO})
@@ -388,7 +428,8 @@ if(BUILD_TESTING)
         endforeach()
     endforeach()
     foreach(HOST fg_v2_host_regression nr_fg_integration_regression nr_fg_pack_regression
-            nr_fg_event_regression nr_fg_ready_regression nr_fg_ready_wait_regression nr_fg_bgra_regression)
+            nr_fg_event_regression nr_fg_ready_regression nr_fg_ready_wait_regression nr_fg_bgra_regression
+            nr_fg_early_ready_regression)
         add_dependencies(${HOST} fg_host_shader)
         target_include_directories(${HOST} PRIVATE "${GENERATED}")
     endforeach()
