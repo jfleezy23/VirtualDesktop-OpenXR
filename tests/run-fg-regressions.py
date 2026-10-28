@@ -22,6 +22,24 @@ def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def select_clock(scenario, inherited=None, override=None):
+    if override is not None and override not in (30, 60, 120):
+        raise ValueError("Supported qualification clocks are30,60,120Hz")
+    profile = "steady-fixed" if scenario.startswith("spatial-steady-") else (
+        "cold-transition" if scenario.startswith("spatial-") else "runtime-default"
+    )
+    rate = 30 if profile == "cold-transition" else 120
+    return {"profile": profile, "profile_hz": rate,
+            "selected_hz": override if override is not None else rate,
+            "selection": "cli-override" if override is not None else "profile", "inherited_env": inherited}
+
+
+def clock_receipt(selected, output):
+    rates = [int(rate) for rate in re.findall(r"^private backend test clock=(\d+)Hz$", output, re.M)]
+    return {**selected, "reported_hz": rates[0] if len(rates) == 1 else None,
+            "reported_count": len(rates), "matched": len(rates) == 1 and rates[0] == selected["selected_hz"]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", choices=["gpu", "integration", "presenter", "lifecycle", "all"], default="all")
@@ -29,6 +47,9 @@ def main():
     parser.add_argument("--runtime-cohort", type=Path)
     parser.add_argument("--backend-template", type=Path)
     parser.add_argument("--output-directory", required=True, type=Path)
+    parser.add_argument("--refresh-rate", type=int, choices=[30, 60, 120],
+                        help="Explicitly override per-case runtime clocks (cold spatial30Hz, steady120Hz). "
+                             "Inherited VDXR_FG_TEST_REFRESH_RATE is recorded but does not select clocks.")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
     spec = importlib.util.spec_from_file_location("fg_provenance", repo / "scripts/fg-build-provenance.py")
@@ -48,7 +69,7 @@ def main():
     cases = []
 
     def module_case(name, exe, *arguments):
-        cases.append((name, [str(module_directory / (exe + ".exe")), *map(str, arguments)]))
+        cases.append((name, [str(module_directory / (exe + ".exe")), *map(str, arguments)], None))
 
     if args.suite in {"gpu", "all"}:
         module_case("c-abi", "fg_c_abi_regression", module)
@@ -87,7 +108,9 @@ def main():
     if args.suite in {"presenter", "all"}:
         module_case("cadence", "nr_fg_presenter_regression")
 
-    manifest = {"suite": args.suite, "module_sha256": sha256(module), "results": []}
+    inherited_clock = os.environ.get("VDXR_FG_TEST_REFRESH_RATE")
+    manifest = {"suite": args.suite, "module_sha256": sha256(module), "results": [],
+                "clock_override_hz": args.refresh_rate, "inherited_clock_env": inherited_clock}
     if args.suite != "gpu":
         if not args.runtime_cohort or not args.backend_template:
             parser.error("Runtime suites need a matched runtime cohort and an OVRNull/NR backend template.")
@@ -119,13 +142,25 @@ def main():
             objects = {p.name: sha256(p) for p in (cohort / "obj").glob("*.obj")}
             if not objects or objects != provenance["runtime_objects"]:
                 parser.error(f"Fixture {exe} was linked against another runtime cohort.")
-            cases.append((name, [str(binary), *map(str, arguments)]))
+            clock = select_clock(str(arguments[-1]), inherited_clock, args.refresh_rate) if exe == "nr_fg_runtime_regression" else None
+            cases.append((name, [str(binary), *map(str, arguments)], clock))
 
         if args.suite in {"integration", "all"}:
             runtime_case("cpu-query-allocations", "nonnr_input_regression", "query-allocations")
             runtime_case("cpu-resolve-allocations", "nonnr_copy_preprocess_regression", "allocations", backend)
             for scenario in ("native", "upscaled", "sharpen", "discard", "nr-toggle", "bgra", "bgra-srgb", "bgra-srgb-jitter", "nr-off-reset-busy", "nr-off-capture-busy"):
                 runtime_case("nr-" + scenario, "nr_fg_runtime_regression", backend, output / ("state-" + scenario), scenario)
+            for scenario in ("spatial-bgra-off", "spatial-bgra-srgb-off", "spatial-bgra-2", "spatial-bgra-srgb-2",
+                             "spatial-bgra-3", "spatial-bgra-srgb-3",
+                             "spatial-combined-bgra-off", "spatial-combined-bgra-srgb-off",
+                             "spatial-combined-bgra-2", "spatial-combined-bgra-srgb-2",
+                             "spatial-combined-bgra-3", "spatial-combined-bgra-srgb-3"):
+                runtime_case(scenario, "nr_fg_runtime_regression", backend, output / ("state-" + scenario), scenario)
+            for coverage, processing in ((95, 80), (90, 80), (90, 85), (100, 80)):
+                for encoding in ("bgra", "bgra-srgb"):
+                    for multiplier in (2, 3):
+                        scenario = f"spatial-steady-{coverage}-{processing}-{encoding}-{multiplier}"
+                        runtime_case(scenario, "nr_fg_runtime_regression", backend, output / ("state-" + scenario), scenario)
             for scenario in ("color", "depth", "ignored", "reuse", "upscaled", "direct", "static", "static-array"):
                 runtime_case("commits-" + scenario, "nr_intermediate_commit_regression", backend,
                              output / ("state-commits-" + scenario), scenario)
@@ -151,7 +186,7 @@ def main():
             for scenario in scenarios:
                 runtime_case("worker-" + scenario, "nr_fg_worker_regression", backend, module, 3, scenario)
 
-    for _, command in cases:
+    for _, command, _ in cases:
         if not Path(command[0]).is_file():
             parser.error("A required fixture executable is missing.")
     output.mkdir(parents=True)
@@ -171,21 +206,26 @@ def main():
         p.relative_to(repo).as_posix(): sha256(p) for folder in ("virtualdesktop-openxr", "tests", "nr-frame-generation")
         for p in (repo / folder).rglob("*") if p.is_file() and p.suffix in {".cpp", ".c", ".h", ".hpp", ".hlsl", ".py"}
     }
-    for name, command in cases:
+    for name, command, selected_clock in cases:
         started = time.monotonic()
         try:
             environment = os.environ.copy()
+            if selected_clock:
+                environment["VDXR_FG_TEST_REFRESH_RATE"] = str(selected_clock["selected_hz"])
             if name.startswith("stereo-"):
                 environment["VDXR_FG_TEST_OUTPUT"] = str(output)
             run = subprocess.run(command, cwd=repo, env=environment, capture_output=True, text=True, timeout=60)
             text, code = run.stdout + run.stderr, run.returncode
         except subprocess.TimeoutExpired:
             text, code = "FAIL: child process timed out\n", -999
+        receipt = clock_receipt(selected_clock, text) if selected_clock else None
+        if receipt and not receipt["matched"]:
+            text += "\nFAIL: fixture clock does not match its explicit qualification profile/override\n"
         (output / (name + ".log")).write_text(text, encoding="utf-8")
         passed = successful(code, text)
         manifest["results"].append({"name": name, "passed": passed, "exit_code": code,
                                     "seconds": time.monotonic() - started, "argv": command,
-                                    "exe_sha256": sha256(Path(command[0]))})
+                                    "exe_sha256": sha256(Path(command[0])), "qualification_clock": receipt})
         (output / "results.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         print(("PASS: " if passed else "FAIL: ") + name, flush=True)
         if not passed:

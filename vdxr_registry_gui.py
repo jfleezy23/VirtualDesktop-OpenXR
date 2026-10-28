@@ -309,9 +309,9 @@ class VDXRRegistryApp:
         apply_dark_theme(root)
         self.updating = True
         errors = []
-        self.saved_values = read_values(errors)
         self.saved_enabled = read_enabled(errors)
-        self.saved_processing_resolution = read_processing_resolution(errors)
+        self.load_processing_resolution(errors)
+        self.saved_values = read_values(errors)
 
         frame = ttk.Frame(root, padding=(20, 16), style="App.TFrame")
         frame.grid()
@@ -425,12 +425,14 @@ class VDXRRegistryApp:
         ttk.Label(nr, textvariable=self.processing_resolution, style="Value.TLabel", width=3, anchor="e").grid(
             row=8, column=2, sticky="e", padx=(14, 0)
         )
-        ttk.Label(nr, text="Model grid, not Coverage area. Native 100%; try 80% experimentally.\n"
-                  "Requires Coverage 100% and a supported custom runtime; otherwise native NR.",
+        ttk.Label(nr, text="Both percentages scale linear dimensions. Native processing 100%; try 80%.\n"
+                  "Combined coverage + processing requires an updated custom runtime.",
                   style="Hint.TLabel", wraplength=592).grid(
             row=9, column=0, columnspan=3, sticky="w", pady=(10, 0)
         )
-        ttk.Label(nr, text="Changes apply during play.  100% coverage recommended.", style="Hint.TLabel").grid(
+        ttk.Label(nr, text="Reduced processing with partial coverage adds an automatic inside transition;\n"
+                  "the fully enhanced center is smaller.",
+                  style="Hint.TLabel", wraplength=592).grid(
             row=10, column=0, columnspan=3, sticky="w", pady=(6, 0)
         )
 
@@ -471,7 +473,8 @@ class VDXRRegistryApp:
         )
         backend_selector.grid(row=2, column=1, sticky="ew")
         backend_selector.bind("<<ComboboxSelected>>", self.on_frame_generation_backend_changed)
-        ttk.Label(fg, text="Works with NR on or off. Turn SSW off in Virtual Desktop.", style="Hint.TLabel").grid(
+        ttk.Label(fg, text="NR + MFG requires coverage at least 90%. Turn SSW off in Virtual Desktop.",
+                  style="Hint.TLabel", wraplength=592).grid(
             row=3, column=0, columnspan=2, sticky="w", pady=(12, 4)
         )
         ttk.Label(fg, text="Selections are saved requests, not active runtime status.", style="Hint.TLabel").grid(
@@ -533,6 +536,13 @@ class VDXRRegistryApp:
         else:
             self.saved_frame_generation = selection
             self.status.set(f"Saved {selection}; restart the game.")
+
+    def load_processing_resolution(self, errors):
+        read_errors = []
+        self.saved_processing_resolution = read_processing_resolution(read_errors)
+        # Keep read warnings honest without gating independent coverage edits.
+        self.processing_resolution_verified = not read_errors
+        errors.extend(read_errors)
 
     def set_slider_state(self):
         state = tk.NORMAL if self.enabled.get() else tk.DISABLED
@@ -615,6 +625,8 @@ class VDXRRegistryApp:
         return self.save_nr_value(index, variable)
 
     def save_nr_value(self, index, variable):
+        if VALUE_NAMES[index] == "FoveationSize":
+            return self.save_foveation_size(variable)
         try:
             write_value(VALUE_NAMES[index], variable.get())
             self.saved_values[index] = variable.get()
@@ -632,8 +644,18 @@ class VDXRRegistryApp:
         return False
 
     def save_foveation_size(self, variable):
-        self.foveation_save_id = None
-        return self.save_nr_value(len(VALUE_NAMES) - 1, variable)
+        self.cancel_foveation_save()
+        value = variable.get()
+        try:
+            write_value("FoveationSize", value)
+        except OSError as error:
+            self.spatial_save_failed("NR coverage", error)
+            return False
+        self.saved_values[-1] = value
+        self.status.set(f"Saved NR coverage = {value}% · applies during play")
+        if not self.processing_resolution_verified:
+            self.status.set(f"Saved NR coverage = {value}%; NR processing resolution is unverified; showing its default.")
+        return True
 
     def cancel_foveation_save(self):
         if self.foveation_save_id is not None:
@@ -644,24 +666,40 @@ class VDXRRegistryApp:
         if self.updating:
             return
         self.cancel_processing_resolution_save()
+        self.set_slider_state()
         self.processing_resolution_save_id = self.root.after(400, self.save_processing_resolution)
 
     def save_processing_resolution(self):
-        self.processing_resolution_save_id = None
+        self.cancel_processing_resolution_save()
         try:
             value = self.processing_resolution.get()
             write_processing_resolution(value)
-        except PermissionError:
-            self.refresh_processing_resolution()
-            self.status.set("Administrator access is required to save NR processing resolution.")
         except (OSError, ValueError) as error:
-            self.refresh_processing_resolution()
-            self.status.set(f"NR processing resolution error: {error}")
+            self.spatial_save_failed("NR processing resolution", error)
         else:
             self.saved_processing_resolution = value
+            self.processing_resolution_verified = True
+            self.set_slider_state()
             self.status.set(f"Saved NR processing resolution = {value}% · supported custom runtime required")
             return True
         return False
+
+    def spatial_save_failed(self, setting, error):
+        """Reconcile both settings after a possibly partial, unverified write."""
+        errors = [f"{setting} error: " + (
+            "administrator access is required." if isinstance(error, PermissionError) else str(error)
+        )]
+        self.cancel_foveation_save()
+        was_updating = self.updating
+        self.updating = True
+        try:
+            self.saved_values[-1] = read_nr_value("FoveationSize", 100, 100, errors)
+            self.variables[-1].set(self.saved_values[-1])
+            self.refresh_processing_resolution(errors)
+        finally:
+            self.updating = was_updating
+        self.set_slider_state()
+        self.status.set("; ".join(errors))
 
     def cancel_processing_resolution_save(self):
         if self.processing_resolution_save_id is not None:
@@ -670,13 +708,19 @@ class VDXRRegistryApp:
 
     def refresh_processing_resolution(self, errors=None):
         self.cancel_processing_resolution_save()
-        self.saved_processing_resolution = read_processing_resolution(errors)
+        read_errors = []
+        self.load_processing_resolution(read_errors)
+        if errors is not None:
+            errors.extend(read_errors)
+        elif read_errors:
+            self.status.set("; ".join(read_errors))
         was_updating = self.updating
         self.updating = True
         try:
             self.processing_resolution.set(self.saved_processing_resolution)
         finally:
             self.updating = was_updating
+        self.set_slider_state()
 
     def on_close(self):
         pending_processing = self.processing_resolution_save_id is not None
@@ -686,7 +730,7 @@ class VDXRRegistryApp:
         error_status = None
         if pending_processing:
             if not self.save_processing_resolution():
-                error_status = self.status.get()
+                return
         if pending_coverage:
             if not self.save_foveation_size(self.variables[-1]):
                 error_status = self.status.get()

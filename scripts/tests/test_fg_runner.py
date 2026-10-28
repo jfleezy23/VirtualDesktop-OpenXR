@@ -5,6 +5,47 @@ import tempfile
 
 
 class ResultTests(unittest.TestCase):
+    def runner(self):
+        path = Path(__file__).parents[2] / "tests/run-fg-regressions.py"
+        spec = importlib.util.spec_from_file_location("fg_clock_runner", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_spatial_profiles_pin_cold30_and_steady120_despite_inherited_clock(self):
+        runner = self.runner()
+        cold = runner.select_clock("spatial-combined-bgra-3", inherited="120")
+        steady = runner.select_clock("spatial-steady-90-80-bgra-srgb-3", inherited="30")
+        self.assertEqual(cold["selected_hz"], 30)
+        self.assertEqual(cold["profile"], "cold-transition")
+        self.assertEqual(cold["inherited_env"], "120")
+        self.assertEqual(steady["selected_hz"], 120)
+        self.assertEqual(steady["profile"], "steady-fixed")
+        self.assertEqual(steady["inherited_env"], "30")
+        self.assertEqual(steady["selection"], "profile")
+        self.assertEqual(runner.select_clock("native")["selected_hz"], 120)
+
+    def test_explicit_clock_override_is_recorded_separately_from_intended_profile(self):
+        runner = self.runner()
+        clock = runner.select_clock("spatial-steady-95-80-bgra-2", inherited="30", override=60)
+        self.assertEqual(clock["profile_hz"], 120)
+        self.assertEqual(clock["selected_hz"], 60)
+        self.assertEqual(clock["selection"], "cli-override")
+        self.assertEqual(clock["inherited_env"], "30")
+        with self.assertRaises(ValueError):
+            runner.select_clock("spatial-combined-bgra-2", override=90)
+
+    def test_clock_receipt_rejects_missing_duplicate_and_mismatching_actual_rate(self):
+        runner = self.runner()
+        selected = runner.select_clock("spatial-steady-90-85-bgra-3", inherited="30")
+        for output in ("PASS: pixels\n", "private backend test clock=30Hz\nPASS: pixels\n",
+                       "private backend test clock=120Hz\nprivate backend test clock=120Hz\nPASS: pixels\n"):
+            self.assertFalse(runner.clock_receipt(selected, output)["matched"])
+        receipt = runner.clock_receipt(selected, "private backend test clock=120Hz\nPASS: pixels\n")
+        self.assertTrue(receipt["matched"])
+        self.assertEqual(receipt["reported_hz"], 120)
+        self.assertEqual(receipt["inherited_env"], "30")
+
     def test_module_receipt_rejects_changed_packed_input_fixture(self):
         path = Path(__file__).parents[1] / "fg-build-provenance.py"
         spec = importlib.util.spec_from_file_location("fg_provenance_pack", path)

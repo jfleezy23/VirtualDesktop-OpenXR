@@ -1012,6 +1012,10 @@ namespace virtualdesktop_openxr {
         std::unique_ptr<D3D12Utils::CommandContext> m_dlssnrContext;
         ovrSizei m_dlssnrFeatureResolution{0, 0};
         std::unique_ptr<nr_spatial::Pipeline> m_nrSpatialPipeline;
+        std::unique_ptr<nr_spatial::Pipeline> m_nrNativePipeline;
+        bool m_nrNativeNeedsDrain{};
+        bool m_nrNativeNeedsFeatureReset{};
+        int m_nrNativeStatus{};
         std::array<ovrSizei, 2> m_nrSpatialFeatureExtents{};
         std::array<ovrTextureSwapChain, 4> m_nrSpatialSourceChains{};
         bool m_nrSpatialFeatures{};

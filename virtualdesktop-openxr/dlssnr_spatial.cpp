@@ -21,19 +21,16 @@ namespace virtualdesktop_openxr {
             }
             return false;
         };
-        if (std::abs(settings.foveationSize - 1.f) > FLT_EPSILON) {
-            return fallback(1, "reduced processing requires full image coverage");
-        }
-
         nr_spatial::FrameInput input;
         input.processingPercent = settings.processingResolution;
         const ovrSizei resolution{std::max(views[0]->imageRect.extent.width, views[1]->imageRect.extent.width),
                                   std::max(views[0]->imageRect.extent.height, views[1]->imageRect.extent.height)};
         auto& firstSwapchain = *reinterpret_cast<Swapchain*>(views[0]->swapchain);
-        const auto format = firstSwapchain.ovrDesc.Format;
-        input.outputFormat = ovrToDxgiTextureFormat(format);
+        const auto sourceFormat = ovrToDxgiTextureFormat(firstSwapchain.ovrDesc.Format);
+        input.outputFormat = nr_spatial::OutputColorFormat(sourceFormat, m_frameGenerationMode != 0);
+        const auto format = dxgiToOvrTextureFormat(input.outputFormat);
         input.outputEyeStride = resolution.w;
-        if (!nr_spatial::IsSupportedColorFormat(input.outputFormat)) {
+        if (!nr_spatial::IsSupportedColorFormat(sourceFormat)) {
             return fallback(2, "source format retains the qualified native NR path");
         }
         const bool pairedDepth = depth[0] && depth[1];
@@ -46,7 +43,7 @@ namespace virtualdesktop_openxr {
             const auto& rect = views[eye]->imageRect;
             auto& target = input.eyes[eye];
             target.colorFormat = swapchain.dxgiFormatForSubmission;
-            if (target.colorFormat != input.outputFormat || rect.offset.x < 0 || rect.offset.y < 0 ||
+            if (target.colorFormat != sourceFormat || rect.offset.x < 0 || rect.offset.y < 0 ||
                 rect.extent.width <= 0 || rect.extent.height <= 0 || source.lastCommittedIndex < 0 ||
                 static_cast<size_t>(source.lastCommittedIndex) >= source.dlssnrImages.size()) {
                 return fallback(3, "unsupported color view or unavailable input generation");
@@ -57,8 +54,11 @@ namespace virtualdesktop_openxr {
                                 static_cast<uint32_t>(rect.extent.width),
                                 static_cast<uint32_t>(rect.extent.height)};
             nr_spatial::Extent extent{};
+            const nr_spatial::Extent native{target.colorRect.width, target.colorRect.height};
+            target.processingRect = nr_spatial::CoverageRect(native, settings.foveationSize);
+            target.transitionWidth = nr_spatial::TransitionWidth(native, target.processingRect, settings.foveationSize);
             if (!nr_spatial::TryWorkingExtent(
-                    {target.colorRect.width, target.colorRect.height}, input.processingPercent, extent)) {
+                    {target.processingRect.width, target.processingRect.height}, input.processingPercent, extent)) {
                 return fallback(4, "working grid is too small or has no effective reduction");
             }
             working[eye] = {static_cast<int>(extent.width), static_cast<int>(extent.height)};
@@ -201,8 +201,9 @@ namespace virtualdesktop_openxr {
             layer.Viewport[eye].Size = {views[eye]->imageRect.extent.width, views[eye]->imageRect.extent.height};
         }
         if (changed || m_nrSpatialStatus != 100 + static_cast<int>(input.processingPercent)) {
-            Log("NR processing resolution: %u%%, full coverage; left %dx%d -> %dx%d, right %dx%d -> %dx%d",
+            Log("NR processing resolution: %u%%, coverage %.0f%%; left %dx%d -> %dx%d, right %dx%d -> %dx%d",
                 input.processingPercent,
+                std::clamp(settings.foveationSize, 0.1f, 1.f) * 100.f,
                 views[0]->imageRect.extent.width,
                 views[0]->imageRect.extent.height,
                 working[0].w,

@@ -1,6 +1,9 @@
 // Independent scalar contract + real production Pipeline, with synthetic edits.
 // This proves shader/lifetime behavior, NOT proprietary NR inference or quality.
 #include "../virtualdesktop-openxr/NrSpatialPipeline.h"
+#if defined(NR_SPATIAL_TEST_OBSERVER)
+#include "nr_spatial_test_observer.h"
+#endif
 #include <d3d12sdklayers.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
@@ -236,29 +239,67 @@ Bytes areaOracle(const Bytes& native, UINT rowWidth, Rect rect, Extent work, boo
         }
     return p;
 }
-Bytes resolveOracle(
-    const Bytes& native, UINT rowWidth, Rect rect, Extent work, const Bytes& p, const Bytes& a, bool srgb, bool bgra) {
+Bytes resolveOracle(const Bytes& native,
+                    UINT rowWidth,
+                    Rect rect,
+                    Extent work,
+                    const Bytes& p,
+                    const Bytes& a,
+                    bool srgb,
+                    bool sourceBgra,
+                    bool outputBgra,
+                    Rect processing = {},
+                    UINT transition = 0) {
+    if (!processing.width && !processing.height)
+        processing = {0, 0, rect.width, rect.height};
     Bytes output(size_t(rect.width) * rect.height * 4);
     for (UINT y = 0; y < rect.height; ++y)
         for (UINT x = 0; x < rect.width; ++x) {
-            const double qx = (x + .5) * work.width / rect.width - .5, qy = (y + .5) * work.height / rect.height - .5;
+            const bool inside = x >= processing.x && y >= processing.y && x < processing.x + processing.width &&
+                                y < processing.y + processing.height;
+            if (!inside) {
+                for (UINT c = 0; c < 4; ++c)
+                    output[offset(x, y, rect.width, c, outputBgra)] =
+                        native[offset(rect.x + x, rect.y + y, rowWidth, c, sourceBgra)];
+                continue;
+            }
+            const double localX = x - processing.x + .5, localY = y - processing.y + .5;
+            const double qx = localX * work.width / processing.width - .5,
+                         qy = localY * work.height / processing.height - .5;
+            const double edge = std::min({localX, localY, processing.width - localX, processing.height - localY});
+            const double t = transition ? std::clamp(edge / transition, 0.0, 1.0) : 1.0;
+            const double taper = t * t * (3 - 2 * t);
             const int ix = int(std::floor(qx)), iy = int(std::floor(qy));
             const double fx = qx - ix, fy = qy - iy;
             double n[3], edit[3]{}, total = 0;
             bool zero = true;
             for (UINT c = 0; c < 3; ++c)
-                n[c] = decode(native[offset(rect.x + x, rect.y + y, rowWidth, c, bgra)] / 255.0, srgb);
+                n[c] = decode(native[offset(rect.x + x, rect.y + y, rowWidth, c, sourceBgra)] / 255.0, srgb);
             for (int j = 0; j < 2; ++j)
                 for (int i = 0; i < 2; ++i) {
                     const UINT sx = UINT(std::clamp(ix + i, 0, int(work.width) - 1)),
                                sy = UINT(std::clamp(iy + j, 0, int(work.height) - 1));
-                    double delta[3], distance = 0;
+                    double delta[3], distance = 0, guideLevel = 0;
                     for (UINT c = 0; c < 3; ++c) {
                         const auto index = offset(sx, sy, work.width, c);
                         const double guide = decode(p[index] / 255.0, srgb);
+                        guideLevel = std::max(guideLevel, guide);
                         delta[c] = decode(a[index] / 255.0, srgb) - guide;
                         zero = zero && a[index] == p[index];
                         distance += (guide - n[c]) * (guide - n[c]) / 3;
+                    }
+                    // Independent double-precision policy; original guide normalization is fixed.
+                    const double level = std::min(std::max({n[0], n[1], n[2]}), guideLevel);
+                    if (level < 1.0 / 128) {
+                        const auto toe = [level](double end) {
+                            const double z = std::clamp(level / end, 0.0, 1.0);
+                            return z * z * (3 - 2 * z);
+                        };
+                        const double least = std::min({delta[0], delta[1], delta[2]});
+                        const double greatest = std::max({delta[0], delta[1], delta[2]});
+                        const double gray = least > 0 ? least : greatest < 0 ? greatest : 0;
+                        for (auto& d : delta)
+                            d = toe(1.0 / 1024) * gray + toe(1.0 / 128) * (d - gray);
                     }
                     const double weight = (i ? fx : 1 - fx) * (j ? fy : 1 - fy) / (1 + 1024 * distance);
                     for (UINT c = 0; c < 3; ++c)
@@ -266,9 +307,9 @@ Bytes resolveOracle(
                     total += weight;
                 }
             for (UINT c = 0; c < 4; ++c) {
-                const auto raw = native[offset(rect.x + x, rect.y + y, rowWidth, c, bgra)];
-                output[offset(x, y, rect.width, c, bgra)] =
-                    c == 3 || zero ? raw : quantize(encode(n[c] + edit[c] / total, srgb));
+                const auto raw = native[offset(rect.x + x, rect.y + y, rowWidth, c, sourceBgra)];
+                output[offset(x, y, rect.width, c, outputBgra)] =
+                    c == 3 || zero ? raw : quantize(encode(n[c] + taper * edit[c] / total, srgb));
             }
         }
     return output;
@@ -288,28 +329,109 @@ void compare(const Bytes& actual, const Bytes& expected, int tolerance, const ch
     }
 }
 
-void runFormat(Gpu& gpu, DXGI_FORMAT format, UINT percent, bool arraySource = false) {
+void formatValidation(Gpu& gpu) {
+    const DXGI_FORMAT formats[]{DXGI_FORMAT_R8G8B8A8_UNORM,
+                                DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                                DXGI_FORMAT_B8G8R8A8_UNORM,
+                                DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+                                DXGI_FORMAT_UNKNOWN,
+                                DXGI_FORMAT_R8G8B8A8_TYPELESS,
+                                DXGI_FORMAT_B8G8R8A8_TYPELESS,
+                                DXGI_FORMAT_R16G16B16A16_FLOAT};
+    auto allocation = [](DXGI_FORMAT format) {
+        return format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+                       format == DXGI_FORMAT_B8G8R8A8_TYPELESS
+                   ? DXGI_FORMAT_B8G8R8A8_TYPELESS
+                   : DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    };
+    for (UINT left = 0; left < std::size(formats); ++left)
+        for (UINT right = 0; right < std::size(formats); ++right)
+            for (UINT output = 0; output < std::size(formats); ++output) {
+                auto a = gpu.texture(132, 129, allocation(formats[left]));
+                auto b = gpu.texture(132, 129, allocation(formats[right]));
+                auto target =
+                    gpu.texture(264, 129, allocation(formats[output]), D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+                FrameInput frame{};
+                frame.output = target.Get();
+                frame.outputFormat = formats[output];
+                frame.outputEyeStride = 132;
+                frame.processingPercent = 80;
+                frame.eyes[0] = {a.Get(), formats[left], {0, 0, 132, 129}};
+                frame.eyes[1] = {b.Get(), formats[right], {0, 0, 132, 129}};
+                // Literal supported pair matrix, independent of production policy.
+                const bool allowed = left == right && left < 4 && output < 4 &&
+                                     (left == output || (left == 2 && output == 0) || (left == 3 && output == 1));
+                Pipeline pipeline(gpu.device.Get(), gpu.fence.Get());
+                check(SUCCEEDED(pipeline.Prepare(frame)) == allowed,
+                      "typed view matrix: same encoding, BGRA to RGBA only, identical stereo source formats");
+                pipeline.DiscardRecording();
+            }
+    for (bool sourceMismatch : {false, true}) {
+        auto source =
+            gpu.texture(132, 129, sourceMismatch ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_B8G8R8A8_TYPELESS);
+        auto output = gpu.texture(264,
+                                  129,
+                                  sourceMismatch ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_B8G8R8A8_TYPELESS,
+                                  D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        FrameInput frame{};
+        frame.output = output.Get();
+        frame.outputFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        frame.outputEyeStride = 132;
+        frame.processingPercent = 80;
+        for (auto& eye : frame.eyes)
+            eye = {source.Get(), DXGI_FORMAT_B8G8R8A8_UNORM, {0, 0, 132, 129}};
+        Pipeline pipeline(gpu.device.Get(), gpu.fence.Get());
+        check(FAILED(pipeline.Prepare(frame)),
+              "canonical conversion still rejects source/output view backing family mismatch");
+    }
+    gpu.noErrors();
+    std::puts("PASS all 512 source-eye/output typed view qualification combinations");
+}
+
+void runFormat(Gpu& gpu,
+               DXGI_FORMAT format,
+               DXGI_FORMAT outputFormat,
+               UINT percent,
+               bool arraySource = false,
+               UINT coverage = 100) {
     const bool srgb = format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
     const bool bgra = format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
     const auto allocation = bgra ? DXGI_FORMAT_B8G8R8A8_TYPELESS : DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    const bool outputBgra =
+        outputFormat == DXGI_FORMAT_B8G8R8A8_UNORM || outputFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    const auto outputAllocation = outputBgra ? DXGI_FORMAT_B8G8R8A8_TYPELESS : DXGI_FORMAT_R8G8B8A8_TYPELESS;
     constexpr UINT inputW = 311, inputH = 161, outputW = 281, outputH = 137, stride = 144;
     const std::array<Rect, 2> rects{{{3, 5, 137, 133}, {161, 13, 129, 127}}};
     // Independently hand-calculated 50%/80%/90% ceil-and-align grids.
-    const std::array<Extent, 2> work = percent == 50   ? std::array<Extent, 2>{{{72, 68}, {68, 64}}}
-                                       : percent == 80 ? std::array<Extent, 2>{{{112, 108}, {104, 104}}}
-                                                       : std::array<Extent, 2>{{{124, 120}, {120, 116}}};
+    const std::array<Extent, 2> work = coverage == 95 ? std::array<Extent, 2>{{{108, 104}, {100, 96}}}
+                                       : coverage == 90 && percent == 80 ? std::array<Extent, 2>{{{100, 96}, {96, 96}}}
+                                       : coverage == 90 ? std::array<Extent, 2>{{{108, 104}, {104, 100}}}
+                                       : percent == 50  ? std::array<Extent, 2>{{{72, 68}, {68, 64}}}
+                                       : percent == 80  ? std::array<Extent, 2>{{{112, 108}, {104, 104}}}
+                                                        : std::array<Extent, 2>{{{124, 120}, {120, 116}}};
+    const std::array<Rect, 2> processing = coverage == 95   ? std::array<Rect, 2>{{{2, 2, 132, 128}, {2, 3, 124, 120}}}
+                                           : coverage == 90 ? std::array<Rect, 2>{{{6, 6, 124, 120}, {4, 5, 120, 116}}}
+                                                            : std::array<Rect, 2>{{{0, 0, 137, 133}, {0, 0, 129, 127}}};
+    const UINT transition = coverage == 100 ? 0 : coverage == 95 ? 2 : 3;
     const UINT16 slices = arraySource ? 2 : 1;
     auto source = gpu.texture(inputW, inputH, allocation, D3D12_RESOURCE_FLAG_NONE, slices);
-    auto target = gpu.texture(outputW, outputH, allocation, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    auto target = gpu.texture(outputW, outputH, outputAllocation, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
     auto depth = gpu.texture(183, 145, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE, slices);
     FrameInput frame{};
     frame.output = target.Get();
-    frame.outputFormat = format;
+    frame.outputFormat = outputFormat;
     frame.outputEyeStride = stride;
     frame.processingPercent = percent;
     const std::array<Rect, 2> depths{{{7, 11, 75, 99}, {91, 3, 83, 131}}};
     for (UINT e = 0; e < 2; ++e)
         frame.eyes[e] = {source.Get(), format, rects[e], depth.Get(), DXGI_FORMAT_R32_FLOAT, depths[e]};
+#if !defined(NR_SPATIAL_CROP_BASELINE)
+    if (coverage != 100)
+        for (UINT e = 0; e < 2; ++e) {
+            frame.eyes[e].processingRect = processing[e];
+            frame.eyes[e].transitionWidth = transition;
+        }
+#endif
     Bytes native(inputW * inputH * 4, 255), depthData(183 * 145 * 4);
     for (UINT y = 0; y < 145; ++y)
         for (UINT x = 0; x < 183; ++x) {
@@ -332,11 +454,23 @@ void runFormat(Gpu& gpu, DXGI_FORMAT format, UINT percent, bool arraySource = fa
     invalid = frame;
     invalid.eyes[1].colorRect.x = inputW;
     check(FAILED(pipeline.Prepare(invalid)), "reject outside eye rect");
+#if !defined(NR_SPATIAL_CROP_BASELINE)
+    invalid = frame;
+    invalid.eyes[0].processingRect = {136, 0, 2, 133};
+    check(FAILED(pipeline.Prepare(invalid)), "reject local crop beyond full valid eye");
+    invalid = frame;
+    invalid.eyes[0].processingRect = {1, 0, 0, 0};
+    check(FAILED(pipeline.Prepare(invalid)), "only entirely empty legacy crop defaults to full eye");
+    invalid = frame;
+    invalid.eyes[0].transitionWidth = 100;
+    check(FAILED(pipeline.Prepare(invalid)), "reject feather wider than crop quarter");
+#endif
     for (UINT bank = 0; bank < 3; ++bank) {
         if (bank) {
             const auto bankFormat = bank == 2 ? format : allocation; // typed as well as typeless imports
             source = gpu.texture(inputW, inputH, bankFormat, D3D12_RESOURCE_FLAG_NONE, slices);
-            target = gpu.texture(outputW, outputH, bankFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+            const auto targetFormat = bank == 2 ? outputFormat : outputAllocation;
+            target = gpu.texture(outputW, outputH, targetFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
             frame.output = target.Get();
             for (auto& eye : frame.eyes)
                 eye.color = source.Get();
@@ -358,7 +492,18 @@ void runFormat(Gpu& gpu, DXGI_FORMAT format, UINT percent, bool arraySource = fa
         if (bank)
             check(pipeline.Matches(frame), "same-size new native bank matches generation");
         for (UINT mode = 0; mode < 3; ++mode) {
+            const Bytes guard(size_t(outputW) * outputH * 4, 37);
+            gpu.transfer(target.Get(), &guard);
             hr(pipeline.Prepare(frame), "prepare");
+#if !defined(NR_SPATIAL_CROP_BASELINE)
+            auto changed = frame;
+            changed.eyes[0].transitionWidth = transition + 1;
+            check(!pipeline.Matches(changed), "transition changes must invalidate generation/reset matching");
+            changed = frame;
+            changed.eyes[0].processingRect = processing[0];
+            changed.eyes[0].processingRect.width -= 4;
+            check(!pipeline.Matches(changed), "crop changes must invalidate even if aligned work extent is unchanged");
+#endif
             check(FAILED(pipeline.Prepare(frame)), "unsubmitted/uncertain batch cannot be reused");
             pipeline.MarkSubmitted(0);
             pipeline.MarkSubmitted(UINT64_MAX);
@@ -376,13 +521,29 @@ void runFormat(Gpu& gpu, DXGI_FORMAT format, UINT percent, bool arraySource = fa
             for (UINT e = 0; e < 2; ++e) {
                 auto eye = pipeline.GetWorkingEye(e);
                 const Bytes p = gpu.transfer(eye.proxy);
-                compare(
-                    p, areaOracle(native, inputW, rects[e], work[e], srgb, bgra), 1, "area-filter/encoding/eye bounds");
+                const Rect sampled{rects[e].x + processing[e].x,
+                                   rects[e].y + processing[e].y,
+                                   processing[e].width,
+                                   processing[e].height};
+                compare(p,
+                        areaOracle(native, inputW, sampled, work[e], srgb, bgra),
+                        1,
+                        "crop area-filter/encoding/eye bounds");
                 const Bytes sampledDepth = gpu.transfer(eye.depth);
                 for (UINT y = 0; y < work[e].height; ++y)
                     for (UINT x = 0; x < work[e].width; ++x) {
-                        const UINT dx = depths[e].x + UINT((double(x) + .5) * depths[e].width / work[e].width);
-                        const UINT dy = depths[e].y + UINT((double(y) + .5) * depths[e].height / work[e].height);
+                        const UINT dx =
+                            depths[e].x +
+                            (coverage == 100
+                                 ? UINT((double(x) + .5) * depths[e].width / work[e].width)
+                                 : UINT((processing[e].x + (double(x) + .5) * processing[e].width / work[e].width) *
+                                        depths[e].width / rects[e].width));
+                        const UINT dy =
+                            depths[e].y +
+                            (coverage == 100
+                                 ? UINT((double(y) + .5) * depths[e].height / work[e].height)
+                                 : UINT((processing[e].y + (double(y) + .5) * processing[e].height / work[e].height) *
+                                        depths[e].height / rects[e].height));
                         check(std::memcmp(sampledDepth.data() + (y * work[e].width + x) * 4,
                                           depthData.data() + (dy * 183 + dx) * 4,
                                           4) == 0,
@@ -397,7 +558,8 @@ void runFormat(Gpu& gpu, DXGI_FORMAT format, UINT percent, bool arraySource = fa
                         answer[i + channel] = uint8_t(std::clamp(int(p[i + channel]) + edit, 0, 255));
                     }
                 gpu.transfer(eye.answer, &answer);
-                expected[e] = resolveOracle(native, inputW, rects[e], work[e], p, answer, srgb, bgra);
+                expected[e] = resolveOracle(
+                    native, inputW, rects[e], work[e], p, answer, srgb, bgra, outputBgra, processing[e], transition);
             }
             // Set deliberately unrelated state so resolve must bind everything.
             c = gpu.commands();
@@ -411,6 +573,14 @@ void runFormat(Gpu& gpu, DXGI_FORMAT format, UINT percent, bool arraySource = fa
             check(allocationCount.load() == beforeMark, "MarkSubmitted must allocate nothing");
             gpu.wait(value);
             const Bytes actual = gpu.transfer(target.Get());
+            for (UINT y = 0; y < outputH; ++y)
+                for (UINT x = 0; x < outputW; ++x) {
+                    const bool inLeft = x < rects[0].width && y < rects[0].height;
+                    const bool inRight = x >= stride && x < stride + rects[1].width && y < rects[1].height;
+                    if (!inLeft && !inRight)
+                        for (UINT channel = 0; channel < 4; ++channel)
+                            check(actual[offset(x, y, outputW, channel)] == 37, "packed output guard pixels intact");
+                }
             for (UINT e = 0; e < 2; ++e) {
                 Bytes crop(size_t(rects[e].width) * rects[e].height * 4);
                 for (UINT y = 0; y < rects[e].height; ++y)
@@ -420,6 +590,14 @@ void runFormat(Gpu& gpu, DXGI_FORMAT format, UINT percent, bool arraySource = fa
                 compare(crop, expected[e], mode ? 1 : 0, mode ? "guided signed residual" : "exact zero-edit raw/alpha");
                 for (size_t i = 3; i < crop.size(); i += 4)
                     check(crop[i] == expected[e][i], "native alpha exact under edit");
+                for (UINT y = 0; y < rects[e].height; ++y)
+                    for (UINT x = 0; x < rects[e].width; ++x)
+                        if (x < processing[e].x || y < processing[e].y || x >= processing[e].x + processing[e].width ||
+                            y >= processing[e].y + processing[e].height)
+                            for (UINT channel = 0; channel < 4; ++channel) {
+                                const auto i = offset(x, y, rects[e].width, channel, outputBgra);
+                                check(crop[i] == expected[e][i], "outside crop original color and alpha must be exact");
+                            }
             }
         }
     }
@@ -429,21 +607,30 @@ void runFormat(Gpu& gpu, DXGI_FORMAT format, UINT percent, bool arraySource = fa
     pipeline.DiscardRecording();
     pipeline.Clear();
     gpu.noErrors();
-    std::printf("PASS format %u percent %u slices %u: odd/offset eyes, poison borders, zero/signed edits, depth, bank "
-                "rotation\n",
-                unsigned(format),
-                percent,
-                slices);
+    std::printf(
+        "PASS source format %u output format %u percent %u slices %u coverage %u: odd/offset eyes, poison borders, "
+        "zero/signed edits, depth, bank "
+        "rotation\n",
+        unsigned(format),
+        unsigned(outputFormat),
+        percent,
+        slices,
+        coverage);
 }
 
 // A real GPU queue is held behind a CPU-signalled fence. Three recordings are
 // prepared while their completion fence cannot advance. Any early descriptor
 // rewrite, input release, or per-batch scratch allocation breaks this contract.
-void delayedBatches(Gpu& gpu) {
-    auto a = gpu.texture(264, 129, DXGI_FORMAT_R8G8B8A8_UNORM);
-    auto b = gpu.texture(264, 129, DXGI_FORMAT_R8G8B8A8_UNORM);
-    auto outA = gpu.texture(264, 129, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
-    auto outB = gpu.texture(264, 129, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+void delayedBatches(Gpu& gpu, bool withDepth, bool canonical = false, bool srgb = false, bool partial = false) {
+    const auto sourceFormat =
+        canonical ? (srgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM) : DXGI_FORMAT_R8G8B8A8_UNORM;
+    const auto outputFormat = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+    auto a = gpu.texture(264, 129, sourceFormat);
+    auto b = gpu.texture(264, 129, sourceFormat);
+    auto outA = gpu.texture(264, 129, outputFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    auto outB = gpu.texture(264, 129, outputFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    auto depthA = withDepth ? gpu.texture(264, 129, DXGI_FORMAT_R32_FLOAT) : ComPtr<ID3D12Resource>{};
+    auto depthB = withDepth ? gpu.texture(264, 129, DXGI_FORMAT_R32_FLOAT) : ComPtr<ID3D12Resource>{};
     Bytes pa(264 * 129 * 4), pb(pa.size());
     for (size_t i = 0; i < pa.size(); ++i) {
         pa[i] = uint8_t((i * 13) % 256);
@@ -451,13 +638,37 @@ void delayedBatches(Gpu& gpu) {
     }
     gpu.transfer(a.Get(), &pa);
     gpu.transfer(b.Get(), &pb);
+    // Upload layouts describe real source bytes; expected target bytes are RGBA.
+    Bytes expectedA = pa, expectedB = pb;
+    if (canonical)
+        for (size_t i = 0; i < pa.size(); i += 4) {
+            std::swap(expectedA[i], expectedA[i + 2]);
+            std::swap(expectedB[i], expectedB[i + 2]);
+        }
+    if (withDepth) {
+        Bytes depthPixels(pa.size());
+        const float value = .25f;
+        for (size_t i = 0; i < depthPixels.size(); i += 4)
+            std::memcpy(depthPixels.data() + i, &value, 4);
+        gpu.transfer(depthA.Get(), &depthPixels);
+        gpu.transfer(depthB.Get(), &depthPixels);
+    }
     FrameInput input{};
     input.output = outA.Get();
-    input.outputFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    input.outputFormat = outputFormat;
     input.outputEyeStride = 132;
     input.processingPercent = 50;
     for (UINT e = 0; e < 2; ++e)
-        input.eyes[e] = {a.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, {e * 132, 0, 132, 129}};
+        input.eyes[e] = {a.Get(), sourceFormat, {e * 132, 0, 132, 129}};
+#if !defined(NR_SPATIAL_CROP_BASELINE)
+    if (partial)
+        for (auto& eye : input.eyes) {
+            eye.processingRect = {2, 2, 128, 124};
+            eye.transitionWidth = 2;
+        }
+#else
+    (void)partial;
+#endif
     Pipeline p(gpu.device.Get(), gpu.fence.Get());
     ComPtr<ID3D12Fence> gate;
     hr(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)), "gate fence");
@@ -468,14 +679,28 @@ void delayedBatches(Gpu& gpu) {
     uint64_t last{};
     for (UINT n = 0; n < 3; ++n) {
         input.output = n == 1 ? outB.Get() : outA.Get();
-        for (auto& eye : input.eyes)
+        for (auto& eye : input.eyes) {
             eye.color = n == 1 ? b.Get() : a.Get();
+            eye.depth = n == 1 ? depthB.Get() : depthA.Get();
+            eye.depthFormat = DXGI_FORMAT_R32_FLOAT;
+            eye.depthRect = eye.colorRect;
+        }
+#if defined(NR_SPATIAL_TEST_OBSERVER)
+        test_observer::Reset();
+#endif
         hr(p.Prepare(input), "prepare while prior completion blocked");
+#if defined(NR_SPATIAL_TEST_OBSERVER)
+        size_t writes = 0;
+        for (size_t i = 0; i < test_observer::count; ++i)
+            writes += test_observer::events[i].kind == test_observer::Kind::Descriptor;
+        check(writes == 13, "blocked completion, including repeated identity, requires a new complete batch");
+        test_observer::enabled = false;
+#endif
         if (n == 0)
             scratch = p.GetWorkingEye(0).proxy;
         else
             check(scratch == p.GetWorkingEye(0).proxy, "one scratch set per geometry, not bank");
-        check(p.GetWorkingEye(0).depth == nullptr, "missing paired depth preserves no-depth contract");
+        check(bool(p.GetWorkingEye(0).depth) == withDepth, "paired and absent depth contracts retained");
         pending.push_back(gpu.commands());
         auto* list = pending.back().list.Get();
         p.RecordInputs(list);
@@ -496,21 +721,87 @@ void delayedBatches(Gpu& gpu) {
     // descriptor batches must keep both source banks alive through completion.
     a.Reset();
     b.Reset();
+    depthA.Reset();
+    depthB.Reset();
     hr(gate->Signal(1), "release queue hold");
     gpu.wait(last);
-    compare(gpu.transfer(outA.Get()), pa, 0, "delayed first bank exact pixels");
-    compare(gpu.transfer(outB.Get()), pb, 0, "delayed second bank exact pixels");
+    compare(gpu.transfer(outA.Get()), expectedA, 0, "delayed first bank exact pixels");
+    compare(gpu.transfer(outB.Get()), expectedB, 0, "delayed second bank exact pixels");
+    if (withDepth) {
+        const auto actual = gpu.transfer(p.GetWorkingEye(0).depth);
+        const float expected = .25f;
+        for (size_t i = 0; i < actual.size(); i += 4)
+            check(std::memcmp(actual.data() + i, &expected, 4) == 0, "delayed depth ownership and point sample");
+    }
     // Same geometry with newly allocated banks must recycle completed descriptor
     // slots, rather than retaining every retired swapchain resource indefinitely.
-    auto replacement = gpu.texture(264, 129, DXGI_FORMAT_R8G8B8A8_UNORM);
-    for (auto& eye : input.eyes)
+    auto replacement = gpu.texture(264, 129, sourceFormat);
+    auto replacementDepth = withDepth ? gpu.texture(264, 129, DXGI_FORMAT_R32_FLOAT) : ComPtr<ID3D12Resource>{};
+    auto replacementOutput = gpu.texture(264, 129, outputFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    gpu.transfer(replacement.Get(), &pb);
+    if (withDepth) {
+        Bytes depthPixels(pa.size());
+        const float value = .75f;
+        for (size_t i = 0; i < depthPixels.size(); i += 4)
+            std::memcpy(depthPixels.data() + i, &value, 4);
+        gpu.transfer(replacementDepth.Get(), &depthPixels);
+    }
+    input.output = replacementOutput.Get();
+    for (auto& eye : input.eyes) {
         eye.color = replacement.Get();
+        eye.depth = replacementDepth.Get();
+    }
+#if defined(NR_SPATIAL_TEST_OBSERVER)
+    test_observer::Reset();
+#endif
     const auto before = allocationCount.load();
     hr(p.Prepare(input), "prepare completed slot with changed resource identity");
     check(allocationCount.load() == before, "warmed Prepare must recycle descriptor slots without allocations");
-    p.DiscardRecording();
+#if defined(NR_SPATIAL_TEST_OBSERVER)
+    size_t writes = 0;
+    for (size_t i = 0; i < test_observer::count; ++i)
+        if (test_observer::events[i].kind == test_observer::Kind::Descriptor) {
+            ++writes;
+            auto* resource = test_observer::events[i].resource;
+            check(resource == input.output || resource == replacement.Get() || resource == replacementDepth.Get(),
+                  "actual-fence rebinding never rewrites scratch descriptors");
+        }
+    check(writes == 5, "positively completed submitted slot rewrites exactly five native descriptors");
+    test_observer::enabled = false;
+    std::printf("COMPLETED_REBIND source=%u output=%u depth=%u fence=%llu writes=%zu allocations=0\n",
+                unsigned(sourceFormat),
+                unsigned(outputFormat),
+                withDepth,
+                static_cast<unsigned long long>(last),
+                writes);
+#endif
+    auto commands = gpu.commands();
+    p.RecordInputs(commands.list.Get());
+    for (UINT e = 0; e < 2; ++e) {
+        const auto eye = p.GetWorkingEye(e);
+        Gpu::barrier(commands.list.Get(), eye.proxy, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        Gpu::barrier(commands.list.Get(), eye.answer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+        commands.list->CopyResource(eye.answer, eye.proxy);
+        Gpu::barrier(commands.list.Get(), eye.proxy, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+        Gpu::barrier(commands.list.Get(), eye.answer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    }
+    p.RecordResolve(commands.list.Get());
+    const auto replacementFence = gpu.submit(commands);
+    p.MarkSubmitted(replacementFence);
+    gpu.wait(replacementFence);
+    compare(gpu.transfer(replacementOutput.Get()), expectedB, 0, "completed rebind writes current mixed-format bank");
+    if (withDepth) {
+        const auto actual = gpu.transfer(p.GetWorkingEye(0).depth);
+        const float expected = .75f;
+        for (size_t i = 0; i < actual.size(); i += 4)
+            check(std::memcmp(actual.data() + i, &expected, 4) == 0, "completed rebind reads current depth bank");
+    }
     gpu.noErrors();
-    std::puts("PASS delayed completion, shared scratch, immutable bank bindings, source ownership, no depth");
+    std::printf("PASS delayed completion, shared scratch, immutable bank bindings, source ownership, depth=%u "
+                "source=%u output=%u\n",
+                withDepth,
+                unsigned(sourceFormat),
+                unsigned(outputFormat));
 }
 
 void residualInvariants(Gpu& gpu) {
@@ -585,18 +876,373 @@ void residualInvariants(Gpu& gpu) {
     gpu.noErrors();
     std::puts("PASS analytic constant signed edits and local convex residual bounds");
 }
+
+#if defined(NR_SPATIAL_TEST_OBSERVER)
+// Catch redundant immutable description queries, descriptor rewrites, lost or
+// reordered transitions, and barriers moved across actual dispatch/draw use.
+int operationCounts(Gpu& gpu, bool depth, bool shared, bool partial = false) {
+    namespace trace = test_observer;
+    using Kind = trace::Kind;
+    std::array<ComPtr<ID3D12Resource>, 2> colors, depths;
+    for (UINT e = 0; e < 2; ++e) {
+        colors[e] = shared && e ? colors[0] : gpu.texture(132, 129, DXGI_FORMAT_R8G8B8A8_UNORM);
+        if (depth)
+            depths[e] = shared && e ? depths[0] : gpu.texture(132, 129, DXGI_FORMAT_R32_FLOAT);
+    }
+    auto target = gpu.texture(264, 129, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    FrameInput frame{};
+    frame.output = target.Get();
+    frame.outputFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    frame.outputEyeStride = 132;
+    frame.processingPercent = 80;
+    for (UINT e = 0; e < 2; ++e)
+        frame.eyes[e] = {colors[e].Get(),
+                         DXGI_FORMAT_R8G8B8A8_UNORM,
+                         {0, 0, 132, 129},
+                         depths[e].Get(),
+                         DXGI_FORMAT_R32_FLOAT,
+                         {0, 0, 132, 129}};
+#if !defined(NR_SPATIAL_CROP_BASELINE)
+    if (partial)
+        for (auto& eye : frame.eyes) {
+            eye.processingRect = {2, 2, 128, 124};
+            eye.transitionWidth = 2;
+        }
+#else
+    (void)partial;
+#endif
+    auto count = [](Kind kind) {
+        return size_t(std::count_if(trace::events.begin(), trace::events.begin() + trace::count, [=](const auto& e) {
+            return e.kind == kind;
+        }));
+    };
+    int failures = 0;
+    auto expect = [&](bool value, const char* why) {
+        if (!value) {
+            std::fprintf(stderr, "FAIL operation counts depth=%u shared=%u: %s\n", depth, shared, why);
+            ++failures;
+        }
+    };
+    Pipeline p(gpu.device.Get(), gpu.fence.Get());
+    trace::Reset();
+    hr(p.Prepare(frame), "operation prepare new batch");
+    const auto descriptions = count(Kind::Description), created = count(Kind::Descriptor);
+    expect(descriptions <= (depth ? 5u : 3u), "one description per output/color/depth input");
+    expect(created == 13, "new batch initializes all 13 descriptors");
+    // Resource descriptions are local to Validate, including when both eyes
+    // alias the same resource. No output query is repeated for bounds checks.
+    size_t nextDescription = 0;
+    std::array<ID3D12Resource*, 5> described{};
+    described[nextDescription++] = frame.output;
+    for (const auto& eye : frame.eyes) {
+        described[nextDescription++] = eye.color;
+        if (eye.depth)
+            described[nextDescription++] = eye.depth;
+    }
+    for (size_t i = 0; i < descriptions && i < nextDescription; ++i)
+        expect(trace::events[i].kind == Kind::Description && trace::events[i].resource == described[i],
+               "description queries cover exactly output and each eye input");
+    p.DiscardRecording();
+    trace::Reset();
+    const auto beforeHit = allocationCount.load();
+    hr(p.Prepare(frame), "operation identity hit");
+    expect(allocationCount.load() == beforeHit, "identity hit allocates nothing");
+    expect(count(Kind::Descriptor) == 0, "identity hit writes no descriptors");
+    p.DiscardRecording();
+    auto replacement = gpu.texture(132, 129, DXGI_FORMAT_R8G8B8A8_UNORM);
+    frame.eyes[0].color = replacement.Get();
+    if (shared)
+        frame.eyes[1].color = replacement.Get();
+    trace::Reset();
+    const auto beforeRebind = allocationCount.load();
+    hr(p.Prepare(frame), "operation completed changed-bank rebind");
+    expect(allocationCount.load() == beforeRebind, "completed rebinding allocates nothing");
+    const auto rebound = count(Kind::Descriptor);
+    expect(rebound == 5, "completed rebinding writes only four native SRVs and output RTV");
+    for (size_t i = 0; i < trace::count; ++i)
+        if (trace::events[i].kind == Kind::Descriptor) {
+            const auto* r = trace::events[i].resource;
+            expect(r == frame.output || r == frame.eyes[0].color || r == frame.eyes[1].color ||
+                       r == frame.eyes[0].depth || r == frame.eyes[1].depth,
+                   "rebinding never rewrites scratch descriptors");
+        }
+    auto commands = gpu.commands();
+    trace::Reset();
+    const auto beforeRecording = allocationCount.load();
+    p.RecordInputs(commands.list.Get());
+    p.RecordResolve(commands.list.Get());
+    expect(allocationCount.load() == beforeRecording, "recording allocates nothing");
+    const auto calls = trace::barrierCalls;
+    const auto transitions = count(Kind::Transition);
+    expect(calls == 6, "adjacent transitions batched at six GPU-use boundaries");
+
+    // Hand-derived contract: every original transition, in original order,
+    // including COMMON boundaries between input, vendor access and resolve.
+    std::array<trace::Event, 40> expected{};
+    size_t n = 0;
+    auto transition = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
+        expected[n++] = {Kind::Transition, r, from, to};
+    };
+    const auto common = D3D12_RESOURCE_STATE_COMMON;
+    const auto compute = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    const auto pixel = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    const auto uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    auto native = [&](D3D12_RESOURCE_STATES state, bool entering, bool includeDepth) {
+        for (UINT e = 0; e < (shared ? 1u : 2u); ++e) {
+            transition(frame.eyes[e].color, entering ? common : state, entering ? state : common);
+            if (depth && includeDepth)
+                transition(frame.eyes[e].depth, entering ? common : state, entering ? state : common);
+        }
+    };
+    native(compute, true, true);
+    for (UINT e = 0; e < 2; ++e) {
+        const auto s = p.GetWorkingEye(e);
+        transition(s.proxy, common, uav);
+        if (depth)
+            transition(s.depth, common, uav);
+        expected[n++] = {Kind::Dispatch};
+        transition(s.proxy, uav, common);
+        if (depth)
+            transition(s.depth, uav, common);
+    }
+    native(compute, false, true);
+    native(pixel, true, false);
+    transition(frame.output, common, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    for (UINT e = 0; e < 2; ++e) {
+        const auto s = p.GetWorkingEye(e);
+        transition(s.proxy, common, pixel);
+        transition(s.answer, common, pixel);
+        expected[n++] = {Kind::Draw};
+        transition(s.proxy, pixel, common);
+        transition(s.answer, pixel, common);
+    }
+    transition(frame.output, D3D12_RESOURCE_STATE_RENDER_TARGET, common);
+    native(pixel, false, false);
+    expect(trace::count == n, "all transition/use events retained");
+    bool ordered = trace::count == n;
+    for (size_t i = 0; i < std::min(n, trace::count); ++i) {
+        const auto& a = trace::events[i];
+        const auto& b = expected[i];
+        const bool same = a.kind == b.kind && a.resource == b.resource && a.before == b.before && a.after == b.after;
+        ordered = ordered && same;
+        expect(same, "transition order, deduplication and dispatch/draw boundary");
+    }
+    trace::enabled = false;
+    hr(commands.list->Close(), "close unsubmitted operation recording");
+    p.DiscardRecording();
+    gpu.noErrors();
+    std::printf("OPERATIONS depth=%u shared=%u partial=%u GetDesc=%zu create=%zu identity=0 rebind=%zu "
+                "barrierCalls=%zu transitions=%zu order=%s\n",
+                depth,
+                shared,
+                partial,
+                descriptions,
+                created,
+                rebound,
+                calls,
+                transitions,
+                ordered ? "retained" : "FAIL");
+    return failures;
+}
+#endif
+void shadowToeContract(Gpu& gpu) {
+    constexpr UINT eyeSize = 128, width = eyeSize * 2;
+    for (auto format : {DXGI_FORMAT_R8G8B8A8_UNORM,
+                        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        DXGI_FORMAT_B8G8R8A8_UNORM_SRGB}) {
+        const bool bgra = format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+        const bool srgb = IsSrgb(format);
+        auto source = gpu.texture(width, eyeSize, bgra ? DXGI_FORMAT_B8G8R8A8_TYPELESS : DXGI_FORMAT_R8G8B8A8_TYPELESS);
+        auto output =
+            gpu.texture(width, eyeSize, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        FrameInput frame{};
+        frame.output = output.Get();
+        frame.outputFormat = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+        frame.outputEyeStride = eyeSize;
+        frame.processingPercent = 80;
+        for (UINT e = 0; e < 2; ++e)
+            frame.eyes[e] = {source.Get(), format, {e * eyeSize, 0, eyeSize, eyeSize}};
+        Pipeline pipeline(gpu.device.Get(), gpu.fence.Get());
+        int previousSpread = -1;
+        for (UINT code : {1u, 2u, 4u, 8u, 16u, 22u, 32u, 64u, 128u}) {
+            // Identity, biased gray, neutral structure, real green identity,
+            // and a bright native pixel whose model guide contains no signal.
+            for (UINT mode = 0; mode < 5; ++mode) {
+                Bytes native(size_t(width) * eyeSize * 4);
+                for (size_t i = 0; i < native.size(); i += 4) {
+                    for (UINT c = 0; c < 3; ++c)
+                        native[i + (bgra ? 2 - c : c)] = uint8_t(mode == 3 && c != 1 ? 0 : code);
+                    native[i + 3] = uint8_t((i / 4) % 256);
+                }
+                gpu.transfer(source.Get(), &native);
+                hr(pipeline.Prepare(frame), "shadow toe prepare");
+                auto commands = gpu.commands();
+                pipeline.RecordInputs(commands.list.Get());
+                gpu.wait(gpu.submit(commands));
+                for (UINT e = 0; e < 2; ++e) {
+                    const auto eye = pipeline.GetWorkingEye(e);
+                    Bytes proxy = gpu.transfer(eye.proxy);
+                    if (mode == 4) {
+                        std::fill(proxy.begin(), proxy.end(), uint8_t(0));
+                        gpu.transfer(eye.proxy, &proxy);
+                    }
+                    Bytes answer = proxy;
+                    for (size_t i = 0; i < answer.size(); i += 4) {
+                        if (mode == 1 || mode == 4)
+                            answer[i + 1] += 8;
+                        if (mode == 2)
+                            for (UINT c = 0; c < 3; ++c)
+                                answer[i + c] += 2;
+                        answer[i + 3] = 255;
+                    }
+                    gpu.transfer(eye.answer, &answer);
+                }
+                commands = gpu.commands();
+                pipeline.RecordResolve(commands.list.Get());
+                const auto serial = gpu.submit(commands);
+                pipeline.MarkSubmitted(serial);
+                gpu.wait(serial);
+                const auto result = gpu.transfer(output.Get());
+                for (size_t i = 0; i < result.size(); i += 4) {
+                    check(result[i + 3] == native[i + 3], "shadow toe preserves native alpha");
+                    if (mode == 0 || mode == 3 || mode == 4)
+                        for (UINT c = 0; c < 3; ++c)
+                            check(result[i + c] == native[i + (bgra ? 2 - c : c)],
+                                  "shadow identity, legitimate dark green and unsupported guide edits retain source");
+                    if (mode == 2 && (code >= 4 || !srgb))
+                        for (UINT c = 0; c < 3; ++c)
+                            check(std::abs(int(result[i + c]) - int(code + 2)) <= 1,
+                                  "neutral NR structure survives outside narrow black toe");
+                    if (mode == 1 && code >= 22)
+                        check(result[i] == code && result[i + 1] == code + 8 && result[i + 2] == code,
+                              "midtone NR color edit remains fully active");
+                }
+                if (mode == 1) {
+                    const int spread = int(result[1]) - int(result[0]);
+                    check(spread >= 0 && spread <= 8, "shadow color edit remains bounded without sign inversion");
+                    check(spread >= previousSpread, "uniform near-black chroma transition has no backward step");
+                    if (srgb && code <= 4)
+                        check(spread <= 1, "deep sRGB shadows reject strong model green bias");
+                    previousSpread = spread;
+                }
+            }
+        }
+    }
+    gpu.noErrors();
+    std::puts("PASS analytic shadow ramps, green identity, neutral structure, source/proxy support and midtone edits");
+}
+
+void blackShadowContract(Gpu& gpu) {
+    constexpr UINT eyeSize = 128, width = eyeSize * 2;
+    for (auto format : {DXGI_FORMAT_R8G8B8A8_UNORM,
+                        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        DXGI_FORMAT_B8G8R8A8_UNORM_SRGB}) {
+        const bool bgra = format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+        auto source = gpu.texture(width, eyeSize, bgra ? DXGI_FORMAT_B8G8R8A8_TYPELESS : DXGI_FORMAT_R8G8B8A8_TYPELESS);
+        auto output =
+            gpu.texture(width, eyeSize, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        Bytes native(size_t(width) * eyeSize * 4);
+        for (UINT y = 0; y < eyeSize; ++y)
+            for (UINT x = 0; x < width; ++x)
+                native[(size_t(y) * width + x) * 4 + 3] = uint8_t((x + 3 * y) % 256);
+        gpu.transfer(source.Get(), &native);
+        FrameInput frame{};
+        frame.output = output.Get();
+        frame.outputFormat = IsSrgb(format) ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+        frame.outputEyeStride = eyeSize;
+        frame.processingPercent = 80;
+        for (UINT e = 0; e < 2; ++e)
+            frame.eyes[e] = {source.Get(),
+                             format,
+                             {e * eyeSize, 0, eyeSize, eyeSize},
+                             nullptr,
+                             DXGI_FORMAT_UNKNOWN,
+                             {},
+                             {4, 4, 120, 120},
+                             2};
+        Pipeline pipeline(gpu.device.Get(), gpu.fence.Get());
+        hr(pipeline.Prepare(frame), "black shadow prepare");
+        auto commands = gpu.commands();
+        pipeline.RecordInputs(commands.list.Get());
+        gpu.wait(gpu.submit(commands));
+        for (UINT e = 0; e < 2; ++e) {
+            const auto eye = pipeline.GetWorkingEye(e);
+            Bytes tinted(size_t(eye.extent.width) * eye.extent.height * 4);
+            for (size_t i = 0; i < tinted.size(); i += 4) {
+                tinted[i + 1] = 8;
+                tinted[i + 3] = 255;
+            }
+            gpu.transfer(eye.answer, &tinted);
+        }
+        commands = gpu.commands();
+        pipeline.RecordResolve(commands.list.Get());
+        const auto serial = gpu.submit(commands);
+        pipeline.MarkSubmitted(serial);
+        gpu.wait(serial);
+        const auto result = gpu.transfer(output.Get());
+        compare(result, native, 0, "black shadow must retain original RGB and alpha under tinted NR answer");
+    }
+    gpu.noErrors();
+    std::puts("PASS analytic black preservation with tinted NR answers across RGBA/BGRA and linear/sRGB");
+}
+
+#include "nr_color_contract_cases.h"
+
 int main(int argc, char** argv) {
     try {
         Gpu gpu(argc > 1 && std::strcmp(argv[1], "--hardware") == 0);
+        colorChannelContract(gpu, false);
+        blackShadowContract(gpu);
+        shadowToeContract(gpu);
+        for (const auto combined : {std::array<UINT, 2>{95, 80}, {90, 80}, {90, 85}})
+            for (auto format : {DXGI_FORMAT_R8G8B8A8_UNORM,
+                                DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                                DXGI_FORMAT_B8G8R8A8_UNORM,
+                                DXGI_FORMAT_B8G8R8A8_UNORM_SRGB})
+                for (bool arraySource : {false, true})
+                    runFormat(gpu,
+                              format,
+                              format == DXGI_FORMAT_B8G8R8A8_UNORM        ? DXGI_FORMAT_R8G8B8A8_UNORM
+                              : format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+                                                                          : format,
+                              combined[1],
+                              arraySource,
+                              combined[0]);
+#if defined(NR_SPATIAL_TEST_OBSERVER)
+        int operationFailures = 0;
+        for (bool depth : {false, true})
+            for (bool shared : {false, true})
+                for (bool partial : {false, true})
+                    operationFailures += operationCounts(gpu, depth, shared, partial);
+#endif
         for (auto percent : {50u, 80u, 90u})
             for (auto format : {DXGI_FORMAT_R8G8B8A8_UNORM,
                                 DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
                                 DXGI_FORMAT_B8G8R8A8_UNORM,
                                 DXGI_FORMAT_B8G8R8A8_UNORM_SRGB})
                 for (bool arraySource : {false, true})
-                    runFormat(gpu, format, percent, arraySource);
-        delayedBatches(gpu);
+                    runFormat(gpu, format, format, percent, arraySource);
+        for (auto percent : {50u, 80u, 90u})
+            for (bool srgb : {false, true})
+                for (bool arraySource : {false, true})
+                    runFormat(gpu,
+                              srgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM,
+                              srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM,
+                              percent,
+                              arraySource);
+        delayedBatches(gpu, false);
+        delayedBatches(gpu, true);
+        for (bool depth : {false, true})
+            for (bool srgb : {false, true})
+                for (bool partial : {false, true})
+                    delayedBatches(gpu, depth, true, srgb, partial);
+        formatValidation(gpu);
         residualInvariants(gpu);
+#if defined(NR_SPATIAL_TEST_OBSERVER)
+        check(operationFailures == 0, "CPU operation-count regression");
+#endif
         std::puts("PASS production spatial pipeline synthetic GPU suite (no vendor inference)");
         return 0;
     } catch (const std::exception& e) {

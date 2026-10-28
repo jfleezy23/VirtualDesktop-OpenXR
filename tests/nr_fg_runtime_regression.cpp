@@ -157,6 +157,15 @@ namespace virtualdesktop_openxr {
         static std::vector<std::pair<long long, unsigned>> presentedRoles;
         static ovrLayerEyeFov lastProjection;
         static decltype(&NVSDK_NGX_D3D12_EvaluateFeature) originalEvaluate[2];
+        inline static bool spatialObservation{};
+        inline static ovrTextureSwapChain previousSpatialOutput{};
+        inline static unsigned spatialSynthetic[2]{};
+        inline static bool combinedSpatial{};
+        inline static unsigned combinedSynthetic[3][2]{};
+        // Hand-derived for native512: coverage95->488,90->460; then ceil/align4.
+        static int expectedSpatialSize() {
+            return coverage == 95 ? 392 : coverage == 90 ? (nrProcessingResolution == 85 ? 392 : 368) : 412;
+        }
         template <unsigned eye>
         static NVSDK_NGX_Result NVSDK_CONV evaluate(ID3D12GraphicsCommandList* commands,
                                                     const NVSDK_NGX_Handle* feature,
@@ -171,13 +180,24 @@ namespace virtualdesktop_openxr {
                 float actual{};
                 return NVSDK_NGX_SUCCEED(parameters->Get(name, &actual)) && std::abs(actual - expected) < .0001f;
             };
+            const bool spatial = spatialObservation && nrProcessingResolution != 100;
+            const int size = spatial ? expectedSpatialSize() : 512;
+            if (spatial) {
+                ID3D12Resource *color{}, *answer{};
+                if (!NVSDK_NGX_SUCCEED(parameters->Get("DLSSNR.Color", &color)) ||
+                    !NVSDK_NGX_SUCCEED(parameters->Get("DLSSNR.Output", &answer)) || !color || !answer ||
+                    color->GetDesc().Width != unsigned(size) || color->GetDesc().Height != unsigned(size) ||
+                    answer->GetDesc().Width != unsigned(size) || answer->GetDesc().Height != unsigned(size))
+                    ++invalidNrParameters;
+            }
             if (!hasInt("DLSSNR.Style", 2) || !hasInt("DLSSNR.Hint.Render.Preset", 2) ||
                 !hasFloat("DLSSNR.Intensity", .91f) || !hasFloat("DLSSNR.LocalToneStrength", 1.f) ||
                 !hasFloat("DLSSNR.LocalStructureStrength", 1.f) || !hasFloat("DLSSNR.SkinStructureStrength", 1.f) ||
-                !hasInt("DLSSNR.ColorSubrectWidth", 512) || !hasInt("DLSSNR.ColorSubrectHeight", 512) ||
-                !hasInt("DLSSNR.OutputSubrectWidth", 512) || !hasInt("DLSSNR.OutputSubrectHeight", 512) ||
+                !hasInt("DLSSNR.ColorSubrectWidth", size) || !hasInt("DLSSNR.ColorSubrectHeight", size) ||
+                !hasInt("DLSSNR.OutputSubrectWidth", size) || !hasInt("DLSSNR.OutputSubrectHeight", size) ||
                 !hasInt("DLSSNR.ColorSubrectBaseX", 0) || !hasInt("DLSSNR.ColorSubrectBaseY", 0) ||
-                !hasInt("DLSSNR.OutputSubrectBaseX", eye * 512) || !hasInt("DLSSNR.OutputSubrectBaseY", 0))
+                !hasInt("DLSSNR.OutputSubrectBaseX", spatial ? 0 : eye * 512) ||
+                !hasInt("DLSSNR.OutputSubrectBaseY", 0))
                 ++invalidNrParameters;
             // Always forward to actual Ada inference; diagnostics must not
             // substitute success or throw through the callback boundary.
@@ -190,6 +210,31 @@ namespace virtualdesktop_openxr {
             }
             value.m_dlssnrFeatureEvaluate[0] = evaluate<0>;
             value.m_dlssnrFeatureEvaluate[1] = evaluate<1>;
+        }
+        static NVSDK_NGX_Result NVSDK_CONV evaluateSpatial(ID3D12GraphicsCommandList* commands,
+                                                           const NVSDK_NGX_Handle* feature,
+                                                           const NVSDK_NGX_Parameter* parameters,
+                                                           PFN_NVSDK_NGX_ProgressCallback callback) {
+            return nrEvaluations[0] == nrEvaluations[1] ? evaluate<0>(commands, feature, parameters, callback)
+                                                        : evaluate<1>(commands, feature, parameters, callback);
+        }
+        static void observeSpatial(bool enable) {
+            if (enable) {
+                originalEvaluate[0] = runtime().m_dlssnrFeatureEvaluate[0];
+                require(originalEvaluate[0] == runtime().m_dlssnrFeatureEvaluate[1],
+                        "one real vendor evaluation export serves both recreated eye features");
+            } else if (!spatialObservation) {
+                return;
+            }
+            // Hook the actual export across feature recreation; do not replace
+            // production callbacks that the native100/spatial transition clears.
+            checkHr(HRESULT_FROM_WIN32(DetourTransactionBegin()));
+            checkHr(HRESULT_FROM_WIN32(DetourUpdateThread(GetCurrentThread())));
+            const auto operation = enable ? DetourAttach : DetourDetach;
+            checkHr(HRESULT_FROM_WIN32(operation(reinterpret_cast<PVOID*>(&originalEvaluate[0]), evaluateSpatial)));
+            checkHr(HRESULT_FROM_WIN32(DetourTransactionCommit()));
+            originalEvaluate[1] = originalEvaluate[0];
+            spatialObservation = enable;
         }
         static VDXRFG_StatisticsV1 statistics() {
             VDXRFG_StatisticsV1 result{};
@@ -403,6 +448,17 @@ namespace virtualdesktop_openxr {
                 for (unsigned role = 0; role < 2; ++role) {
                     if (bank[role].ovrSwapchain && bank[role].ovrSwapchain == projection.ColorTexture[0]) {
                         ++syntheticPresentations;
+                        if (runtime().m_nrSpatialPipeline && runtime().m_nrSpatialFeatures &&
+                            runtime().m_precompositor.dlssnrSettings.processingResolution != 100) {
+                            ++spatialSynthetic[role];
+                            const auto& settings = runtime().m_precompositor.dlssnrSettings;
+                            if (combinedSpatial && settings.foveationSize < 1.f) {
+                                const unsigned cohort = settings.foveationSize > .925f        ? 0
+                                                        : settings.processingResolution == 85 ? 2
+                                                                                              : 1;
+                                ++combinedSynthetic[cohort][role];
+                            }
+                        }
                         presentedRole = role;
                     }
                 }
@@ -485,6 +541,125 @@ namespace virtualdesktop_openxr {
                 require(output.good(), "save complete final real NR pixels for cross-backend comparison");
             }
         }
+        static void verifyTransitionPixels(const std::filesystem::path& directory,
+                                           const XrCompositionLayerProjectionView* views,
+                                           bool srgb) {
+            auto& value = runtime();
+            value.waitForAsyncSubmissionIdle();
+            std::unique_lock contextLease(value.m_fgContextMutex);
+            std::unique_lock captureLock(captureMutex);
+            bool realBank = false;
+            for (const auto& bank : value.m_fgPresentationBanks)
+                realBank |= bank[2].ovrSwapchain && bank[2].ovrSwapchain == lastProjection.ColorTexture[0] &&
+                            bank[2].ovrSwapchain == lastProjection.ColorTexture[1];
+            require(requestedFrameGeneration && value.m_precompositor.isProj0SRGB == srgb &&
+                        value.m_precompositor.finalColour[0] == value.m_precompositor.finalColour[1],
+                    "transition checkpoint retains one packed NR source with the submitted encoding");
+            const bool canonical = nrProcessingResolution < 100;
+            const auto sourceFormat = canonical ? (srgb ? OVR_FORMAT_R8G8B8A8_UNORM_SRGB : OVR_FORMAT_R8G8B8A8_UNORM)
+                                                : (srgb ? OVR_FORMAT_B8G8R8A8_UNORM_SRGB : OVR_FORMAT_B8G8R8A8_UNORM);
+            const auto presentedFormat =
+                realBank ? (srgb ? OVR_FORMAT_R8G8B8A8_UNORM_SRGB : OVR_FORMAT_R8G8B8A8_UNORM) : sourceFormat;
+            require(value.m_dlssnrOutputSwapchainFormat == sourceFormat,
+                    "transition NR source retains its independently expected family and encoding");
+            const auto sourceImage =
+                value.m_dlssnrOutputSwapchainTextures[value.m_dlssnrOutputSwapchainLastWrittenIndex];
+            require(value.m_precompositor.finalColour[0] == sourceImage,
+                    "transition checkpoint reads this input's retained NR output bank");
+            const int stride =
+                std::max(views[0].subImage.imageRect.extent.width, views[1].subImage.imageRect.extent.width);
+            require(value.m_dlssnrOutputSwapchainResolution.w == stride,
+                    "current view geometry determines packed NR stride independently of stale FG state");
+            std::filesystem::create_directories(directory);
+            for (unsigned eye = 0; eye < 2; ++eye) {
+                const auto& extent = views[eye].subImage.imageRect.extent;
+                const ovrRecti source{{static_cast<int>(eye) * stride, 0}, {extent.width, extent.height}};
+                const auto& viewport = lastProjection.Viewport[eye];
+                require(viewport.Size.w == extent.width && viewport.Size.h == extent.height &&
+                            viewport.Pos.x == source.Pos.x && viewport.Pos.y == source.Pos.y,
+                        "transition presentation preserves current native eye dimensions and packing");
+                require(realBank || lastProjection.ColorTexture[eye] == value.m_dlssnrOutputSwapchain,
+                        "transition presents either module real-B or the complete current native NR source");
+                ovrTextureSwapChainDesc description{};
+                require(OVR_SUCCESS(ovr_GetTextureSwapChainDesc(
+                            value.m_ovrSession, lastProjection.ColorTexture[eye], &description)) &&
+                            description.Format == presentedFormat,
+                        "transition presentation metadata preserves the matching transfer function and actual family");
+                auto presented = getCommitted(value.m_ovrSession, lastProjection.ColorTexture[eye]);
+                const auto pixels = viewportPixels(sourceImage.Get(), source);
+                require(pixels == viewportPixels(presented.Get(), viewport),
+                        "all transition NR pixels survive native fallback or real-B presentation exactly");
+                std::ofstream output(directory / ("transition-eye" + std::to_string(eye) + ".rgba"), std::ios::binary);
+                output.write(reinterpret_cast<const char*>(pixels.data()), pixels.size());
+                require(output.good(), "save complete transition pixels for independent comparison");
+            }
+            std::cout << "TRANSITION_PIXELS processing=" << nrProcessingResolution << " FG=" << requestedFrameGeneration
+                      << " srgb=" << srgb << " route=" << (realBank ? "real-B" : "native") << " stride=" << stride
+                      << " format=" << presentedFormat << " exact\n";
+        }
+        static void verifyPostprocessTransitionPixels(const std::filesystem::path& directory,
+                                                      const XrCompositionLayerProjectionView* views,
+                                                      bool srgb) {
+            auto& value = runtime();
+            value.waitForAsyncSubmissionIdle();
+            std::unique_lock contextLease(value.m_fgContextMutex);
+            std::unique_lock captureLock(captureMutex);
+            require(combinedSpatial && requestedFrameGeneration && coverage == 90 && nrProcessingResolution == 80 &&
+                        nrUpscalingSetting == 100 && value.m_upscalingMultiplier == 1.f && nrSharpenSetting == 25 &&
+                        value.m_precompositor.isProj0SRGB == srgb,
+                    "combined checkpoint uses90/80 with25% sharpening and session-native upscaling");
+            bool realBank = false;
+            for (const auto& bank : value.m_fgPresentationBanks)
+                realBank |= bank[2].ovrSwapchain && bank[2].ovrSwapchain == lastProjection.ColorTexture[0] &&
+                            bank[2].ovrSwapchain == lastProjection.ColorTexture[1];
+            // Upscaling is session-initialized. This live phase changes sharpening
+            // only, so the complete512-square source is independent of stale FG state.
+            constexpr int size = 512;
+            const auto format = srgb ? OVR_FORMAT_R8G8B8A8_UNORM_SRGB : OVR_FORMAT_R8G8B8A8_UNORM;
+            std::filesystem::create_directories(directory);
+            auto& input = *reinterpret_cast<OpenXrRuntime::Swapchain*>(views[0].subImage.swapchain);
+            for (unsigned eye = 0; eye < 2; ++eye) {
+                const auto& source = input.stereoProjection[eye];
+                require(source.ovrSwapchain && source.lastCommittedIndex >= 0 &&
+                            size_t(source.lastCommittedIndex) < source.images.size(),
+                        "current input owns a complete committed per-eye postprocess bank");
+                const auto sourceImage = source.images[source.lastCommittedIndex];
+                require(value.m_precompositor.finalColour[eye] == sourceImage,
+                        "checkpoint reads this input's current postprocessed source image");
+                D3D11_TEXTURE2D_DESC image{};
+                sourceImage->GetDesc(&image);
+                require(image.Width == size && image.Height == size && image.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS,
+                        "current sharpened image retains the complete512-square RGBA allocation");
+                ovrTextureSwapChainDesc sourceDescription{}, presentedDescription{};
+                require(OVR_SUCCESS(
+                            ovr_GetTextureSwapChainDesc(value.m_ovrSession, source.ovrSwapchain, &sourceDescription)) &&
+                            sourceDescription.Width == size && sourceDescription.Height == size &&
+                            sourceDescription.Format == format,
+                        "current postprocess source chain preserves complete eye extent and encoding");
+                const auto& viewport = lastProjection.Viewport[eye];
+                require(viewport.Size.w == size && viewport.Size.h == size && viewport.Pos.y == 0 &&
+                            viewport.Pos.x == (realBank ? static_cast<int>(eye) * size : 0),
+                        "postprocess transition presents complete current eyes with route-correct packing");
+                require(realBank || lastProjection.ColorTexture[eye] == source.ovrSwapchain,
+                        "postprocess transition uses real-B or this input's current postprocessed source chain");
+                require(OVR_SUCCESS(ovr_GetTextureSwapChainDesc(
+                            value.m_ovrSession, lastProjection.ColorTexture[eye], &presentedDescription)) &&
+                            presentedDescription.Width == (realBank ? size * 2 : size) &&
+                            presentedDescription.Height == size && presentedDescription.Format == format,
+                        "presented chain has the complete expected allocation and transfer function");
+                auto presented = getCommitted(value.m_ovrSession, lastProjection.ColorTexture[eye]);
+                const auto pixels = viewportPixels(sourceImage.Get(), {{0, 0}, {size, size}});
+                require(pixels == viewportPixels(presented.Get(), viewport),
+                        "every current postprocessed source pixel survives transition presentation exactly");
+                std::ofstream output(directory / ("postprocess-transition-eye" + std::to_string(eye) + ".rgba"),
+                                     std::ios::binary);
+                output.write(reinterpret_cast<const char*>(pixels.data()), pixels.size());
+                require(output.good(), "save complete postprocess transition pixels for independent comparison");
+            }
+            std::cout << "POSTPROCESS_TRANSITION_PIXELS coverage=90 processing=80 FG=" << requestedFrameGeneration
+                      << " srgb=" << srgb << " route=" << (realBank ? "real-B" : "native")
+                      << " extent=512x512 upscaling=100 sharpening=25 format=" << format << " exact\n";
+        }
         static void observeId(long long id) {
             require(id == static_cast<long long>(presentedIds.size()),
                     "public Wait/Begin/End retains consecutive independent native IDs");
@@ -520,6 +695,166 @@ namespace virtualdesktop_openxr {
             }
             require(allocated > 0, "BGRA NR allocates FG presentation swapchains");
         }
+        static void verifySpatialFormats(bool srgb, bool postprocess, bool bypass) {
+            auto& value = runtime();
+            std::unique_lock contextLease(value.m_fgContextMutex);
+            const bool spatial = nrProcessingResolution != 100;
+            const bool fg = requestedFrameGeneration != 0;
+            const bool canonical = spatial && fg;
+            const auto expected = canonical ? (srgb ? OVR_FORMAT_R8G8B8A8_UNORM_SRGB : OVR_FORMAT_R8G8B8A8_UNORM)
+                                            : (srgb ? OVR_FORMAT_B8G8R8A8_UNORM_SRGB : OVR_FORMAT_B8G8R8A8_UNORM);
+            const auto typed = canonical ? (srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM)
+                                         : (srgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM);
+            const auto backing = canonical ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_B8G8R8A8_TYPELESS;
+            require(bool(value.m_nrSpatialPipeline) == spatial,
+                    "spatial80 allocates its route; native100 retires the spatial generation");
+            if (spatial) {
+                require(value.m_nrSpatialFeatures && value.m_nrSpatialStatus == 100 + nrProcessingResolution,
+                        "actual reduced processing completes without native fallback");
+                const auto size = expectedSpatialSize();
+                for (unsigned eye = 0; eye < 2; ++eye) {
+                    const auto work = value.m_nrSpatialPipeline->GetWorkingEye(eye);
+                    require(work.extent.width == unsigned(size) && work.extent.height == unsigned(size) && work.proxy &&
+                                work.answer && value.m_nrSpatialFeatureExtents[eye].w == size &&
+                                value.m_nrSpatialFeatureExtents[eye].h == size,
+                            "both actual Ada features consume the expected crop-sized working eyes");
+                }
+            }
+            require(value.m_precompositor.dlssnrSettings.processingResolution == nrProcessingResolution &&
+                        std::abs(value.m_precompositor.dlssnrSettings.foveationSize - coverage / 100.f) < .0001f &&
+                        value.m_frameGenerationMode == requestedFrameGeneration,
+                    "independent processing, coverage and session FG request remain explicit");
+            require(value.m_dlssnrOutputSwapchainFormat == expected,
+                    "spatial FG uses encoding-matched RGBA; FG-off and native100 keep source BGRA");
+            if (spatial && previousSpatialOutput)
+                require(value.m_dlssnrOutputSwapchain == previousSpatialOutput,
+                        "postprocess off/on and bypass do not replace the unchanged spatial output bank");
+            previousSpatialOutput = spatial ? value.m_dlssnrOutputSwapchain : nullptr;
+            ovrTextureSwapChainDesc description{};
+            checkHr(OVR_SUCCESS(
+                        ovr_GetTextureSwapChainDesc(value.m_ovrSession, value.m_dlssnrOutputSwapchain, &description))
+                        ? S_OK
+                        : E_FAIL);
+            require(description.Format == expected && description.Width == 1024 && description.Height == 512,
+                    "selected output allocation retains native double-wide extent and transfer function");
+            require(value.m_dlssnrOutputSwapchainTextures.size() == value.m_dlssnrOutputSwapchainImages.size() &&
+                        value.m_dlssnrOutputSwapchainTextures.size() == value.m_dlssnrOutputSwapchainSrvs.size(),
+                    "output texture/SRV/import caches stay aligned after format transitions");
+            for (size_t i = 0; i < value.m_dlssnrOutputSwapchainTextures.size(); ++i) {
+                D3D11_TEXTURE2D_DESC resource{};
+                D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+                value.m_dlssnrOutputSwapchainTextures[i]->GetDesc(&resource);
+                value.m_dlssnrOutputSwapchainSrvs[i]->GetDesc(&view);
+                require(resource.Format == backing && view.Format == typed &&
+                            value.m_dlssnrOutputSwapchainImages[i]->GetDesc().Format == backing,
+                        "actual D3D11/D3D12 output family and typed upscaler SRV agree with selected output");
+            }
+            if (fg) {
+                const auto finalBacking =
+                    spatial || postprocess ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_B8G8R8A8_TYPELESS;
+                for (const auto& texture : value.m_precompositor.finalColour) {
+                    D3D11_TEXTURE2D_DESC resource{};
+                    require(texture != nullptr, "FG has final spatial/postprocessed eye ownership");
+                    texture->GetDesc(&resource);
+                    require(resource.Format == finalBacking,
+                            "final capture uses selected output or canonical postprocessor output");
+                }
+                if (!postprocess)
+                    require(value.m_precompositor.finalColour[0] == value.m_precompositor.finalColour[1],
+                            "final spatial NR exposes one packed color texture to the FG copy path");
+                if (bypass)
+                    require(
+                        value.m_fgPreviousCapturedTime != value.m_precompositor.displayTime,
+                        "explicit FG bypass preserves requested canonical spatial output without accepting capture");
+            } else {
+                require(!value.m_frameGeneration, "separate FG-off session never initializes the FG module");
+            }
+            std::cout << "SPATIAL_FORMAT processing=" << nrProcessingResolution << " coverage=" << coverage
+                      << " FG=" << requestedFrameGeneration << " srgb=" << srgb << " postprocess=" << postprocess
+                      << " bypass=" << bypass << " ovr=" << expected << " backing=" << backing << " srv=" << typed
+                      << '\n';
+        }
+        static void verifySpatialOffPixels() {
+            auto& value = runtime();
+            // The FG-off synthetic settings select synchronous submission; no
+            // async worker exists to signal waitForAsyncSubmissionIdle().
+            require(requestedFrameGeneration == 0, "FG-off pixel verification follows synchronous EndFrame");
+            for (unsigned eye = 0; eye < 2; ++eye) {
+                const ovrRecti source{{static_cast<int>(eye) * 512, 0}, {512, 512}};
+                auto presented = getCommitted(value.m_ovrSession, lastProjection.ColorTexture[eye]);
+                require(viewportPixels(
+                            value.m_dlssnrOutputSwapchainTextures[value.m_dlssnrOutputSwapchainLastWrittenIndex].Get(),
+                            source) == viewportPixels(presented.Get(), lastProjection.Viewport[eye]),
+                        "FG-off presentation retains every final spatial NR pixel");
+                std::cout << "SPATIAL_OFF_PIXELS eye=" << eye << " exact\n";
+            }
+        }
+        struct SpatialRecovery {
+            VDXRFG_StatisticsV1 statistics{};
+            std::array<unsigned, 2> synthetic{};
+            std::array<unsigned, 2> evaluations{};
+            bool currentCapture{}, currentGeometry{}, realBank{};
+            uint64_t nextNative{};
+            double nextLeadMs{};
+        };
+        static SpatialRecovery spatialRecovery() {
+            auto& value = runtime();
+            // Call after the checkpoint or final-input drain. Never wait for
+            // the presenter while holding either of its context leases.
+            std::unique_lock contextLease(value.m_fgContextMutex);
+            std::unique_lock captureLock(captureMutex);
+            SpatialRecovery result{};
+            require(value.m_frameGeneration != nullptr, "spatial recovery observes the actual initialized FG module");
+            checkHr(value.m_frameGeneration->getStatistics(result.statistics));
+            result.synthetic = {spatialSynthetic[0], spatialSynthetic[1]};
+            result.evaluations = {nrEvaluations[0], nrEvaluations[1]};
+            result.currentCapture = value.m_fgPreviousCapturedTime == value.m_precompositor.displayTime;
+            const auto format =
+                value.m_precompositor.isProj0SRGB ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+            const auto ovrFormat =
+                value.m_precompositor.isProj0SRGB ? OVR_FORMAT_R8G8B8A8_UNORM_SRGB : OVR_FORMAT_R8G8B8A8_UNORM;
+            result.currentGeometry = value.m_fgEyeResolution.w == 512 && value.m_fgEyeResolution.h == 512 &&
+                                     value.m_fgFormat == format && value.m_nrSpatialPipeline &&
+                                     value.m_precompositor.dlssnrSettings.processingResolution != 100 &&
+                                     value.m_fgBegunReservation.multiplier == requestedFrameGeneration;
+            for (const auto& bank : value.m_fgPresentationBanks)
+                result.realBank |= bank[2].ovrSwapchain && bank[2].ovrSwapchain == lastProjection.ColorTexture[0] &&
+                                   bank[2].ovrSwapchain == lastProjection.ColorTexture[1];
+            for (unsigned eye = 0; eye < 2; ++eye) {
+                const auto& viewport = lastProjection.Viewport[eye];
+                ovrTextureSwapChainDesc description{};
+                result.currentGeometry &= viewport.Pos.x == static_cast<int>(eye) * 512 && viewport.Pos.y == 0 &&
+                                          viewport.Size.w == 512 && viewport.Size.h == 512 &&
+                                          OVR_SUCCESS(ovr_GetTextureSwapChainDesc(
+                                              value.m_ovrSession, lastProjection.ColorTexture[eye], &description)) &&
+                                          description.Format == ovrFormat;
+            }
+            {
+                std::unique_lock clockLock(clockMutex);
+                result.nextNative = nextWaitId;
+                result.nextLeadMs = (stablePrediction(value.m_ovrSession, static_cast<long long>(nextWaitId)) -
+                                     ovr_GetTimeInSeconds()) *
+                                    1000;
+            }
+            return result;
+        }
+        static bool recoveredSpatial(const SpatialRecovery& baseline, const SpatialRecovery& current) {
+            const unsigned roles = combinedSpatial ? 4u : 1u;
+            return current.statistics.captures >= baseline.statistics.captures + 2 &&
+                   current.statistics.pairs >= baseline.statistics.pairs + 1 &&
+                   current.synthetic[0] >= baseline.synthetic[0] + roles &&
+                   (requestedFrameGeneration == 2 || current.synthetic[1] >= baseline.synthetic[1] + roles) &&
+                   current.currentCapture && current.currentGeometry && current.realBank;
+        }
+        static void printSpatialRecovery(const char* phase, unsigned inputs, const SpatialRecovery& state) {
+            std::cout << "SPATIAL_RECOVERY " << phase << " inputs=" << inputs << " FG=" << requestedFrameGeneration
+                      << " captures=" << state.statistics.captures << " pairs=" << state.statistics.pairs
+                      << " S1=" << state.synthetic[0] << " S2=" << state.synthetic[1]
+                      << " accepted=" << state.currentCapture << " geometry=" << state.currentGeometry
+                      << " realB=" << state.realBank << " nextNative=" << state.nextNative
+                      << " nextLeadMs=" << state.nextLeadMs << " evaluations=" << state.evaluations[0] << ','
+                      << state.evaluations[1] << '\n';
+        }
         static void verifyFinal(bool nr, int size, bool drain) {
             auto& value = runtime();
             if (drain) {
@@ -537,7 +872,8 @@ namespace virtualdesktop_openxr {
                       << " multiplier=" << value.m_fgBegunReservation.multiplier << " pairs=" << statistics.pairs
                       << " captures=" << statistics.captures << " reprime=" << value.m_fgNeedReprime.load()
                       << " now=" << value.ovrTimeToXrTime(ovr_GetTimeInSeconds()) << '\n';
-            require(value.m_precompositor.dlssnrSettings.foveationSize == 1.f, "NR coverage stays100%");
+            require(std::abs(value.m_precompositor.dlssnrSettings.foveationSize - coverage / 100.f) < .0001f,
+                    "NR coverage retains the independently selected value");
             require(value.m_frameGenerationBackend == requestedFrameGenerationBackend,
                     "selected backend reaches the real session configuration");
             const auto& appearance = value.m_precompositor.dlssnrSettings;
@@ -578,13 +914,34 @@ int main(int argc, char** argv) {
     XrInstance instance{};
     try {
         require(argc == 4, "private backend, state directory and FG scenario required");
+        const std::string scenario = argv[3];
+        unsigned steadyCoverage{}, steadyProcessing{};
+        for (const auto settings : {std::array<unsigned, 2>{95, 80}, {90, 80}, {90, 85}, {100, 80}})
+            for (const auto encoding : {"bgra", "bgra-srgb"})
+                for (const auto multiplier : {2u, 3u})
+                    if (scenario == "spatial-steady-" + std::to_string(settings[0]) + "-" +
+                                        std::to_string(settings[1]) + "-" + encoding + "-" +
+                                        std::to_string(multiplier)) {
+                        steadyCoverage = settings[0];
+                        steadyProcessing = settings[1];
+                    }
+        const bool steady = steadyCoverage != 0;
+        const bool combined = scenario == "spatial-combined-bgra-off" || scenario == "spatial-combined-bgra-srgb-off" ||
+                              scenario == "spatial-combined-bgra-2" || scenario == "spatial-combined-bgra-srgb-2" ||
+                              scenario == "spatial-combined-bgra-3" || scenario == "spatial-combined-bgra-srgb-3";
+        const bool spatial = steady || combined || scenario == "spatial-bgra-off" ||
+                             scenario == "spatial-bgra-srgb-off" || scenario == "spatial-bgra-2" ||
+                             scenario == "spatial-bgra-srgb-2" || scenario == "spatial-bgra-3" ||
+                             scenario == "spatial-bgra-srgb-3";
+        const bool spatialOff = spatial && scenario.find("-off") != std::string::npos;
         const bool discard = !strcmp(argv[3], "discard");
         const bool toggle = !strcmp(argv[3], "nr-toggle");
         const bool captureBusyRecovery = !strcmp(argv[3], "nr-off-capture-busy");
         const bool busyRecovery = !strcmp(argv[3], "nr-off-reset-busy") || captureBusyRecovery;
         predictionJitter = !strcmp(argv[3], "bgra-srgb-jitter");
-        const bool bgra = !strcmp(argv[3], "bgra") || !strcmp(argv[3], "bgra-srgb") || predictionJitter;
-        const bool bgraSrgb = !strcmp(argv[3], "bgra-srgb") || predictionJitter;
+        const bool bgra = spatial || !strcmp(argv[3], "bgra") || !strcmp(argv[3], "bgra-srgb") || predictionJitter;
+        const bool bgraSrgb = !strcmp(argv[3], "bgra-srgb") || predictionJitter ||
+                              (spatial && scenario.find("srgb") != std::string::npos);
         const bool d3d12 = !strcmp(argv[3], "nr-off-d3d12") || !strcmp(argv[3], "nr-off-d3d12-reuse") ||
                            !strcmp(argv[3], "nr-off-d3d12-reuse-bypass");
         const bool cropped = !strcmp(argv[3], "nr-off-cropped");
@@ -606,15 +963,18 @@ int main(int argc, char** argv) {
                     !strcmp(argv[3], "upscaled"),
                 "known public FG scenario");
         requestedFrameGeneration = !strcmp(argv[3], "nr-off-2") ? 2 : 3;
+        if (spatial)
+            requestedFrameGeneration = spatialOff ? 0 : (scenario.back() == '2' ? 2 : 3);
         if (const auto backend = std::getenv("VDXR_FG_TEST_BACKEND")) {
             require(!strcmp(backend, "nvidia") || !strcmp(backend, "fidelityfx-full"), "known test backend");
             requestedFrameGenerationBackend = !strcmp(backend, "fidelityfx-full") ? 1 : 0;
         }
         preserveNrAppearance = true;
-        coverage = 100;
+        coverage = steady ? steadyCoverage : 100;
         const bool upscaled = !strcmp(argv[3], "upscaled") || !strcmp(argv[3], "nr-off-upscaled");
         nrUpscalingSetting = upscaled ? 150 : 100;
         nrSharpenSetting = upscaled || sharpenOnly ? 25 : 0;
+        nrProcessingResolution = steady ? steadyProcessing : spatial ? 80 : 100;
         enabled = toggle || bgra;
         // Blocking Map readbacks inside each native End would themselves miss
         // 120Hz deadlines. Verify final pixels after draining the actual worker.
@@ -624,6 +984,11 @@ int main(int argc, char** argv) {
         expectedOffColour[1] = {144, 80, 48, 255};
         SettingsReadHook settings;
         using Regression = virtualdesktop_openxr::RuntimeFrameGenerationRegression;
+        Regression::combinedSpatial = combined || steady;
+        if (spatial)
+            std::cout << "QUALIFICATION_PROFILE kind=" << (steady ? "steady-fixed" : "cold-transition")
+                      << " clock=" << nativeRate << "Hz coverage=" << coverage
+                      << " processing=" << nrProcessingResolution << " FG=" << requestedFrameGeneration << '\n';
         const auto getProc = virtualdesktop_openxr::RuntimeInputRegression::initialize(argv[1], argv[2]);
         XR_CHECK(getProc(XR_NULL_HANDLE, "xrCreateInstance", reinterpret_cast<PFN_xrVoidFunction*>(&xrCreateInstance)));
         const char* extensions[] = {XR_KHR_D3D11_ENABLE_EXTENSION_NAME, XR_KHR_D3D12_ENABLE_EXTENSION_NAME};
@@ -748,7 +1113,31 @@ int main(int argc, char** argv) {
             unsigned beforeDiscard{};
             XrTime previousPublicTime{};
             NrLookupProbe lookupProbe;
-            for (unsigned frame = 0; frame < inputs; ++frame) {
+            auto releaseSpatialObservation = MakeScopeGuard([&] { Regression::observeSpatial(false); });
+            const unsigned inputCount = steady ? 128u : spatial ? 30u : inputs;
+            const bool recoverSpatial = spatial && !spatialOff;
+            const unsigned recoveryExtraInputs = steady ? 0u : combined ? 128u : 32u;
+            const unsigned maximumInputs = inputCount + (recoverSpatial ? recoveryExtraInputs : 0u);
+            if (recoverSpatial)
+                std::cout << "SPATIAL_RECOVERY_BUDGET combined=" << combined << " extraInputs=" << recoveryExtraInputs
+                          << '\n';
+            unsigned executedInputs{};
+            Regression::SpatialRecovery recoveryBaseline{};
+            bool haveRecoveryBaseline{}, steadyRecovery{};
+            size_t steadyPresentationStart{};
+            for (unsigned frame = 0; frame < maximumInputs; ++frame) {
+                const bool spatialPostprocess = spatial && !steady && frame >= 8 && frame < 16;
+                const bool spatialBypass = spatial && !steady && !spatialOff && frame == 22;
+                if (spatial && !steady) {
+                    nrProcessingResolution = frame >= 16 && frame < 20 ? 100 : 80;
+                    if (combined) {
+                        coverage = frame < 8 ? 95 : frame < 16 ? 90 : frame < 20 ? 100 : 90;
+                        if (frame >= 20)
+                            nrProcessingResolution = 85;
+                    }
+                    nrUpscalingSetting = 100; // Upscaling is session-initialized; this phase changes sharpening only.
+                    nrSharpenSetting = spatialPostprocess ? 25 : 0;
+                }
                 const bool nr = bgra || (toggle ? (frame < 3 || frame >= 6) : (!noNr && frame != 0));
                 virtualdesktop_openxr::RuntimeInputRegression::setEnabled(nr);
                 if (busyRecovery && frame == 4) {
@@ -836,7 +1225,7 @@ int main(int argc, char** argv) {
                     end.layers = duplicateLayers;
                 }
                 Regression::beforeInputEnd();
-                if (fallback && frame == (reuseFallback ? 3u : 2u)) {
+                if (spatialBypass || (fallback && frame == (reuseFallback ? 3u : 2u))) {
                     // The third app image wraps to SDK-current minus one while
                     // successful FG has never committed its raw source chain.
                     Regression::forceFallback();
@@ -862,7 +1251,7 @@ int main(int argc, char** argv) {
                         releaseSource.join();
                     }
                 });
-                const bool measureLookups = nr && frame >= 2;
+                const bool measureLookups = nr && frame >= 2 && !spatialOff;
                 if (measureLookups)
                     Regression::beginLookupProbe(lookupProbe);
                 VDXRFG_StatisticsV1 beforeRecovery{};
@@ -887,7 +1276,7 @@ int main(int argc, char** argv) {
                 if (measureLookups)
                     lookupProbe.finish();
                 if (measureLookups)
-                    Regression::verifyLookupResult(upscaled || sharpenOnly);
+                    Regression::verifyLookupResult(upscaled || sharpenOnly || spatialPostprocess);
                 if (fallback && frame == 2) {
                     Regression::drainAndVerifyPixels();
                 }
@@ -910,9 +1299,28 @@ int main(int argc, char** argv) {
                 if (noNr) {
                     Regression::verifyNoNrGraph();
                 }
-                Regression::verifyFinal(
-                    nr, ((51200 / nrUpscalingSetting + 3) / 4) * 4, frame <= 1 || frame == inputs - 1);
-                if (bgra) {
+                if (!spatialOff)
+                    Regression::verifyFinal(nr,
+                                            ((51200 / nrUpscalingSetting + 3) / 4) * 4,
+                                            frame <= 1 || frame == inputCount - 1 ||
+                                                (recoverSpatial && frame >= inputCount));
+                if (spatial) {
+                    Regression::verifySpatialFormats(bgraSrgb, spatialPostprocess, spatialBypass);
+                    if (!spatialOff && combined && frame == 15)
+                        Regression::verifyPostprocessTransitionPixels(
+                            std::filesystem::path(argv[2]) / ("phase-" + std::to_string(frame)), views, bgraSrgb);
+                    if (!steady && !spatialOff && (frame == 7 || (!combined && frame == 15)))
+                        Regression::verifyRealPixels(std::filesystem::path(argv[2]) /
+                                                     ("phase-" + std::to_string(frame)));
+                    if (!steady && !spatialOff && (frame == 19 || spatialBypass))
+                        Regression::verifyTransitionPixels(
+                            std::filesystem::path(argv[2]) / ("phase-" + std::to_string(frame)), views, bgraSrgb);
+                    if (spatialBypass) {
+                        recoveryBaseline = Regression::spatialRecovery();
+                        haveRecoveryBaseline = true;
+                        Regression::printSpatialRecovery("baseline-after-bypass", frame + 1, recoveryBaseline);
+                    }
+                } else if (bgra) {
                     Regression::verifyBgraFormats(bgraSrgb);
                 }
                 Regression::verifyInternalChains();
@@ -921,9 +1329,18 @@ int main(int argc, char** argv) {
                 }
                 if (frame <= 1) {
                     if (frame == 1 && !noNr) {
-                        Regression::observe();
+                        if (spatial)
+                            Regression::observeSpatial(true);
+                        else
+                            Regression::observe();
                     }
                     nativeClock.reanchorAfterWarmup();
+                    if (steady && frame == 1) {
+                        recoveryBaseline = Regression::spatialRecovery();
+                        haveRecoveryBaseline = true;
+                        steadyPresentationStart = Regression::presentedRoles.size();
+                        Regression::printSpatialRecovery("baseline-after-startup", frame + 1, recoveryBaseline);
+                    }
                 }
                 if (!frame) {
                     observeNativeCommit = Regression::observeCommit;
@@ -931,10 +1348,31 @@ int main(int argc, char** argv) {
                 if (!captureFailure.empty()) {
                     throw std::runtime_error(captureFailure);
                 }
+                ++executedInputs;
+                if (recoverSpatial && executedInputs >= inputCount) {
+                    require(haveRecoveryBaseline,
+                            "qualification requires its explicit startup or after-bypass baseline");
+                    const auto current = Regression::spatialRecovery();
+                    steadyRecovery = Regression::recoveredSpatial(recoveryBaseline, current);
+                    if (steadyRecovery) {
+                        Regression::printSpatialRecovery("recovered", executedInputs, current);
+                        break;
+                    }
+                    if (executedInputs == inputCount)
+                        Regression::printSpatialRecovery("bounded-tail-begins", executedInputs, current);
+                    if (executedInputs == maximumInputs) {
+                        Regression::printSpatialRecovery("failure-baseline", steady ? 2 : 23, recoveryBaseline);
+                        Regression::printSpatialRecovery("failure-final", executedInputs, current);
+                    }
+                }
             }
-            const auto expectedNr = noNr ? 0u : inputs - (toggle ? 5u : 2u);
+            require(!recoverSpatial || steadyRecovery,
+                    "spatial FG must recover new accepted captures, pairs and requested roles within bounded tail");
+            const auto expectedNr = noNr ? 0u : executedInputs - (toggle ? 5u : 2u);
             Regression::verifyPixels();
-            if (!noNr)
+            if (spatialOff)
+                Regression::verifySpatialOffPixels();
+            else if (!noNr)
                 Regression::verifyRealPixels(argv[2]);
             unsigned eyeDifference{};
             for (unsigned component = 0; component < 3; ++component)
@@ -944,32 +1382,59 @@ int main(int argc, char** argv) {
                     "exactly one real NR evaluation per eye per input, none on synthesized output");
             require(!Regression::invalidNrParameters,
                     "actual forwarded Ada evaluations preserve full NR rectangles, preset B and hair/face controls");
-            const auto statistics = Regression::statistics();
-            const auto minimumSynthetic = 4u * (requestedFrameGeneration - 1);
+            const auto statistics = spatialOff ? VDXRFG_StatisticsV1{} : Regression::statistics();
+            const auto minimumSynthetic = requestedFrameGeneration ? 4u * (requestedFrameGeneration - 1) : 0u;
             if (reuse) {
                 // These cases deliberately stall source processing. Ownership
                 // and late real fallback are tested independently of cadence;
                 // the normal 2X/3X cases require actual synthetic submissions.
                 require(statistics.captures >= 2 && !Regression::presentedIds.empty(),
                         "source reuse surrounds real module captures and native presentations");
-            } else {
+            } else if (!spatialOff) {
                 require(statistics.pairs >= 4 && statistics.synthetic_frames >= minimumSynthetic,
                         "public prediction path must produce real pairs after warmup");
                 require(Regression::syntheticPresentations >= minimumSynthetic,
                         "production native presenter must submit generated roles, not only accept GPU synthesis");
             }
+            if (spatial && !spatialOff) {
+                require(Regression::spatialSynthetic[0] >= 4 &&
+                            (requestedFrameGeneration == 2 || Regression::spatialSynthetic[1] >= 4),
+                        "real synthetic native submissions occur while reduced NR is active in both FG modes");
+                std::cout << "SPATIAL_PRESENT FG=" << requestedFrameGeneration
+                          << " S1=" << Regression::spatialSynthetic[0] << " S2=" << Regression::spatialSynthetic[1]
+                          << " evaluated=" << Regression::nrEvaluations[0] << ',' << Regression::nrEvaluations[1]
+                          << '\n';
+                if (steady)
+                    std::cout << "STEADY_PRESENT clock=" << nativeRate << "Hz coverage=" << coverage
+                              << " processing=" << nrProcessingResolution << " FG=" << requestedFrameGeneration
+                              << " measuredInputs=" << executedInputs - 2
+                              << " NEW_S1=" << Regression::spatialSynthetic[0] - recoveryBaseline.synthetic[0]
+                              << " NEW_S2=" << Regression::spatialSynthetic[1] - recoveryBaseline.synthetic[1] << '\n';
+                if (combined) {
+                    require(Regression::combinedSynthetic[2][0] >= 4 &&
+                                (requestedFrameGeneration == 2 || Regression::combinedSynthetic[2][1] >= 4),
+                            "after combined coverage/processing changes, native synthetic roles recover on90/85");
+                    for (unsigned cohort = 0; cohort < 3; ++cohort)
+                        std::cout << "COMBINED_PRESENT coverage=" << (cohort == 0 ? 95 : 90)
+                                  << " processing=" << (cohort == 2 ? 85 : 80) << " FG=" << requestedFrameGeneration
+                                  << " S1=" << Regression::combinedSynthetic[cohort][0]
+                                  << " S2=" << Regression::combinedSynthetic[cohort][1] << '\n';
+                }
+            }
             if (discard) {
                 require(Regression::syntheticPresentations >= beforeDiscard + 4,
                         "public discard recovers real synthetic presentation after reanchoring");
             }
-            if (bgra) {
+            if (bgra && !spatialOff && requestedFrameGeneration == 3) {
                 unsigned s1{}, s2{}, complete{};
                 const auto& roles = Regression::presentedRoles;
-                for (size_t i = 0; i < roles.size(); ++i) {
+                const size_t start = steady ? steadyPresentationStart : 0;
+                for (size_t i = start; i < roles.size(); ++i) {
                     s1 += roles[i].second == 0;
                     s2 += roles[i].second == 1;
-                    if (i >= 2 && roles[i - 2].second == 0 && roles[i - 1].second == 1 && roles[i].second == 2 &&
-                        roles[i - 2].first + 1 == roles[i - 1].first && roles[i - 1].first + 1 == roles[i].first)
+                    if (i >= start + 2 && roles[i - 2].second == 0 && roles[i - 1].second == 1 &&
+                        roles[i].second == 2 && roles[i - 2].first + 1 == roles[i - 1].first &&
+                        roles[i - 1].first + 1 == roles[i].first)
                         ++complete;
                 }
                 require(s1 >= 4 && s2 >= 4 && complete >= 1,
@@ -979,6 +1444,7 @@ int main(int argc, char** argv) {
             observeProjection = {};
             observeNativeEnd = {};
             observeNativeCommit = {};
+            Regression::observeSpatial(false);
             if (input12) {
                 input12->context->Flush();
             }

@@ -69,10 +69,11 @@ namespace {
         std::set<ID3D12Object*> watchedResources, watchedLists;
         std::thread releaseThread;
         std::atomic<bool> injected{}, enteredDrain{}, cleanupStarted{}, gateReleased{}, timedOut{}, retainedAtDrain{};
-        bool signalFailure{}, installed{}, retainedAtFailure{}, cleanupSucceeded{};
+        bool signalFailure{}, native{}, installed{}, retainedAtFailure{}, cleanupSucceeded{};
         unsigned executions{}, acceptedSignals{}, consumerWaits{}, failures{};
         UINT64 lastAcceptedSignal{}, rejectedSignal{};
-        explicit SpatialSubmissionFailure(bool failSignal) : signalFailure(failSignal) {
+        explicit SpatialSubmissionFailure(bool failSignal, bool nativeRoute = false)
+            : signalFailure(failSignal), native(nativeRoute) {
         }
         void check(bool condition, const char* message) {
             if (!condition) {
@@ -132,7 +133,7 @@ namespace {
             checkHr(result);
         }
         void arm() {
-            target = virtualdesktop_openxr::RuntimeInputRegression::spatialSubmissionBoundary();
+            target = virtualdesktop_openxr::RuntimeInputRegression::spatialSubmissionBoundary(native);
             originalExecute = reinterpret_cast<Execute>((*reinterpret_cast<void***>(target.queue))[10]);
             originalSignal = reinterpret_cast<Signal>((*reinterpret_cast<void***>(target.queue))[14]);
             // ID3D11DeviceContext4 vtable slots147/148 are Signal/Wait in the retained Windows SDK.
@@ -171,25 +172,27 @@ namespace {
         }
         void beforeCleanup() {
             retainedAtFailure =
-                virtualdesktop_openxr::RuntimeInputRegression::spatialFailureOwnsResources(signalFailure) &&
+                virtualdesktop_openxr::RuntimeInputRegression::spatialFailureOwnsResources(signalFailure, native) &&
                 !retired->resources && !retired->lists;
             cleanupStarted = true;
         }
         void finish() {
             if (releaseThread.joinable())
                 releaseThread.join();
-            check(injected && executions == 1, "fault must be injected into exactly one actual spatial submission");
+            check(injected && executions == 1, "fault must be injected into exactly one actual NR submission");
             check(cleanupSucceeded && retainedAtFailure,
                   "failed frame must retain resources and correct recovery flags");
             check(enteredDrain && retainedAtDrain && gateReleased && !timedOut,
                   "teardown must enter the real blocked completion drain before resource retirement");
-            check(watchedResources.size() == 6 && retired->resources == 6 && watchedLists.size() == 1 &&
-                      retired->lists == 1,
-                  "all six scratch resources and submitted command list must retire after proven completion");
+            const unsigned expectedResources = native ? 5 : 6;
+            check(watchedResources.size() == expectedResources && retired->resources == expectedResources &&
+                      watchedLists.size() == 1 && retired->lists == 1,
+                  "all exact route-specific resources and submitted list must retire after proven completion");
             check(signalFailure ? consumerWaits == 0 && acceptedSignals >= 1 && lastAcceptedSignal > rejectedSignal
                                 : consumerWaits == 1 && acceptedSignals == 1,
                   "submission recovery must use the correct accepted fence contract");
-            std::cout << "native submission failure signal=" << signalFailure << " executes=" << executions
+            std::cout << "native submission failure route=" << (native ? "native100" : "spatial")
+                      << " signal=" << signalFailure << " executes=" << executions
                       << " acceptedSignals=" << acceptedSignals << " consumerWaits=" << consumerWaits
                       << " resourcesRetired=" << retired->resources << " listsRetired=" << retired->lists
                       << " retainedAtFailure=" << retainedAtFailure << " retainedAtDrain=" << retainedAtDrain << '\n';
@@ -222,6 +225,43 @@ namespace {
             active = nullptr;
         }
     };
+
+    // Create/evaluate failures occur before Execute, so their unsubmitted list
+    // may retire immediately. The prepared scratch must survive until teardown.
+    struct NativePreparationFailure {
+        inline static NativePreparationFailure* active{};
+        std::shared_ptr<SpatialSubmissionFailure::Retired> retired =
+            std::make_shared<SpatialSubmissionFailure::Retired>();
+        bool observed{}, retainedAtFailure{}, cleanupSucceeded{};
+        NativePreparationFailure() {
+            active = this;
+        }
+        ~NativePreparationFailure() {
+            active = nullptr;
+        }
+        void observe(ID3D12GraphicsCommandList* commands) {
+            require(commands && commands->GetType() == D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    "native preparation fault must cross an actual DIRECT vendor call");
+            if (observed)
+                return;
+            auto* scratch = virtualdesktop_openxr::RuntimeInputRegression::nativeAnswerResource();
+            auto* owner = new SpatialSubmissionFailure::Lifetime(retired, false);
+            const auto result = scratch->SetPrivateDataInterface(SpatialSubmissionFailure::lifetimeId, owner);
+            owner->Release();
+            checkHr(result);
+            observed = true;
+        }
+        void beforeCleanup() {
+            retainedAtFailure = observed && !retired->resources &&
+                                virtualdesktop_openxr::RuntimeInputRegression::spatialFailureOwnsResources(false, true);
+        }
+        void finish() {
+            require(observed && retainedAtFailure && cleanupSucceeded && retired->resources == 1,
+                    "native preparation failure must retain scratch/flags until successful cleanup");
+            std::cout << "native preparation failure retainedAtFailure=" << retainedAtFailure
+                      << " resourcesRetired=" << retired->resources << " cleanupSucceeded=" << cleanupSucceeded << '\n';
+        }
+    };
 #endif
     struct SpatialRuntimeProbe {
         struct Feature {
@@ -235,6 +275,7 @@ namespace {
         std::map<const NVSDK_NGX_Handle*, Feature> features;
         std::array<unsigned, 2> previousGeneration{};
         std::set<ID3D12Resource*> nativeBanks;
+        std::set<ID3D12Resource*> publishedBanks;
         unsigned frame{}, evaluations{}, creations{}, releases{}, failures{}, beforeEvaluations{};
         unsigned previousPercent{100};
         bool nativeOnly{};
@@ -270,7 +311,11 @@ namespace {
                                                     NVSDK_NGX_Parameter* parameters,
                                                     NVSDK_NGX_Handle** handle) {
             auto& self = *active;
-            if (self.failCreation && self.frame == 5) {
+            if (self.failCreation && self.frame == (self.nativeOnly ? 0u : 5u)) {
+#ifdef VDXR_NR_SPATIAL_CANDIDATE
+                if (NativePreparationFailure::active)
+                    NativePreparationFailure::active->observe(commands);
+#endif
                 self.injectedFailure = true;
                 *handle = nullptr;
                 return NVSDK_NGX_Result_FAIL_OutOfGPUMemory;
@@ -311,6 +356,10 @@ namespace {
             if (NVSDK_NGX_FAILED(result))
                 return result;
             if (self.failEvaluation && self.frame == 7 && eye == 1) {
+#ifdef VDXR_NR_SPATIAL_CANDIDATE
+                if (NativePreparationFailure::active)
+                    NativePreparationFailure::active->observe(commands);
+#endif
                 self.injectedFailure = true;
                 return NVSDK_NGX_Result_FAIL_PlatformError;
             }
@@ -415,8 +464,9 @@ namespace {
             return self.previousPercent != nrProcessingResolution;
         }
         explicit SpatialRuntimeProbe(const char* backend, const std::string& mode)
-            : nativeOnly(mode == "native100"), failEvaluation(mode == "evaluate-failure"),
-              failCreation(mode == "create-failure") {
+            : nativeOnly(mode == "native100" || mode.rfind("native-", 0) == 0),
+              failEvaluation(mode == "evaluate-failure" || mode == "native-evaluate-failure"),
+              failCreation(mode == "create-failure" || mode == "native-create-failure") {
             const auto path = std::filesystem::absolute(backend) / L"nvngx_dlssnr.dll";
             module = LoadLibraryW(path.c_str());
             require(module && GetProcAddress(module, "NR_Test_GetVariant"),
@@ -456,6 +506,11 @@ namespace {
             check(features.size() == 2, "retain only one current feature per eye after a completed frame");
 #ifdef VDXR_NR_SPATIAL_CANDIDATE
             virtualdesktop_openxr::RuntimeInputRegression::checkSpatialPipeline(nrProcessingResolution != 100);
+            auto* output = virtualdesktop_openxr::RuntimeInputRegression::publishedNrOutputResource();
+            publishedBanks.insert(output);
+            if (nativeOnly)
+                check(output != virtualdesktop_openxr::RuntimeInputRegression::nativeAnswerResource(),
+                      "native answer scratch must remain separate from published output bank");
 #endif
             previousPercent = nrProcessingResolution;
         }
@@ -466,11 +521,14 @@ int main(int argc, char** argv) {
     try {
         require(argc == 4,
                 "Usage: nr_spatial_runtime_regression <private-backend-folder> <state> "
-                "<native100|sequence|evaluate-failure|create-failure|signal-failure|wait-failure>");
+                "<native100|sequence|evaluate-failure|create-failure|signal-failure|wait-failure|"
+                "native-create-failure|native-evaluate-failure|native-signal-failure|native-wait-failure>");
         const std::string mode = argv[3];
-        const bool failSubmission = mode == "signal-failure" || mode == "wait-failure";
+        const bool nativeFault = mode.rfind("native-", 0) == 0;
+        const std::string fault = nativeFault ? mode.substr(7) : mode;
+        const bool failSubmission = fault == "signal-failure" || fault == "wait-failure";
         require(mode == "native100" || mode == "sequence" || mode == "evaluate-failure" || mode == "create-failure" ||
-                    failSubmission,
+                    failSubmission || mode == "native-create-failure" || mode == "native-evaluate-failure",
                 "Unknown spatial runtime mode");
         std::filesystem::create_directories(std::filesystem::absolute(argv[2]));
         virtualdesktop_openxr::log::logStream.open(std::filesystem::absolute(argv[2]) / "runtime-test.log");
@@ -478,13 +536,18 @@ int main(int argc, char** argv) {
         SpatialRuntimeProbe probe(argv[1], mode);
 #ifdef VDXR_NR_SPATIAL_CANDIDATE
         std::unique_ptr<SpatialSubmissionFailure> submission;
+        std::unique_ptr<NativePreparationFailure> preparation;
         if (failSubmission) {
-            submission = std::make_unique<SpatialSubmissionFailure>(mode == "signal-failure");
+            submission = std::make_unique<SpatialSubmissionFailure>(fault == "signal-failure", nativeFault);
             beforeFailureCleanup = [&] { submission->beforeCleanup(); };
             afterFailureCleanup = [&](XrResult result) { submission->cleanupSucceeded = result == XR_SUCCESS; };
+        } else if (nativeFault) {
+            preparation = std::make_unique<NativePreparationFailure>();
+            beforeFailureCleanup = [&] { preparation->beforeCleanup(); };
+            afterFailureCleanup = [&](XrResult result) { preparation->cleanupSucceeded = result == XR_SUCCESS; };
         }
 #else
-        require(!failSubmission, "native spatial submission failure modes require a matching candidate build");
+        require(!failSubmission && !nativeFault, "NR fault modes require a matching candidate build");
 #endif
         additionalSteadyFrames = 12;
         checkOffColourEdges = checkEnabledColourIdentity = true;
@@ -548,13 +611,15 @@ int main(int argc, char** argv) {
             submission->finish();
             probe.failures += submission->failures;
         }
+        if (preparation)
+            preparation->finish();
 #endif
         require(result == (probe.failEvaluation || probe.failCreation || failSubmission ? 1 : 0),
                 "public spatial runtime fixture returned unexpected status");
         require(probe.features.empty() && probe.creations == probe.releases,
                 "normal teardown must release every created feature exactly once");
         require(probe.evaluations == (probe.failEvaluation ? 16
-                                      : probe.failCreation ? 10
+                                      : probe.failCreation ? (nativeFault ? 0 : 10)
                                       : failSubmission     ? 18
                                                            : 38),
                 "bounded run must observe the exact expected stereo evaluation count");
@@ -563,13 +628,24 @@ int main(int argc, char** argv) {
                     "failed second-eye evaluation must propagate without publishing partial native output");
         }
         if (probe.failCreation) {
-            require(probe.injectedFailure && captured == 5,
+            require(probe.injectedFailure && captured == (nativeFault ? 0 : 5),
                     "failed feature creation must propagate without publishing a stale native output");
         }
         if (failSubmission) {
             require(captured == 8, "failed native submission must not publish partial or stale final output");
         }
-        require(probe.nativeBanks.size() > 1, "test must exercise rotating native output banks");
+        if (!(nativeFault && probe.failCreation)) {
+#ifdef VDXR_NR_SPATIAL_CANDIDATE
+            if (probe.nativeOnly) {
+                require(probe.nativeBanks.size() == 1, "native100 must reuse one cached packed answer scratch");
+                require(probe.publishedBanks.size() > 1, "native100 must still rotate final published output banks");
+            } else {
+                require(probe.nativeBanks.size() > 1, "test must exercise rotating native output banks");
+            }
+#else
+            require(probe.nativeBanks.size() > 1, "test must exercise rotating native output banks");
+#endif
+        }
         require(!probe.failures, "spatial backend geometry/lifecycle assertions failed");
         std::cout << "PASS: public runtime " << mode
                   << "; native output/identity pixels/depth intact; creates=" << probe.creations

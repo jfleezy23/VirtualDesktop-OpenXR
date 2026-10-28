@@ -722,6 +722,9 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
     <FxCompile Include="NrSpatialResolvePS.hlsl">
       <ShaderType>Pixel</ShaderType>
     </FxCompile>
+    <FxCompile Include="NrNativeResolvePS.hlsl">
+      <ShaderType>Pixel</ShaderType>
+    </FxCompile>
     <FxCompile Include="UpscalingCS.hlsl">
       <ShaderType>Compute</ShaderType>
     </FxCompile>

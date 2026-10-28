@@ -141,13 +141,23 @@ def run(result_path):
             root.update()
             check(read(gui.VALUE_NAMES[index]) == (requested, winreg.REG_DWORD)
                   and app.variables[index].get() == requested, f"slider {gui.VALUE_NAMES[index]}")
-        app.slider_widgets[-1].set(94)
+        spatial_before = snapshot()[gui.REGISTRY_PATH]
+        app.slider_widgets[-1].set(95)
+        app.processing_resolution_slider.set(80)
+        check(app.variables[-1].get() == 95
+              and str(app.slider_widgets[-1].cget("state")) == "normal",
+              "combined request retains independent editable coverage")
+        check(snapshot()[gui.REGISTRY_PATH] == spatial_before, "both spatial controls debounce")
         wait_for_callbacks()
-        check(read("FoveationSize")[0] == 94, "coverage debounce persists")
-        app.processing_resolution_slider.set(90)
+        check(read(gui.PROCESSING_RESOLUTION_VALUE_NAME) == (80, winreg.REG_DWORD)
+              and read("FoveationSize")[0] == 95, "independent debounce saves 95/80")
+        appearance_before = [(name, *read(name)) for name in gui.VALUE_NAMES[:-1]]
+        app.variables[-1].set(90)
         wait_for_callbacks()
-        check(read(gui.PROCESSING_RESOLUTION_VALUE_NAME) == (90, winreg.REG_DWORD)
-              and read("FoveationSize")[0] == 94, "processing resolution saves 90 independently of coverage")
+        check(read("FoveationSize")[0] == 90 and read(gui.PROCESSING_RESOLUTION_VALUE_NAME)[0] == 80,
+              "partial coverage can change while processing remains reduced")
+        check([(name, *read(name)) for name in gui.VALUE_NAMES[:-1]] == appearance_before,
+              "combined spatial edits preserve appearance settings")
         mode_selector = control(ttk.Combobox, "textvariable", app.frame_generation)
         backend_selector = control(ttk.Combobox, "textvariable", app.frame_generation_backend)
         check(str(mode_selector.cget("state")) == str(backend_selector.cget("state")) == "readonly",
@@ -162,29 +172,68 @@ def run(result_path):
             backend_selector.event_generate("<<ComboboxSelected>>")
             root.update()
             check(read(gui.FRAME_GENERATION_BACKEND_NAME)[0] == value, f"FG backend {value}")
+        backend_selector.set("NVIDIA (default)")
+        backend_selector.event_generate("<<ComboboxSelected>>")
+        root.update()
+        app.processing_resolution_slider.set(100)
+        wait_for_callbacks()
+        check(str(app.slider_widgets[-1].cget("state")) == "normal",
+              "coverage remains editable with native processing")
         app.slider_widgets[-1].set(95)
+        wait_for_callbacks()
+        check(read("FoveationSize")[0] == 95, "native processing retains partial coverage support")
+        app.slider_widgets[-1].set(90)
         app.processing_resolution_slider.set(85)
         app.on_close()
         root = None
-        check(read("FoveationSize")[0] == 95, "closing flushes pending coverage")
+        check(read("FoveationSize")[0] == 90, "closing flushes pending coverage independently")
         check(read(gui.PROCESSING_RESOLUTION_VALUE_NAME) == (85, winreg.REG_DWORD),
               "closing flushes pending processing resolution")
         root = tk.Tk()
         root.withdraw()
         app = gui.VDXRRegistryApp(root)
-        check(app.variables[-1].get() == 95 and app.enabled.get(), "restart restores saved values")
+        check(app.variables[-1].get() == 90 and app.enabled.get(), "restart preserves saved combined 90/85 pair")
         check(app.processing_resolution.get() == 85, "restart restores processing resolution")
         control(ttk.Button, "text", "Reset NR settings").invoke()
         check([read(name)[0] for name in gui.VALUE_NAMES] == list(gui.VALUE_DEFAULTS), "reset persists every NR default immediately")
         check(read(gui.ENABLE_VALUE_NAME)[0] == 0, "reset disables NR")
         check(read(gui.PROCESSING_RESOLUTION_VALUE_NAME) == (100, winreg.REG_DWORD)
               and app.processing_resolution.get() == 100, "reset restores native processing resolution")
-        check(read(gui.FRAME_GENERATION_VALUE_NAME)[0] == 3 and read(gui.FRAME_GENERATION_BACKEND_NAME)[0] == 1,
-              "NR reset preserves FG selections")
+        check(read(gui.FRAME_GENERATION_VALUE_NAME)[0] == 3 and read(gui.FRAME_GENERATION_BACKEND_NAME)[0] == 0,
+              "NR reset preserves MFG and NVIDIA selections")
         check(snapshot()[runtime_path] == runtime_before_nr and app.runtime_selection.get() == runtime.CUSTOM_LABEL,
               "NR and FG changes and NR reset preserve runtime selection")
         app.on_close()
         root = None
+        for coverage, processing in ((95, 80), (90, 85), (90, 80), (100, 80)):
+            set_value("FoveationSize", coverage)
+            set_value(gui.PROCESSING_RESOLUTION_VALUE_NAME, processing)
+            combined_before = snapshot()
+            root = tk.Tk()
+            root.withdraw()
+            app = gui.VDXRRegistryApp(root)
+            check((app.variables[-1].get(), app.processing_resolution.get()) == (coverage, processing)
+                  and snapshot() == combined_before, f"saved {coverage}/{processing} startup is read-only")
+            app.on_close()
+            root = None
+            check(snapshot() == combined_before, f"unchanged {coverage}/{processing} close is read-only")
+        for coverage in ("malformed", None):
+            if coverage is None:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, gui.REGISTRY_PATH, 0,
+                                    winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as key:
+                    winreg.DeleteValue(key, "FoveationSize")
+            else:
+                set_value("FoveationSize", coverage, winreg.REG_SZ)
+            before = snapshot()
+            root = tk.Tk()
+            root.withdraw()
+            app = gui.VDXRRegistryApp(root)
+            check(snapshot() == before and app.variables[-1].get() == 100
+                  and app.processing_resolution.get() == 80
+                  and ("invalid" if coverage else "not saved") in app.status.get().lower(),
+                  f"startup warns without overwriting coverage: {type(coverage).__name__}")
+            app.on_close()
+            root = None
         for name in ("DLSSNR_Intensity", gui.ENABLE_VALUE_NAME, gui.FRAME_GENERATION_VALUE_NAME,
                      gui.FRAME_GENERATION_BACKEND_NAME, gui.PROCESSING_RESOLUTION_VALUE_NAME):
             set_value(name, "malformed", winreg.REG_SZ)
