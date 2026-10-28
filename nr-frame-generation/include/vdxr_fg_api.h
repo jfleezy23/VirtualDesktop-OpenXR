@@ -163,6 +163,33 @@ typedef struct VDXRFG_ApiV3 {
 
 typedef HRESULT(WINAPI* VDXRFG_GetApiV3Fn)(VDXRFG_ApiV3*) VDXRFG_NOEXCEPT;
 
+/* V4 explicitly reuses V3 Create/Submit envelopes and TicketV1. The ticket's
+ * output_ready fence still covers the complete transaction and retirement.
+ * Only GetOutputReadiness may return an earlier borrowed S1 fence. Query by
+ * live context/token/role; unavailable roles are rejected. 2X, primes, repeats
+ * and jointly composed outputs retain their full-completion readiness. */
+#define VDXRFG_API_VERSION_4 4u
+
+typedef struct VDXRFG_OutputReadinessV4 {
+    uint32_t struct_size, api_version;
+    void* fence;
+    uint64_t value;
+} VDXRFG_OutputReadinessV4;
+
+typedef struct VDXRFG_ApiV4 {
+    uint32_t struct_size, api_version;
+    uint32_t supported_create_flags, max_multiplier;
+    HRESULT(WINAPI* Create)(const VDXRFG_CreateInfoV3*, void**) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Submit)(void*, const VDXRFG_SubmitInfoV3*, VDXRFG_TicketV1*) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Retire)(void*, uint64_t) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Reset)(void*, uint32_t) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* GetStatistics)(void*, VDXRFG_StatisticsV1*) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Destroy)(void*) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* GetOutputReadiness)(void*, uint64_t, uint32_t, VDXRFG_OutputReadinessV4*) VDXRFG_NOEXCEPT;
+} VDXRFG_ApiV4;
+
+typedef HRESULT(WINAPI* VDXRFG_GetApiV4Fn)(VDXRFG_ApiV4*) VDXRFG_NOEXCEPT;
+
 #ifdef __cplusplus
 }
 #endif

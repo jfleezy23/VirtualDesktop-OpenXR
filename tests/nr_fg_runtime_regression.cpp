@@ -1040,7 +1040,8 @@ int main(int argc, char** argv) {
                           busyRecovery;
         if (const auto rate = std::getenv("VDXR_FG_TEST_REFRESH_RATE")) {
             nativeRate = static_cast<unsigned>(std::stoul(rate));
-            require(nativeRate == 30 || nativeRate == 60 || nativeRate == 120, "explicit supported test clock");
+            require(nativeRate == 30 || nativeRate == 60 || nativeRate == 120 || nativeRate == 144,
+                    "explicit supported test clock");
         }
         std::cout << "private backend test clock=" << nativeRate << "Hz\n";
         const bool sharpenOnly = !strcmp(argv[3], "sharpen");

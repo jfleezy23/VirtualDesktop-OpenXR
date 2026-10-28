@@ -49,8 +49,8 @@ def profile_fixture_guard(executable, scenario, store=None):
 
 
 def select_clock(scenario, inherited=None, override=None):
-    if override is not None and override not in (30, 60, 120):
-        raise ValueError("Supported qualification clocks are30,60,120Hz")
+    if override is not None and override not in (30, 60, 120, 144):
+        raise ValueError("Supported qualification clocks are30,60,120,144Hz")
     profile = "steady-fixed" if scenario.startswith("spatial-steady-") else (
         "cold-transition" if scenario.startswith("spatial-") else "runtime-default"
     )
@@ -73,7 +73,7 @@ def main():
     parser.add_argument("--runtime-cohort", type=Path)
     parser.add_argument("--backend-template", type=Path)
     parser.add_argument("--output-directory", required=True, type=Path)
-    parser.add_argument("--refresh-rate", type=int, choices=[30, 60, 120],
+    parser.add_argument("--refresh-rate", type=int, choices=[30, 60, 120, 144],
                         help="Explicitly override per-case runtime clocks (cold spatial30Hz, steady120Hz). "
                              "Inherited VDXR_FG_TEST_REFRESH_RATE is recorded but does not select clocks.")
     args = parser.parse_args()

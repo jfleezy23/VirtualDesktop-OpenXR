@@ -37,6 +37,7 @@ namespace virtualdesktop_openxr {
         HMODULE module{};
         VDXRFG_ApiV1 api{};
         VDXRFG_ApiV3 api3{};
+        VDXRFG_ApiV4 api4{};
         void* context{};
         InitInfo info;
         ComPtr<ID3D11Device5> device11;
@@ -47,7 +48,8 @@ namespace virtualdesktop_openxr {
         ComPtr<ID3D12Resource> input12;
         std::array<std::array<ComPtr<ID3D11Texture2D>, 4>, 2> outputs11;
         std::array<std::array<ComPtr<ID3D12Resource>, 4>, 2> outputs12;
-        ComPtr<ID3D11Fence> producer11, consumed11, ready11, consumer11;
+        ComPtr<ID3D11Fence> producer11, consumed11, ready11, firstReady11, consumer11;
+        ComPtr<ID3D12Fence> firstReady12;
         ComPtr<ID3D12Fence> producer12;
         std::array<uint64_t, 2> liveTokens{};
         std::array<uint64_t, 2> consumerValues{};
@@ -68,6 +70,8 @@ namespace virtualdesktop_openxr {
         HANDLE copyCompletionEvent{};
         HANDLE readyCompletionEvent{};
         std::array<uint64_t, 2> registeredReadyValues{};
+        std::array<uint64_t, 2> firstReadyValues{}, registeredFirstReadyValues{};
+        std::array<bool, 2> queuedFullReadyWait{}, queuedFirstReadyWait{};
 
         ~State() {
             // FrameGeneration::shutdown has already released context ownership.
@@ -323,14 +327,42 @@ namespace virtualdesktop_openxr {
                 state->api.GetStatistics = api3.GetStatistics;
                 state->api.Destroy = api3.Destroy;
             }
-            if (info.multiplier == 4 && !getApi3)
+            const auto getApi4 = reinterpret_cast<VDXRFG_GetApiV4Fn>(GetProcAddress(state->module, "VDXRFG_GetApiV4"));
+            if (getApi4) {
+                auto& api4 = state->api4;
+                api4.struct_size = sizeof(api4);
+                api4.api_version = VDXRFG_API_VERSION_4;
+                hr = getApi4(&api4);
+                if (FAILED(hr) || api4.struct_size != sizeof(api4) || api4.api_version != VDXRFG_API_VERSION_4 ||
+                    api4.max_multiplier < info.multiplier || !api4.Create || !api4.Submit || !api4.Retire ||
+                    !api4.Reset || !api4.GetStatistics || !api4.Destroy || !api4.GetOutputReadiness)
+                    return VDXRFG_E_REJECTED;
+                // Normalize the V3-payload dispatch. V4's extra query stays
+                // separate; every legacy full-ticket fence keeps its meaning.
+                api3 = {sizeof(api3),
+                        VDXRFG_API_VERSION_3,
+                        api4.supported_create_flags,
+                        api4.max_multiplier,
+                        api4.Create,
+                        api4.Submit,
+                        api4.Retire,
+                        api4.Reset,
+                        api4.GetStatistics,
+                        api4.Destroy};
+                state->api.Retire = api4.Retire;
+                state->api.Reset = api4.Reset;
+                state->api.GetStatistics = api4.GetStatistics;
+                state->api.Destroy = api4.Destroy;
+            }
+            const bool extended = getApi3 || getApi4;
+            if (info.multiplier == 4 && !extended)
                 return VDXRFG_E_REJECTED;
-            const uint32_t supportedFlags = getApi3 ? api3.supported_create_flags : api2.supported_create_flags;
+            const uint32_t supportedFlags = extended ? api3.supported_create_flags : api2.supported_create_flags;
             uint32_t createFlags = supportedFlags & (VDXRFG_CREATE_HOST_OWNS_REAL |
                                                      (info.enableGpuTiming ? VDXRFG_CREATE_GPU_TIMING : 0u));
             if (info.useFidelityFxFull)
                 createFlags |= VDXRFG_CREATE_FIDELITYFX_FULL;
-            if (getApi3 && (createFlags & VDXRFG_CREATE_HOST_OWNS_REAL) &&
+            if (extended && (createFlags & VDXRFG_CREATE_HOST_OWNS_REAL) &&
                 (supportedFlags & VDXRFG_CREATE_OMIT_REAL_OUTPUTS))
                 createFlags |= VDXRFG_CREATE_OMIT_REAL_OUTPUTS;
             state->hostOwnsReal = (createFlags & VDXRFG_CREATE_HOST_OWNS_REAL) != 0;
@@ -406,7 +438,7 @@ namespace virtualdesktop_openxr {
             if (FAILED(hr)) {
                 return hr;
             }
-            if (getApi3) {
+            if (extended) {
                 hr = api3.Create(&create, &state->context);
             } else {
                 VDXRFG_CreateInfoV1 legacy{};
@@ -667,6 +699,41 @@ namespace virtualdesktop_openxr {
                 return VDXRFG_E_POISONED;
             }
         }
+        if (state.api4.GetOutputReadiness) {
+            for (const unsigned role : {0u, 1u, 3u}) {
+                if (!(transaction.ticket.role_mask & (1u << role)))
+                    continue;
+                VDXRFG_OutputReadinessV4 output{sizeof(output), VDXRFG_API_VERSION_4, nullptr, 0};
+                hr = state.api4.GetOutputReadiness(state.context, transaction.ticket.token, role, &output);
+                if (FAILED(hr) || output.struct_size != sizeof(output) || output.api_version != VDXRFG_API_VERSION_4 ||
+                    !output.fence || !output.value) {
+                    state.poisoned = state.hostCompletionUnknown = true;
+                    return VDXRFG_E_POISONED;
+                }
+                if (output.fence == transaction.ticket.output_ready_fence) {
+                    if (output.value == transaction.ticket.output_ready_value)
+                        continue;
+                } else if (role == 0) {
+                    const auto fence = static_cast<ID3D12Fence*>(output.fence);
+                    if (!state.firstReady11) {
+                        hr = importFence(state.device12.Get(), state.device11.Get(), fence, &state.firstReady11);
+                        if (FAILED(hr)) {
+                            state.poisoned = state.hostCompletionUnknown = true;
+                            return VDXRFG_E_POISONED;
+                        }
+                        state.firstReady12 = fence;
+                    }
+                    if (state.firstReady12.Get() == fence) {
+                        state.firstReadyValues[transaction.ticket.bank] = output.value;
+                        continue;
+                    }
+                }
+                // Later roles must use the authoritative full completion.
+                // Reject a broken negotiation while retaining all owned work.
+                state.poisoned = state.hostCompletionUnknown = true;
+                return VDXRFG_E_POISONED;
+            }
+        }
         state.inputOwnerToken = transaction.ticket.token;
         state.inputOwnerGeneration = transaction.ticket.generation;
         return S_OK;
@@ -684,7 +751,8 @@ namespace virtualdesktop_openxr {
     }
 
     HRESULT FrameGeneration::prepareOutputReadyWait(const OwnedFrameTransaction& transaction,
-                                                    HANDLE& completionEvent) noexcept {
+                                                    HANDLE& completionEvent,
+                                                    FrameGenerationRole role) noexcept {
         completionEvent = nullptr;
         if (!m_state || !transaction.ticket.token || transaction.ticket.bank >= 2 ||
             transaction.ownerGeneration != m_state->generation ||
@@ -696,24 +764,31 @@ namespace virtualdesktop_openxr {
             return VDXRFG_E_POISONED;
         }
         const auto& ticket = state.tickets[transaction.ticket.bank];
-        if (!state.ready11 || !ticket.output_ready_fence || !ticket.output_ready_value) {
+        const auto index = static_cast<unsigned>(role);
+        if (index >= 4 || (role != FrameGenerationRole::real && !(ticket.role_mask & (1u << index))))
+            return VDXRFG_E_REJECTED;
+        const bool first = role == FrameGenerationRole::synthetic1 && state.firstReadyValues[ticket.bank] != 0;
+        const auto fence = first ? state.firstReady11.Get() : state.ready11.Get();
+        const auto value = first ? state.firstReadyValues[ticket.bank] : ticket.output_ready_value;
+        if (!fence || !ticket.output_ready_fence || !value) {
             return VDXRFG_E_REJECTED;
         }
-        const auto completed = state.ready11->GetCompletedValue();
+        const auto completed = fence->GetCompletedValue();
         if (completed == UINT64_MAX) {
             state.poisoned = state.hostCompletionUnknown = true;
             return VDXRFG_E_POISONED;
         }
-        if (completed >= ticket.output_ready_value) {
+        if (completed >= value) {
             return S_OK;
         }
-        auto& registered = state.registeredReadyValues[transaction.ticket.bank];
-        if (registered != ticket.output_ready_value) {
-            const auto hr = state.ready11->SetEventOnCompletion(ticket.output_ready_value, state.readyCompletionEvent);
+        auto& registered =
+            first ? state.registeredFirstReadyValues[ticket.bank] : state.registeredReadyValues[ticket.bank];
+        if (registered != value) {
+            const auto hr = fence->SetEventOnCompletion(value, state.readyCompletionEvent);
             if (FAILED(hr)) {
                 return hr;
             }
-            registered = ticket.output_ready_value;
+            registered = value;
         }
         // A timeout keeps the kernel registration live. Never reset or close
         // this event here: an older target may still signal it after a timeout.
@@ -772,15 +847,30 @@ namespace virtualdesktop_openxr {
             }
         }
         HRESULT hr = S_OK;
-        if (role != FrameGenerationRole::real && !state.roleConsumerValues[ticket.bank][0] &&
-            !state.roleConsumerValues[ticket.bank][1]) {
-            // One queued wait orders both synthetic copies on this context.
-            // Only this live ticket's prepared synthetic roles prove it exists.
-            hr = state.context11->Wait(state.ready11.Get(), ticket.output_ready_value);
+        bool early = role == FrameGenerationRole::synthetic1 && state.firstReadyValues[ticket.bank] != 0;
+        if (early) {
+            const auto completed = state.ready11->GetCompletedValue();
+            if (completed == UINT64_MAX) {
+                state.poisoned = state.hostCompletionUnknown = true;
+                return VDXRFG_E_POISONED;
+            }
+            // A completed whole batch needs just the existing shared wait;
+            // do not add a separate early wait when it cannot buy time.
+            early = completed < ticket.output_ready_value;
+        }
+        if (role != FrameGenerationRole::real && !state.queuedFullReadyWait[ticket.bank] &&
+            (!early || !state.queuedFirstReadyWait[ticket.bank])) {
+            const auto fence = early ? state.firstReady11.Get() : state.ready11.Get();
+            const auto value = early ? state.firstReadyValues[ticket.bank] : ticket.output_ready_value;
+            hr = state.context11->Wait(fence, value);
             if (FAILED(hr)) {
                 state.poisoned = state.hostCompletionUnknown = true;
                 return VDXRFG_E_POISONED;
             }
+            if (early)
+                state.queuedFirstReadyWait[ticket.bank] = true;
+            else
+                state.queuedFullReadyWait[ticket.bank] = true;
         }
         transaction.destinations[index] = destination;
         state.retainedDestinations[transaction.ticket.bank][index] = destination;
@@ -916,6 +1006,10 @@ namespace virtualdesktop_openxr {
             m_state->roleConsumerValues[transaction.ticket.bank] = {};
             m_state->registeredCopyValues[transaction.ticket.bank] = {};
             m_state->registeredReadyValues[transaction.ticket.bank] = 0;
+            m_state->registeredFirstReadyValues[transaction.ticket.bank] = 0;
+            m_state->firstReadyValues[transaction.ticket.bank] = 0;
+            m_state->queuedFirstReadyWait[transaction.ticket.bank] = false;
+            m_state->queuedFullReadyWait[transaction.ticket.bank] = false;
             m_state->tickets[transaction.ticket.bank] = {};
             m_state->retainedDestinations[transaction.ticket.bank] = {};
             m_state->capturedSources[transaction.ticket.bank] = {};

@@ -11,6 +11,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from fg_early_readiness import prepare_early_readiness
+
 
 def prepare_history(source: Path, output: Path) -> None:
     """Capture a stereo atlas into the existing owned history slots."""
@@ -945,6 +947,7 @@ def prepare(source: Path, output: Path) -> None:
     modified = prepare_synthetic_atlas_output(output, modified)
     modified = prepare_shared_nvidia_3x(output, modified)
     modified = prepare_four_frame_outputs(output, modified)
+    modified = prepare_early_readiness(output, modified)
     modified = prepare_linear_clamp_root(modified)
     (output / path.name).write_text(modified, encoding="utf-8")
     (output / "initialization-ownership.patch").write_text("".join(difflib.unified_diff(

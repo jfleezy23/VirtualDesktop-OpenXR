@@ -476,10 +476,24 @@ namespace virtualdesktop_openxr {
                 // context.
             }
 
+            const bool traceContextLease = m_frameGenerationMode && IsTraceEnabled();
+            const auto leaseSerial = m_frameBegun;
+            const double leaseEnter = traceContextLease ? ovr_GetTimeInSeconds() : 0.;
             std::unique_lock contextLease(m_fgContextMutex, std::defer_lock);
             if (m_frameGenerationMode) {
                 contextLease.lock();
             }
+            const double leaseAcquired = traceContextLease ? ovr_GetTimeInSeconds() : 0.;
+            auto contextTiming = MakeScopeGuard([&] {
+                if (traceContextLease) {
+                    TraceLoggingWrite(g_traceProvider,
+                                      "FG_ProducerContext",
+                                      TLArg(leaseSerial, "Serial"),
+                                      TLArg(leaseEnter, "LeaseEnter"),
+                                      TLArg(leaseAcquired, "LeaseAcquired"),
+                                      TLArg(ovr_GetTimeInSeconds(), "LeaseLeaving"));
+                }
+            });
 
             // Serializes the app work between D3D12/Vulkan and D3D11.
             if (isD3D12Session()) {
