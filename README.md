@@ -1,11 +1,15 @@
-# VirtualDesktop-OpenXR — NR and frame generation
+# VirtualDesktop-OpenXR — NR and OFXR 4× frame generation
 
 An independent Windows runtime fork maintained by [jfleezy23](https://github.com/jfleezy23), built on
 [VirtualDesktop-OpenXR](https://github.com/mbucchia/VirtualDesktop-OpenXR). Run compatible OpenXR games through
 Virtual Desktop with optional neural rendering (NR), **OFXR 2×/3×/4× PC frame generation**, and automatic
 settings profiles for individual game executables.
 
-**[Download the earlier-handoff NR/FG release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.27.1)** ·
+**4× is included in the current release.** OFXR can add up to three generated frames between real frames,
+with NR on or off. Select **OFXR 4×** in Controls, turn VD's **SSW Off**, and restart the game.
+Generation depends on timing and eligibility; 4× does not guarantee a fourfold game-FPS increase.
+
+**[Download NR + OFXR 4× for Windows](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.27.1)** ·
 [Install and try it](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.27.1/docs/NR-FG-QUICKSTART.md) ·
 [Controls guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.27.1/docs/NR-FG-CONTROLS.md) ·
 [Game routing help](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.27.1/docs/GAME-COMPATIBILITY.md)
