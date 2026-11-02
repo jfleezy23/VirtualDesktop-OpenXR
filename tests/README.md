@@ -62,6 +62,19 @@ Run fixtures in separate bounded child processes. Require successful completion,
 
 ## Upstream contract regressions
 
+`nr_fg_early_dispatch_regression` checks the actual `xrEndFrame` ordering with software D3D11/D3D12 devices.
+It covers 96 cases across 2X/3X/4X, NR enabled/disabled, error/cancellation, and excluded API/device paths.
+While producer admission is closed, only an eligible D3D11 application's context may flush; submission operations,
+fence counters and precomposition must remain untouched. Both frame and context locks must remain available, and
+error/cancellation must exit without publishing a frame. A bounded cleanup rescue cannot turn a timeout into a pass.
+
+Build it with `build-fg-runtime-fixtures.py` against a fresh private runtime cohort, then run
+`<cohort>/tests/nr_fg_early_dispatch_regression.exe <OVRNull-directory>` in a bounded process.
+The builder compiles `context_method_addresses.cpp` separately to obtain the native C-interface method addresses;
+its object and source are included in the fixture receipts. Add `controls` as a third argument to run only the
+84 exclusion controls against an unpatched reference. The complete regression must fail on that reference at the
+missing early application-dispatch assertion. This test does not need the NR model or a headset and does not measure FPS.
+
 The experimental NR/FG integration suite also includes `nr_intermediate_commit_regression.cpp`.
 Build it with the same matching runtime objects as `nr_fg_runtime_regression.cpp` before running
 `run-fg-regressions.py --suite integration` or `--suite all`. Its eight modes enforce a bounded native
