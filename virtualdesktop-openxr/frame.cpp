@@ -461,19 +461,49 @@ namespace virtualdesktop_openxr {
                 m_gpuTimerApp[m_currentTimerIndex]->stop();
             }
 
+            const bool traceDispatch = m_useAsyncSubmission && m_frameGenerationMode && IsTraceEnabled();
+            const bool earlyDispatchEligible = !m_isHeadless && m_useAsyncSubmission && m_frameGenerationMode &&
+                                               !isD3D12Session() && m_d3d11Device && m_d3d11Context &&
+                                               m_d3d11Device != m_ovrSubmissionDevice;
+            double dispatchEnter{}, dispatchReturn{}, capacityEnter{}, capacityReturn{};
+            bool appFlushed{};
+            if (earlyDispatchEligible) {
+                dispatchEnter = traceDispatch ? ovr_GetTimeInSeconds() : 0.;
+                // Dispatch only the application's buffered work before waiting.
+                // Keep the later cross-device Signal/Wait and submission ordering.
+                m_d3d11Context->Flush();
+                appFlushed = true;
+                dispatchReturn = traceDispatch ? ovr_GetTimeInSeconds() : 0.;
+            }
+
             // Make sure the previous frame finished submission.
             if (m_useAsyncSubmission) {
                 // Polling and exit requests must still progress while the backend is waiting.
                 lock2.unlock();
+                capacityEnter = traceDispatch ? ovr_GetTimeInSeconds() : 0.;
                 if (m_frameGenerationMode) {
                     waitForFrameGenerationCapacity();
                 } else {
                     waitForAsyncSubmissionIdle();
                 }
+                capacityReturn = traceDispatch ? ovr_GetTimeInSeconds() : 0.;
                 lock2.lock();
 
                 // From this point, we know that the asynchronous thread is waiting, and we may use the submission
                 // context.
+            }
+
+            if (traceDispatch) {
+                TraceLoggingWrite(g_traceProvider,
+                                  "FG_AppDispatch",
+                                  TLArg(m_frameBegun, "Serial"),
+                                  TLArg(earlyDispatchEligible, "Eligible"),
+                                  TLArg(appFlushed, "FlushIssued"),
+                                  TLArg(isD3D12Session(), "D3D12"),
+                                  TLArg(dispatchEnter, "FlushEnter"),
+                                  TLArg(dispatchReturn, "FlushReturn"),
+                                  TLArg(capacityEnter, "CapacityEnter"),
+                                  TLArg(capacityReturn, "CapacityReturn"));
             }
 
             const bool traceContextLease = m_frameGenerationMode && IsTraceEnabled();
