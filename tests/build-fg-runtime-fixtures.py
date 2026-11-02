@@ -74,7 +74,15 @@ for source in args.sources:
         flags += ['/fsanitize=address', '/Zi', '/Fd' + str(out / (name + '-compile.pdb'))]
     flags += ['/I' + str(repo / item) for item in includes] + ['/I' + str(objects), str(source_path), '/Fo' + str(test_object)]
     response(out / (name + '-cl.rsp'), flags)
-    link_args = ['/nologo', '/SUBSYSTEM:CONSOLE', '/DEBUG', '/OUT:' + str(out / (name + '.exe')), str(test_object)]
+    extra_objects = []
+    helper_commands = ''
+    if name == 'nr_fg_early_dispatch_regression':
+        helper_object = out / (name + '-context-methods.obj')
+        helper_response = out / (name + '-context-methods-cl.rsp')
+        response(helper_response, flags[:-2] + [str(repo / 'tests/context_method_addresses.cpp'), '/Fo' + str(helper_object)])
+        extra_objects.append(helper_object)
+        helper_commands = 'cl.exe @"' + str(helper_response) + '"\nif errorlevel 1 exit /b %errorlevel%\n'
+    link_args = ['/nologo', '/SUBSYSTEM:CONSOLE', '/DEBUG', '/OUT:' + str(out / (name + '.exe')), str(test_object), *map(str, extra_objects)]
     if not asan:
         link_args += ['/LTCG']
     # Command-context fixture is intentionally header-only; others use all matched runtime objects.
@@ -85,7 +93,7 @@ for source in args.sources:
     response(out / (name + '-link.rsp'), link_args)
     batch = out / (name + '-build.cmd')
     batch.write_text('@echo off\ncall "' + str(vcvars) + '" -vcvars_ver=' + version + ' 10.0.26100.0 >nul\n'
-                     'if errorlevel 1 exit /b %errorlevel%\ncl.exe @"' + str(out / (name + '-cl.rsp')) + '"\n'
+                     'if errorlevel 1 exit /b %errorlevel%\n' + helper_commands + 'cl.exe @"' + str(out / (name + '-cl.rsp')) + '"\n'
                      'if errorlevel 1 exit /b %errorlevel%\nlink.exe @"' + str(out / (name + '-link.rsp')) + '"\n'
                      'exit /b %errorlevel%\n', encoding='utf-8')
     started = time.monotonic()
@@ -97,10 +105,11 @@ for source in args.sources:
     if result.returncode:
         print((out / (name + '-build.log')).read_text(errors='replace')[-6000:], flush=True)
         raise SystemExit(result.returncode)
-    provenance.write_receipt(out / (name + '-source.json'), repo, 'fixture', before_sources, [out / (name + '.exe'), test_object])
+    provenance.write_receipt(out / (name + '-source.json'), repo, 'fixture', before_sources, [out / (name + '.exe'), test_object, *extra_objects])
     manifest = {'source_sha256': hashlib.sha256(source_path.read_bytes()).hexdigest(), 'compiler': version,
                 'cohort': str(cohort), 'exe_sha256': hashlib.sha256((out / (name + '.exe')).read_bytes()).hexdigest(),
                 'runtime_objects': {} if header_only else {item.name: hashlib.sha256(item.read_bytes()).hexdigest() for item in objects.glob('*.obj')},
+                'helper_objects': {item.name: hashlib.sha256(item.read_bytes()).hexdigest() for item in extra_objects},
                 'seconds': time.monotonic() - started}
     (out / (name + '-provenance.json')).write_text(json.dumps(manifest, indent=2))
     print('BUILT ' + str(cohort) + '/' + name + ' in ' + str(round(manifest['seconds'], 2)) + 's', flush=True)

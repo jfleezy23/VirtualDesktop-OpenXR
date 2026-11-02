@@ -172,6 +172,7 @@ def main():
             cases.append((name, [str(binary), *map(str, arguments)], clock))
 
         if args.suite in {"integration", "all"}:
+            runtime_case("early-app-dispatch", "nr_fg_early_dispatch_regression", backend)
             runtime_case("cpu-query-allocations", "nonnr_input_regression", "query-allocations")
             runtime_case("cpu-resolve-allocations", "nonnr_copy_preprocess_regression", "allocations", backend)
             for scenario in ("native", "upscaled", "sharpen", "discard", "nr-toggle", "bgra", "bgra-srgb", "bgra-4", "bgra-srgb-4", "bgra-discard-4", "bgra-publication-4", "bgra-profile-4", "bgra-srgb-jitter", "nr-off-reset-busy", "nr-off-capture-busy"):
