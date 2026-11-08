@@ -21,9 +21,11 @@
 // SOFTWARE.
 
 #include "pch.h"
+#include "PairCaptureNrReturnGuard.h"
 
 #include <array>
 
+#include "depth_projection.h"
 #include "log.h"
 #include "runtime.h"
 #include "utils.h"
@@ -160,8 +162,8 @@ namespace virtualdesktop_openxr {
                 desc.SampleCount = 1;
                 desc.Format = OVR_FORMAT_B8G8R8A8_UNORM;
 
-                CHECK_OVRCMD(ovr_CreateTextureSwapChainDX(
-                    m_ovrSession, m_ovrSubmissionDevice.Get(), &desc, &m_headlessSwapchain));
+                CHECK_OVRCMD(
+                    createSubmissionSwapchain(m_ovrSession, m_ovrSubmissionDevice.Get(), &desc, &m_headlessSwapchain));
             }
 
             if (m_needStartAsyncSubmissionThread) {
@@ -192,7 +194,7 @@ namespace virtualdesktop_openxr {
                 TraceLocalActivity(waitToBeginFrame);
                 TraceLoggingWriteStart(waitToBeginFrame, "OVR_WaitToBeginFrame", TLArg(ovrFrameId, "FrameId"));
                 lock.unlock();
-                CHECK_OVRCMD(ovr_WaitToBeginFrame(m_ovrSession, ovrFrameId));
+                CHECK_OVRCMD(waitToBeginSubmissionFrame(m_ovrSession, ovrFrameId));
                 lock.lock();
                 TraceLoggingWriteStop(waitToBeginFrame, "OVR_WaitToBeginFrame");
             } else {
@@ -257,7 +259,7 @@ namespace virtualdesktop_openxr {
             frameState->predictedDisplayPeriod =
                 (XrDuration)(m_frameGenerationMode && m_fgWaitedReservation.valid
                                  ? m_fgWaitedReservation.period * m_fgWaitedReservation.multiplier
-                                 : m_predictedFrameDuration * 1e9);
+                                 : (m_frameGenerationMode ? m_idealFrameDuration : m_predictedFrameDuration) * 1e9);
 
             m_frameTimerApp.start();
 
@@ -331,7 +333,7 @@ namespace virtualdesktop_openxr {
             if (!m_useAsyncSubmission) {
                 TraceLocalActivity(beginFrame);
                 TraceLoggingWriteStart(beginFrame, "OVR_BeginFrame", TLArg(ovrFrameId, "FrameId"));
-                CHECK_OVRCMD(ovr_BeginFrame(m_ovrSession, ovrFrameId));
+                CHECK_OVRCMD(beginSubmissionFrame(m_ovrSession, ovrFrameId));
                 TraceLoggingWriteStop(beginFrame, "OVR_BeginFrame");
             }
 
@@ -393,18 +395,25 @@ namespace virtualdesktop_openxr {
                               TLArg(m_frameCompleted, "FrameCompleted"));
             m_frameCondVar.notify_all();
 
-            bool isAsyncReprojectionActive = false;
-            ovrPerfStats stats{};
-            if (OVR_SUCCESS(ovr_GetPerfStats(m_ovrSession, &stats))) {
-                isAsyncReprojectionActive = stats.FrameStatsCount > 0 && stats.FrameStats[0].AswIsActive;
-                TraceLoggingWrite(
-                    g_traceProvider, "OVR_AswStatus", TLArg(isAsyncReprojectionActive, "AsyncReprojectionActive"));
-            }
-
-            if (isAsyncReprojectionActive) {
-                m_predictedFrameDuration = m_idealFrameDuration * 2.f;
-            } else {
+            if (m_frameGenerationMode) {
+                // OFXR 2x/3x/4x is used with headset ASW/SSW off. Its valid
+                // reservations supply their own period; fallback is native.
                 m_predictedFrameDuration = m_idealFrameDuration;
+            } else {
+                bool isAsyncReprojectionActive = false;
+                ovrPerfStats stats{};
+                if (OVR_SUCCESS(
+                        nativeRenderingCall([&] { return ovr_GetPerfStats(m_ovrSession, &stats); }, "PerfStats"))) {
+                    isAsyncReprojectionActive = stats.FrameStatsCount > 0 && stats.FrameStats[0].AswIsActive;
+                    TraceLoggingWrite(
+                        g_traceProvider, "OVR_AswStatus", TLArg(isAsyncReprojectionActive, "AsyncReprojectionActive"));
+                }
+
+                if (isAsyncReprojectionActive) {
+                    m_predictedFrameDuration = m_idealFrameDuration * 2.f;
+                } else {
+                    m_predictedFrameDuration = m_idealFrameDuration;
+                }
             }
         }
 
@@ -416,6 +425,18 @@ namespace virtualdesktop_openxr {
         if (frameEndInfo->type != XR_TYPE_FRAME_END_INFO) {
             return XR_ERROR_VALIDATION_FAILURE;
         }
+        if (m_frameGeneration && m_frameGeneration->diagnosticEntryEnabled())
+            vdxrfg::pair_capture::entry(0, frameEndInfo->displayTime);
+        else
+            vdxrfg::pair_capture::currentEntry = {};
+        auto pairFrameExit = MakeScopeGuard([&] {
+            if (m_frameGeneration)
+                m_frameGeneration->diagnostic("xrEndFrame-selected-exit",
+                                              vdxrfg::pair_capture::currentEntry.serial,
+                                              reinterpret_cast<void*>(session),
+                                              nullptr,
+                                              static_cast<uint64_t>(frameEndInfo->displayTime));
+        });
 
         TraceLoggingWrite(g_traceProvider,
                           "xrEndFrame",
@@ -452,9 +473,15 @@ namespace virtualdesktop_openxr {
             std::unique_lock lock1(m_swapchainsMutex);
             std::unique_lock lock2(m_frameMutex);
 
+            if (vdxrfg::pair_capture::currentEntry.count)
+                vdxrfg::pair_capture::currentEntry.serial = m_frameBegun;
+
             if (m_frameBegun == m_frameCompleted) {
                 return XR_ERROR_CALL_ORDER_INVALID;
             }
+
+            CHECK_MSG(!m_fgDepthCompletionUnknown, "FG depth completion unknown; refusing frame processing");
+            CHECK_MSG(!m_fgTransactionForFrame.ticket.token, "Unpublished FG transaction; refusing frame processing");
 
             m_renderTimerApp.stop();
             if (m_gpuTimerApp[m_currentTimerIndex]) {
@@ -463,14 +490,19 @@ namespace virtualdesktop_openxr {
 
             const bool traceDispatch = m_useAsyncSubmission && m_frameGenerationMode && IsTraceEnabled();
             const bool earlyDispatchEligible = !m_isHeadless && m_useAsyncSubmission && m_frameGenerationMode &&
-                                               !isD3D12Session() && m_d3d11Device && m_d3d11Context &&
+                                               !isD3D12Session() && !isVulkanSession() && !isOpenGLSession() &&
+                                               m_d3d11Device && m_d3d11Context &&
                                                m_d3d11Device != m_ovrSubmissionDevice;
             double dispatchEnter{}, dispatchReturn{}, capacityEnter{}, capacityReturn{};
             bool appFlushed{};
+            uint64_t earlyAppFence{};
             if (earlyDispatchEligible) {
+                // Include this frame's completion signal in its early dispatch.
+                // The later submission-device wait still uses this exact value.
+                ++m_fenceValue;
+                CHECK_HRCMD(m_d3d11Context->Signal(m_d3d11Fence.Get(), m_fenceValue));
+                earlyAppFence = m_fenceValue;
                 dispatchEnter = traceDispatch ? ovr_GetTimeInSeconds() : 0.;
-                // Dispatch only the application's buffered work before waiting.
-                // Keep the later cross-device Signal/Wait and submission ordering.
                 m_d3d11Context->Flush();
                 appFlushed = true;
                 dispatchReturn = traceDispatch ? ovr_GetTimeInSeconds() : 0.;
@@ -499,6 +531,7 @@ namespace virtualdesktop_openxr {
                                   TLArg(m_frameBegun, "Serial"),
                                   TLArg(earlyDispatchEligible, "Eligible"),
                                   TLArg(appFlushed, "FlushIssued"),
+                                  TLArg(earlyAppFence, "EarlyAppFence"),
                                   TLArg(isD3D12Session(), "D3D12"),
                                   TLArg(dispatchEnter, "FlushEnter"),
                                   TLArg(dispatchReturn, "FlushReturn"),
@@ -511,10 +544,20 @@ namespace virtualdesktop_openxr {
             const double leaseEnter = traceContextLease ? ovr_GetTimeInSeconds() : 0.;
             std::unique_lock contextLease(m_fgContextMutex, std::defer_lock);
             if (m_frameGenerationMode) {
-                contextLease.lock();
+                lockFrameGenerationProducerContext(contextLease);
             }
             const double leaseAcquired = traceContextLease ? ovr_GetTimeInSeconds() : 0.;
+            vdxrfg::pair_capture::lease(m_ovrSubmissionDevice.Get(), m_ovrSubmissionContext.Get());
+            if (m_frameGeneration)
+                m_frameGeneration->diagnostic(
+                    "producer-lease-begin", m_frameBegun, m_ovrSubmissionContext.Get(), m_ovrSubmissionDevice.Get(), 0);
             auto contextTiming = MakeScopeGuard([&] {
+                if (m_frameGeneration)
+                    m_frameGeneration->diagnostic("producer-lease-end",
+                                                  leaseSerial,
+                                                  m_ovrSubmissionContext.Get(),
+                                                  m_ovrSubmissionDevice.Get(),
+                                                  0);
                 if (traceContextLease) {
                     TraceLoggingWrite(g_traceProvider,
                                       "FG_ProducerContext",
@@ -525,15 +568,31 @@ namespace virtualdesktop_openxr {
                 }
             });
 
+            if (m_deliveryTransport) {
+                bool quiescent{};
+                {
+                    std::unique_lock lock(m_asyncSubmissionMutex);
+                    quiescent = !m_fgActiveSubmission && m_layersForAsyncSubmission.empty();
+                }
+                // Do this before queuing the new input dependency. Older ready
+                // groups must never wait for this producer's unready S work.
+                if (quiescent)
+                    m_deliveryTransport->collectRetired();
+            }
             // Serializes the app work between D3D12/Vulkan and D3D11.
             if (isD3D12Session()) {
-                serializeD3D12Frame();
+                serializeD3D12Frame(&contextLease);
             } else if (isVulkanSession()) {
                 serializeVulkanFrame();
             } else if (isOpenGLSession()) {
                 serializeOpenGLFrame();
             } else if (!m_isHeadless) {
-                serializeD3D11Frame();
+                serializeD3D11Frame(&contextLease, earlyAppFence);
+            }
+
+            if (m_deliveryTransport) {
+                // P's source reads finish before any later S or NR writer.
+                m_deliveryTransport->orderProducerAfterNativeReads();
             }
 
             // Ensure that we always restore the application device context if needed.
@@ -557,6 +616,11 @@ namespace virtualdesktop_openxr {
             m_precompositor.pendingSwapchainCommits.clear();
             m_precompositor.pendingCommitSnapshot.clear();
             m_precompositor.finalColour = {};
+            m_precompositor.finalDepth = {};
+            m_precompositor.originalFgDepth = {};
+            m_precompositor.pendingDepthCommits = {};
+            m_fgDepthSnapshotForFrame = false;
+            m_deliveryForFrame = {};
             m_precompositor.pendingColourCommits = {};
             m_precompositor.sharpenFactor = m_sharpenFactor.load(std::memory_order_relaxed);
             {
@@ -564,6 +628,11 @@ namespace virtualdesktop_openxr {
                 std::unique_lock lock(m_dlssnrSettingsMutex);
                 m_precompositor.dlssnrSettings = m_dlssnrSettings;
             }
+
+            // Private diagnostic scope: covers every later return/throw. It is
+            // armed only after complete preflight and owned source acquisition.
+            nr_capture::SourceReturnGuard nrSourceReturnGuard;
+            observePrivateNrRawFrame(*frameEndInfo);
 
             // Construct the list of layers.
             auto& layersAllocator = m_layersForFrame;
@@ -595,7 +664,7 @@ namespace virtualdesktop_openxr {
                     const XrCompositionLayerProjection* proj =
                         reinterpret_cast<const XrCompositionLayerProjection*>(frameEndInfo->layers[i]);
 
-                    const XrResult result = handleProjectionLayer(*proj, layer);
+                    const XrResult result = handleProjectionLayer(*proj, layer, &contextLease);
                     if (XR_FAILED(result)) {
                         return result;
                     }
@@ -670,15 +739,22 @@ namespace virtualdesktop_openxr {
                     // that no End references. Fallback still commits every
                     // final color chain before publishing the full layers.
                     if (submitted(chain)) {
-                        CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, chain));
+                        CHECK_OVRCMD(commitSubmissionSwapchain(m_ovrSession, chain));
+                    }
+                }
+                for (auto chain : m_precompositor.pendingDepthCommits) {
+                    if (chain && submitted(chain)) {
+                        CHECK_OVRCMD(commitSubmissionSwapchain(m_ovrSession, chain));
                     }
                 }
             }
-            if (m_frameGenerationMode) {
+            if (m_deliveryTransport && !captured)
+                m_deliveryForFrame = prepareDeliveryLayers(layersAllocator, m_frameBegun);
+            if (m_frameGenerationMode || m_deliveryTransport) {
                 // Fallback also reads newly private ordinary source images.
                 // Protect application reuse whether FG accepted this input or
                 // submitted the complete original layers instead.
-                protectFrameGenerationSources();
+                protectFrameGenerationSources(!captured);
             }
 
             // Dirty belongs to the whole source. A deferred direct static
@@ -704,11 +780,17 @@ namespace virtualdesktop_openxr {
                 m_gpuTimerPrecomposition[m_currentTimerIndex]->stop();
             }
 
-            // Update the FPS counter.
-            const auto now = ovr_GetTimeInSeconds();
-            m_frameTimes.push_back(now);
-            while (now - m_frameTimes.front() >= 1.0) {
-                m_frameTimes.pop_front();
+            // FPS samples feed only tracing and the optional mirror title.
+            // A created mirror can remain visible after its setting is disabled.
+            if (IsTraceEnabled() || m_useMirrorWindow.load(std::memory_order_relaxed) ||
+                m_mirrorWindowThread.joinable()) {
+                const auto now = ovr_GetTimeInSeconds();
+                m_frameTimes.push_back(now);
+                while (now - m_frameTimes.front() >= 1.0) {
+                    m_frameTimes.pop_front();
+                }
+            } else {
+                m_frameTimes.clear();
             }
 
             // Inform Virtual Desktop of the measured application GPU work duration.
@@ -720,6 +802,8 @@ namespace virtualdesktop_openxr {
             // Submit the layers to OVR.
             const long long ovrFrameId = m_frameBegun - 1;
             if (!m_useAsyncSubmission) {
+                if (m_deliveryTransport)
+                    m_deliveryTransport->execute(m_deliveryForFrame);
                 std::array<ovrLayerHeader*, ovrMaxLayerCount> layers{};
                 unsigned int layerCount = 0;
                 for (auto& layer : layersAllocator) {
@@ -744,7 +828,7 @@ namespace virtualdesktop_openxr {
                 scaleDesc.HmdToEyePose[xr::StereoView::Left] = m_cachedEyeInfo[xr::StereoView::Left].HmdToEyePose;
                 scaleDesc.HmdToEyePose[xr::StereoView::Right] = m_cachedEyeInfo[xr::StereoView::Right].HmdToEyePose;
                 scaleDesc.HmdSpaceToWorldScaleInMeters = 1.f;
-                CHECK_OVRCMD(ovr_EndFrame(m_ovrSession, ovrFrameId, &scaleDesc, layers.data(), layerCount));
+                CHECK_OVRCMD(endSubmissionFrame(m_ovrSession, ovrFrameId, &scaleDesc, layers.data(), layerCount));
                 TraceLoggingWriteStop(endFrame, "OVR_EndFrame");
             }
 
@@ -779,8 +863,14 @@ namespace virtualdesktop_openxr {
                 }
                 if (m_frameGenerationMode) {
                     CHECK_MSG(!m_terminateAsyncThread, "Frame-generation submission is stopping");
+                    CHECK_MSG(!m_fgDepthCompletionUnknown ||
+                                  (m_deliveryTransport && m_fgTransactionForFrame.ticket.token &&
+                                   m_fgDepthDelivery[m_fgTransactionForFrame.ticket.bank].sourceReady),
+                              "FG depth completion has no transferable owner; refusing publication");
                 }
                 m_layersForAsyncSubmission.swap(layersAllocator);
+                m_deliveryForSubmission = std::move(m_deliveryForFrame);
+                m_deliveryForFrame = {};
                 if (m_frameGenerationMode) {
                     CHECK_MSG(!m_fgTransactionForSubmission.ticket.token, "Unretired frame-generation publication");
                     m_fgTransactionForSubmission = std::move(m_fgTransactionForFrame);
@@ -818,7 +908,9 @@ namespace virtualdesktop_openxr {
         return XR_SUCCESS;
     }
 
-    XrResult OpenXrRuntime::handleProjectionLayer(const XrCompositionLayerProjection& proj, ovrLayer_Union& layer) {
+    XrResult OpenXrRuntime::handleProjectionLayer(const XrCompositionLayerProjection& proj,
+                                                  ovrLayer_Union& layer,
+                                                  std::unique_lock<std::mutex>* producerLease) {
         TraceLoggingWrite(g_traceProvider,
                           "xrEndFrame_Layer",
                           TLArg("Proj", "Type"),
@@ -854,7 +946,9 @@ namespace virtualdesktop_openxr {
 
         const XrSwapchainSubImage* subImages[xr::StereoView::Count] = {};
         const XrSwapchainSubImage* depthSubImages[xr::StereoView::Count] = {};
+        const XrCompositionLayerDepthInfoKHR* depthMetadata[xr::StereoView::Count] = {};
         bool depthInverted[xr::StereoView::Count]{};
+        XrPosef layerPose;
 
         // Start without depth. We might change the type to ovrLayerType_EyeFovDepth further below.
         layer.Header.Type = ovrLayerType_EyeFov;
@@ -931,8 +1025,9 @@ namespace virtualdesktop_openxr {
             }
 
             // Fill out pose and FOV information.
-            XrPosef layerPose;
-            locateSpace(*(Space*)proj.space, *m_originSpace, m_precompositor.displayTime, layerPose);
+            if (viewIndex == 0) {
+                locateSpace(*(Space*)proj.space, *m_originSpace, m_precompositor.displayTime, layerPose);
+            }
             layer.EyeFov.RenderPose[viewIndex] = xrPoseToOvrPose(Pose::Multiply(proj.views[viewIndex].pose, layerPose));
 
             XrFovf fov = proj.views[viewIndex].fov;
@@ -989,6 +1084,52 @@ namespace virtualdesktop_openxr {
                             return XR_ERROR_VALIDATION_FAILURE;
                         }
 
+                        // Preserve the genuine submitted allocation and metadata before
+                        // resolve, NR, upscaling or compositor depth alignment. The
+                        // app-device interfaces may differ; appSwapchain owns the
+                        // identical allocation on our submission device.
+                        if (m_frameGenerationMode && m_precompositor.isFirstProjectionLayer &&
+                            m_frameGenerationDepthMode != 0 && (m_d3d11Context || m_d3d12CommandQueue) &&
+                            size_t(xrDepthSwapchain.lastReleasedIndex) < xrDepthSwapchain.appSwapchain.images.size() &&
+                            !(xrDepthSwapchain.xrDesc.createFlags &
+                              (XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT | XR_SWAPCHAIN_CREATE_PROTECTED_CONTENT_BIT))) {
+                            auto& guide = m_precompositor.originalFgDepth[viewIndex];
+                            guide.source = xrDepthSwapchain.appSwapchain.images[xrDepthSwapchain.lastReleasedIndex];
+                            guide.source->GetDesc(&guide.description);
+                            guide.releasedIndex = static_cast<uint32_t>(xrDepthSwapchain.lastReleasedIndex);
+                            guide.arraySlice = depth->subImage.imageArrayIndex;
+                            const auto copyRect = [](const XrRect2Di& rect) {
+                                return VDXRFG_RectV1{static_cast<uint32_t>(rect.offset.x),
+                                                     static_cast<uint32_t>(rect.offset.y),
+                                                     static_cast<uint32_t>(rect.extent.width),
+                                                     static_cast<uint32_t>(rect.extent.height)};
+                            };
+                            guide.colourRect = copyRect(proj.views[viewIndex].subImage.imageRect);
+                            guide.colourCrop = guide.colourRect;
+                            guide.depthRect = copyRect(depth->subImage.imageRect);
+                            guide.minDepth = depth->minDepth;
+                            guide.maxDepth = depth->maxDepth;
+                            guide.nearZ = depth->nearZ;
+                            guide.farZ = depth->farZ;
+                            const auto& pose = layer.EyeFov.RenderPose[viewIndex];
+                            guide.captureView.position[0] = pose.Position.x;
+                            guide.captureView.position[1] = pose.Position.y;
+                            guide.captureView.position[2] = pose.Position.z;
+                            guide.captureView.orientation[0] = pose.Orientation.x;
+                            guide.captureView.orientation[1] = pose.Orientation.y;
+                            guide.captureView.orientation[2] = pose.Orientation.z;
+                            guide.captureView.orientation[3] = pose.Orientation.w;
+                            guide.captureView.fov[0] = fov.angleLeft;
+                            guide.captureView.fov[1] = fov.angleRight;
+                            guide.captureView.fov[2] = fov.angleUp;
+                            guide.captureView.fov[3] = fov.angleDown;
+                            // Both NR paths restore edits at original raster
+                            // coordinates, including reduced working grids and
+                            // coverage crops. FSR then resizes the complete rect.
+                            // Altered IPD changes the camera rays and is declined.
+                            guide.affineVerified = !m_lastSeenIpd;
+                        }
+
                         // Fill out depth buffer information.
                         resolveSwapchainImage(xrDepthSwapchain,
                                               depth->subImage.imageArrayIndex,
@@ -1003,16 +1144,14 @@ namespace virtualdesktop_openxr {
                         }
 
                         depthSubImages[viewIndex] = &depth->subImage;
+                        depthMetadata[viewIndex] = depth;
 
                         if (needUplifting) {
                             ensureSwapchainDlssnrResources(xrDepthSwapchain, depth->subImage.imageArrayIndex);
                         }
 
                         // Fill out projection information.
-                        layer.EyeFovDepth.ProjectionDesc.Projection22 = depth->farZ / (depth->nearZ - depth->farZ);
-                        layer.EyeFovDepth.ProjectionDesc.Projection23 =
-                            (depth->farZ * depth->nearZ) / (depth->nearZ - depth->farZ);
-                        layer.EyeFovDepth.ProjectionDesc.Projection32 = -1.f;
+                        layer.EyeFovDepth.ProjectionDesc = projectionFromDepthInfo(*depth);
 
                         depthInverted[viewIndex] = depth->nearZ > depth->farZ;
 
@@ -1032,7 +1171,7 @@ namespace virtualdesktop_openxr {
 
         // Run Neural Rendering if needed.
         if (needUplifting) {
-            upliftLayer(subImages, depthSubImages, depthInverted, layer.EyeFov, !needUpscaling);
+            upliftLayer(subImages, depthSubImages, depthInverted, layer.EyeFov, !needUpscaling, producerLease);
         }
 
         // Run the upscaler or sharpening if needed.
@@ -1041,7 +1180,7 @@ namespace virtualdesktop_openxr {
         }
 
         if (layer.Header.Type == ovrLayerType_EyeFovDepth) {
-            alignDepthLayer(subImages, depthSubImages, layer.EyeFovDepth);
+            alignDepthLayer(subImages, depthSubImages, depthMetadata, layer.EyeFovDepth);
         }
 
         return XR_SUCCESS;
@@ -1459,7 +1598,7 @@ namespace virtualdesktop_openxr {
                 {
                     TraceLocalActivity(waitToBeginFrame);
                     TraceLoggingWriteStart(waitToBeginFrame, "OVR_WaitToBeginFrame", TLArg(ovrFrameId, "FrameId"));
-                    const auto result = ovr_WaitToBeginFrame(m_ovrSession, ovrFrameId);
+                    const auto result = waitToBeginSubmissionFrame(m_ovrSession, ovrFrameId);
                     TraceLoggingWriteStop(waitToBeginFrame, "OVR_WaitToBeginFrame", TLArg((int)result, "Result"));
                     if (result == ovrError_Timeout) {
                         ErrorLog(
@@ -1484,7 +1623,7 @@ namespace virtualdesktop_openxr {
                 {
                     TraceLocalActivity(beginFrame);
                     TraceLoggingWriteStart(beginFrame, "OVR_BeginFrame", TLArg(ovrFrameId, "FrameId"));
-                    CHECK_OVRCMD(ovr_BeginFrame(m_ovrSession, ovrFrameId));
+                    CHECK_OVRCMD(beginSubmissionFrame(m_ovrSession, ovrFrameId));
                     TraceLoggingWriteStop(beginFrame, "OVR_BeginFrame");
                 }
 
@@ -1506,6 +1645,10 @@ namespace virtualdesktop_openxr {
                 }
 
                 {
+                    if (m_deliveryTransport) {
+                        m_deliveryTransport->execute(m_deliveryForSubmission);
+                        m_deliveryForSubmission = {};
+                    }
                     std::array<ovrLayerHeader*, ovrMaxLayerCount> layers{};
                     unsigned int layerCount = 0;
                     for (auto& layer : m_layersForAsyncSubmission) {
@@ -1526,7 +1669,7 @@ namespace virtualdesktop_openxr {
                     scaleDesc.HmdToEyePose[xr::StereoView::Left] = m_cachedEyeInfo[xr::StereoView::Left].HmdToEyePose;
                     scaleDesc.HmdToEyePose[xr::StereoView::Right] = m_cachedEyeInfo[xr::StereoView::Right].HmdToEyePose;
                     scaleDesc.HmdSpaceToWorldScaleInMeters = 1.f;
-                    CHECK_OVRCMD(ovr_EndFrame(m_ovrSession, ovrFrameId, &scaleDesc, layers.data(), layerCount));
+                    CHECK_OVRCMD(endSubmissionFrame(m_ovrSession, ovrFrameId, &scaleDesc, layers.data(), layerCount));
                     TraceLoggingWriteStop(endFrame, "OVR_EndFrame");
                 }
             }

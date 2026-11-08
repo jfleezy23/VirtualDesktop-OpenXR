@@ -105,15 +105,26 @@ namespace virtualdesktop_openxr::utils {
         }
 
         void start() override {
+            if (m_state == State::Started || m_state == State::Failed || !completed()) {
+                return;
+            }
+            // Keep storage quarantined if recording or submission fails.
+            m_state = State::Failed;
+            m_valid = false;
             CHECK_HRCMD(m_commandAllocator[0]->Reset());
             CHECK_HRCMD(m_commandList[0]->Reset(m_commandAllocator[0].Get(), nullptr));
             m_commandList[0]->EndQuery(m_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
             CHECK_HRCMD(m_commandList[0]->Close());
             ID3D12CommandList* const lists[] = {m_commandList[0].Get()};
             m_queue->ExecuteCommandLists(1, lists);
+            m_state = State::Started;
         }
 
         void stop() override {
+            if (m_state != State::Started) {
+                return;
+            }
+            m_state = State::Failed;
             CHECK_HRCMD(m_commandAllocator[1]->Reset());
             CHECK_HRCMD(m_commandList[1]->Reset(m_commandAllocator[1].Get(), nullptr));
             m_commandList[1]->EndQuery(m_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
@@ -124,28 +135,45 @@ namespace virtualdesktop_openxr::utils {
             m_queue->ExecuteCommandLists(1, lists);
 
             // Signal a fence for completion.
-            m_queue->Signal(m_fence.Get(), ++m_fenceValue);
+            CHECK_HRCMD(m_queue->Signal(m_fence.Get(), ++m_fenceValue));
+            m_state = State::Pending;
             m_valid = true;
         }
 
         uint64_t query(bool reset = true) const override {
             uint64_t duration = 0;
-            if (m_valid) {
+            if (m_valid && completed()) {
                 uint64_t gpuTickFrequency;
-                if (m_fence->GetCompletedValue() >= m_fenceValue &&
-                    SUCCEEDED(m_queue->GetTimestampFrequency(&gpuTickFrequency))) {
+                if (SUCCEEDED(m_queue->GetTimestampFrequency(&gpuTickFrequency))) {
                     uint64_t* mappedBuffer;
                     D3D12_RANGE range{0, 2 * sizeof(uint64_t)};
                     CHECK_HRCMD(m_queryReadbackBuffer->Map(0, &range, reinterpret_cast<void**>(&mappedBuffer)));
                     duration = ((mappedBuffer[1] - mappedBuffer[0]) * 1000000) / gpuTickFrequency;
                     m_queryReadbackBuffer->Unmap(0, nullptr);
+                    m_valid = !reset;
                 }
-                m_valid = !reset;
             }
             return duration;
         }
 
       private:
+        enum class State { Idle, Started, Pending, Failed };
+
+        bool completed() const {
+            if (m_state == State::Pending) {
+                const auto value = m_fence->GetCompletedValue();
+                if (value == UINT64_MAX) {
+                    m_state = State::Failed;
+                    CHECK_HRCMD(DXGI_ERROR_DEVICE_REMOVED);
+                }
+                if (value < m_fenceValue) {
+                    return false;
+                }
+                m_state = State::Idle;
+            }
+            return m_state == State::Idle;
+        }
+
         const ComPtr<ID3D12CommandQueue> m_queue;
         ComPtr<ID3D12CommandAllocator> m_commandAllocator[2];
         ComPtr<ID3D12GraphicsCommandList> m_commandList[2];
@@ -153,6 +181,7 @@ namespace virtualdesktop_openxr::utils {
         uint64_t m_fenceValue{0};
         ComPtr<ID3D12QueryHeap> m_queryHeap;
         ComPtr<ID3D12Resource> m_queryReadbackBuffer;
+        mutable State m_state{State::Idle};
 
         // Can the timer be queried (it might still only read 0).
         mutable bool m_valid{false};
@@ -176,35 +205,48 @@ namespace virtualdesktop_openxr::utils {
             VkCommandPoolCreateInfo poolCreateInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
             poolCreateInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
             poolCreateInfo.queueFamilyIndex = queueFamilyIndex;
+            VkCommandPool commandPool{VK_NULL_HANDLE};
             CHECK_VKCMD(m_dispatch.vkCreateCommandPool(
-                m_device, &poolCreateInfo, m_allocator ? &m_allocator.value() : nullptr, &m_cmdPool));
-            VkCommandBufferAllocateInfo allocateInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-            allocateInfo.commandPool = m_cmdPool;
-            allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-            allocateInfo.commandBufferCount = 2;
-            CHECK_VKCMD(m_dispatch.vkAllocateCommandBuffers(m_device, &allocateInfo, m_cmdBuffer));
+                m_device, &poolCreateInfo, m_allocator ? &m_allocator.value() : nullptr, &commandPool));
+            m_cmdPool = commandPool;
+            try {
+                VkCommandBufferAllocateInfo allocateInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+                allocateInfo.commandPool = m_cmdPool;
+                allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                allocateInfo.commandBufferCount = 2;
+                CHECK_VKCMD(m_dispatch.vkAllocateCommandBuffers(m_device, &allocateInfo, m_cmdBuffer));
 
-            // Create the query pool.
-            VkQueryPoolCreateInfo createInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
-            createInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-            createInfo.queryCount = 2;
-            CHECK_VKCMD(m_dispatch.vkCreateQueryPool(
-                m_device, &createInfo, m_allocator ? &m_allocator.value() : nullptr, &m_queryPool));
+                // Create the query pool and a completion fence shared by both submissions.
+                VkQueryPoolCreateInfo createInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+                createInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+                createInfo.queryCount = 2;
+                // Failed creation calls may overwrite outputs; publish only owned handles.
+                VkQueryPool queryPool{VK_NULL_HANDLE};
+                CHECK_VKCMD(m_dispatch.vkCreateQueryPool(
+                    m_device, &createInfo, m_allocator ? &m_allocator.value() : nullptr, &queryPool));
+                m_queryPool = queryPool;
+                VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+                VkFence fence{VK_NULL_HANDLE};
+                CHECK_VKCMD(m_dispatch.vkCreateFence(
+                    m_device, &fenceInfo, m_allocator ? &m_allocator.value() : nullptr, &fence));
+                m_fence = fence;
+            } catch (...) {
+                release();
+                throw;
+            }
         }
 
         ~VulkanGpuTimer() override {
-            if (m_queryPool != VK_NULL_HANDLE) {
-                m_dispatch.vkDestroyQueryPool(m_device, m_queryPool, m_allocator ? &m_allocator.value() : nullptr);
-            }
-            if (m_cmdBuffer[0] != VK_NULL_HANDLE) {
-                m_dispatch.vkFreeCommandBuffers(m_device, m_cmdPool, 2, m_cmdBuffer);
-            }
-            if (m_cmdPool != VK_NULL_HANDLE) {
-                m_dispatch.vkDestroyCommandPool(m_device, m_cmdPool, m_allocator ? &m_allocator.value() : nullptr);
-            }
+            release();
         }
 
         void start() override {
+            if (m_state == State::Started || m_state == State::Failed || !completed()) {
+                return;
+            }
+            m_state = State::Failed;
+            m_valid = false;
+            CHECK_VKCMD(m_dispatch.vkResetFences(m_device, 1, &m_fence));
             VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
             beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             CHECK_VKCMD(m_dispatch.vkBeginCommandBuffer(m_cmdBuffer[0], &beginInfo));
@@ -215,9 +257,14 @@ namespace virtualdesktop_openxr::utils {
             submitInfo.commandBufferCount = 1;
             submitInfo.pCommandBuffers = &m_cmdBuffer[0];
             CHECK_VKCMD(m_dispatch.vkQueueSubmit(m_queue, 1, &submitInfo, VK_NULL_HANDLE));
+            m_state = State::Started;
         }
 
         void stop() override {
+            if (m_state != State::Started) {
+                return;
+            }
+            m_state = State::Failed;
             VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
             beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             CHECK_VKCMD(m_dispatch.vkBeginCommandBuffer(m_cmdBuffer[1], &beginInfo));
@@ -226,13 +273,14 @@ namespace virtualdesktop_openxr::utils {
             VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
             submitInfo.commandBufferCount = 1;
             submitInfo.pCommandBuffers = &m_cmdBuffer[1];
-            CHECK_VKCMD(m_dispatch.vkQueueSubmit(m_queue, 1, &submitInfo, VK_NULL_HANDLE));
+            CHECK_VKCMD(m_dispatch.vkQueueSubmit(m_queue, 1, &submitInfo, m_fence));
+            m_state = State::Pending;
             m_valid = true;
         }
 
         uint64_t query(bool reset = true) const override {
             uint64_t duration = 0;
-            if (m_valid) {
+            if (m_valid && completed()) {
                 uint64_t buffer[2];
                 VkResult result = m_dispatch.vkGetQueryPoolResults(m_device,
                                                                    m_queryPool,
@@ -244,14 +292,50 @@ namespace virtualdesktop_openxr::utils {
                                                                    VK_QUERY_RESULT_64_BIT);
                 if (result == VK_SUCCESS) {
                     duration = static_cast<uint64_t>(((buffer[1] - buffer[0]) * m_timestampPeriod) / 1000);
+                    m_valid = !reset;
+                } else if (result != VK_NOT_READY) {
+                    m_state = State::Failed;
+                    CHECK_VKCMD(result);
                 }
-
-                m_valid = !reset;
             }
             return duration;
         }
 
       private:
+        enum class State { Idle, Started, Pending, Failed };
+
+        bool completed() const {
+            if (m_state == State::Pending) {
+                // Query availability alone does not prove command buffers are no longer pending.
+                const auto result = m_dispatch.vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, 0);
+                if (result == VK_TIMEOUT) {
+                    return false;
+                }
+                if (result != VK_SUCCESS) {
+                    m_state = State::Failed;
+                    CHECK_VKCMD(result);
+                }
+                m_state = State::Idle;
+            }
+            return m_state == State::Idle;
+        }
+
+        void release() {
+            // The owner drains its queue before destroying timers, including failed submissions.
+            if (m_fence != VK_NULL_HANDLE) {
+                m_dispatch.vkDestroyFence(m_device, m_fence, m_allocator ? &m_allocator.value() : nullptr);
+            }
+            if (m_queryPool != VK_NULL_HANDLE) {
+                m_dispatch.vkDestroyQueryPool(m_device, m_queryPool, m_allocator ? &m_allocator.value() : nullptr);
+            }
+            if (m_cmdBuffer[0] != VK_NULL_HANDLE) {
+                m_dispatch.vkFreeCommandBuffers(m_device, m_cmdPool, 2, m_cmdBuffer);
+            }
+            if (m_cmdPool != VK_NULL_HANDLE) {
+                m_dispatch.vkDestroyCommandPool(m_device, m_cmdPool, m_allocator ? &m_allocator.value() : nullptr);
+            }
+        }
+
         const VulkanDispatch& m_dispatch;
         const VkDevice m_device;
         const VkQueue m_queue;
@@ -260,6 +344,8 @@ namespace virtualdesktop_openxr::utils {
         VkCommandPool m_cmdPool{VK_NULL_HANDLE};
         VkCommandBuffer m_cmdBuffer[2]{VK_NULL_HANDLE, VK_NULL_HANDLE};
         VkQueryPool m_queryPool{VK_NULL_HANDLE};
+        VkFence m_fence{VK_NULL_HANDLE};
+        mutable State m_state{State::Idle};
 
         // Can the timer be queried (it might still only read 0).
         mutable bool m_valid{false};

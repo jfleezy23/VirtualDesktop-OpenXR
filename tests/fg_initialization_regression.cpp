@@ -1,6 +1,8 @@
 #include "fg_gpu_helpers.h"
 #include <detours.h>
 #include <nvOpticalFlowD3D12.h>
+#include <future>
+#include <chrono>
 
 namespace {
     using RegisterFn = decltype(NV_OF_D3D12_API_FUNCTION_LIST::nvOFRegisterResourceD3D12);
@@ -83,8 +85,218 @@ namespace {
     }
 } // namespace
 
+// Fail the core's packed FidelityFX image, after its acquire fence and event
+// exist. Failing the outer private-current image does not reach core cleanup.
+class AllocationFailure {
+    using Resource = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*,
+                                                 const D3D12_HEAP_PROPERTIES*,
+                                                 D3D12_HEAP_FLAGS,
+                                                 const D3D12_RESOURCE_DESC*,
+                                                 D3D12_RESOURCE_STATES,
+                                                 const D3D12_CLEAR_VALUE*,
+                                                 REFIID,
+                                                 void**);
+    using Fence = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, UINT64, D3D12_FENCE_FLAGS, REFIID, void**);
+    using Signal = HRESULT(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, ID3D12Fence*, UINT64);
+    inline static AllocationFailure* active{};
+    ID3D12Device* device;
+    ID3D12CommandQueue* queue;
+    Resource resource;
+    Fence fence;
+    Signal signal;
+    bool rejectAllocation;
+    static HRESULT STDMETHODCALLTYPE onResource(ID3D12Device* d,
+                                                const D3D12_HEAP_PROPERTIES* heap,
+                                                D3D12_HEAP_FLAGS flags,
+                                                const D3D12_RESOURCE_DESC* desc,
+                                                D3D12_RESOURCE_STATES state,
+                                                const D3D12_CLEAR_VALUE* clear,
+                                                REFIID iid,
+                                                void** out) {
+        auto& s = *active;
+        if (s.rejectAllocation && d == s.device && desc && desc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+            desc->DepthOrArraySize == 1 && desc->Format == DXGI_FORMAT_R8G8B8A8_UNORM &&
+            desc->Flags == D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS &&
+            state == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) {
+            ++s.failures;
+            s.rejectedBytes = d->GetResourceAllocationInfo(0, 1, desc).SizeInBytes;
+            s.fencesAtFailure = s.fences;
+            *out = nullptr;
+            return E_OUTOFMEMORY;
+        }
+        return s.resource(d, heap, flags, desc, state, clear, iid, out);
+    }
+    static HRESULT STDMETHODCALLTYPE
+    onFence(ID3D12Device* d, UINT64 value, D3D12_FENCE_FLAGS flags, REFIID iid, void** out) {
+        auto& s = *active;
+        const auto hr = s.fence(d, value, flags, iid, out);
+        if (d == s.device && SUCCEEDED(hr)) {
+            ++s.fences;
+            s.lastFence = static_cast<ID3D12Fence*>(*out);
+        }
+        return hr;
+    }
+    static HRESULT STDMETHODCALLTYPE onSignal(ID3D12CommandQueue* q, ID3D12Fence* f, UINT64 value) {
+        auto& s = *active;
+        if (q == s.queue) {
+            ++s.signals;
+            if (f == s.lastFence)
+                ++s.acquireSignals;
+        }
+        return s.signal(q, f, value);
+    }
+    void attach(bool enabled) {
+        const auto operation = enabled ? DetourAttach : DetourDetach;
+        check(DetourTransactionBegin() == NO_ERROR, "allocation detour transaction");
+        check(DetourUpdateThread(GetCurrentThread()) == NO_ERROR, "allocation detour thread");
+        check(operation(reinterpret_cast<PVOID*>(&resource), onResource) == NO_ERROR, "allocation detour");
+        check(operation(reinterpret_cast<PVOID*>(&fence), onFence) == NO_ERROR, "allocation fence detour");
+        check(operation(reinterpret_cast<PVOID*>(&signal), onSignal) == NO_ERROR, "allocation signal detour");
+        check(DetourTransactionCommit() == NO_ERROR, "allocation detour commit");
+    }
+
+  public:
+    unsigned failures{}, fences{}, fencesAtFailure{}, signals{}, acquireSignals{};
+    uint64_t rejectedBytes{};
+    ID3D12Fence* lastFence{}; // Identity only; never dereferenced after cleanup.
+    AllocationFailure(Gpu& gpu, bool reject)
+        : device(gpu.device.Get()), queue(gpu.queue.Get()), rejectAllocation(reject) {
+        auto table = *reinterpret_cast<void***>(device);
+        resource = reinterpret_cast<Resource>(table[27]);
+        fence = reinterpret_cast<Fence>(table[36]);
+        signal = reinterpret_cast<Signal>((*reinterpret_cast<void***>(queue))[14]);
+        check(!active, "one allocation observer");
+        active = this;
+        attach(true);
+    }
+    ~AllocationFailure() {
+        try {
+            attach(false);
+        } catch (...) {
+            std::_Exit(2);
+        }
+        active = nullptr;
+    }
+};
+
+void queueCleanup(const char* path, unsigned version, bool rejectAllocation) {
+    check(version >= 2 && version <= 4, "FidelityFX creation requires V2, V3 or V4");
+    Gpu gpu(false); // Observe native driver entry points, without debug-layer wrappers.
+    auto module = LoadLibraryExA(path, nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    check(module != nullptr, "allocation fixture module");
+    VDXRFG_ApiV2 api2{sizeof(api2), 2};
+    VDXRFG_ApiV3 api3{sizeof(api3), 3};
+    VDXRFG_ApiV4 api4{sizeof(api4), 4};
+    auto get2 = reinterpret_cast<VDXRFG_GetApiV2Fn>(GetProcAddress(module, "VDXRFG_GetApiV2"));
+    auto get3 = reinterpret_cast<VDXRFG_GetApiV3Fn>(GetProcAddress(module, "VDXRFG_GetApiV3"));
+    auto get4 = reinterpret_cast<VDXRFG_GetApiV4Fn>(GetProcAddress(module, "VDXRFG_GetApiV4"));
+    check(get2 && get3 && get4, "allocation fixture exports");
+    success(get2(&api2), "allocation V2 API");
+    success(get3(&api3), "allocation V3 API");
+    success(get4(&api4), "allocation V4 API");
+    auto input = gpu.texture();
+    const auto pixels = scene(0);
+    gpu.transfer(input.Get(), &pixels);
+    std::array<std::array<ComPtr<ID3D12Resource>, 3>, 2> outputs;
+    VDXRFG_CreateInfoV2 legacy{};
+    legacy.struct_size = sizeof(legacy);
+    legacy.api_version = 2;
+    legacy.flags = VDXRFG_CREATE_FIDELITYFX_FULL;
+    auto& base = legacy.base;
+    base.struct_size = sizeof(base);
+    base.api_version = 1;
+    base.device = gpu.device.Get();
+    base.queue = gpu.queue.Get();
+    base.input = input.Get();
+    base.width = width;
+    base.height = height;
+    base.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    base.multiplier = 3;
+    VDXRFG_CreateInfoV3 create{};
+    create.struct_size = sizeof(create);
+    create.api_version = 3;
+    create.flags = legacy.flags;
+    create.device = base.device;
+    create.queue = base.queue;
+    create.input = base.input;
+    create.width = width;
+    create.height = height;
+    create.format = base.format;
+    create.multiplier = 3;
+    for (unsigned bank = 0; bank < 2; ++bank)
+        for (unsigned role = 0; role < 3; ++role) {
+            outputs[bank][role] = gpu.texture();
+            base.outputs[bank][role] = create.outputs[bank][role] = outputs[bank][role].Get();
+        }
+    ComPtr<ID3D12Fence> callerGate;
+    success(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&callerGate)), "caller gate");
+    void* context{};
+    const auto createContext = [&] {
+        return version == 2   ? api2.Create(&legacy, &context)
+               : version == 3 ? api3.Create(&create, &context)
+                              : api4.Create(&create, &context);
+    };
+    if (!rejectAllocation)
+        success(createContext(), "successful initialization before gated destruction");
+    HRESULT result{};
+    bool completed{};
+    unsigned cleanupSignals{};
+    DWORD handlesBefore{}, handlesAfter{};
+    GetProcessHandleCount(GetCurrentProcess(), &handlesBefore);
+    {
+        AllocationFailure probe(gpu, rejectAllocation);
+        // The fixture always releases the unrelated gate before its future is
+        // joined, including the RED control. Never strand real GPU work.
+        auto worker = std::async(std::launch::async, [&] {
+            const auto hr = gpu.queue->Wait(callerGate.Get(), 1);
+            if (FAILED(hr))
+                return hr;
+            return rejectAllocation ? createContext() : api2.Destroy(context);
+        });
+        completed = worker.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+        const auto release = callerGate->Signal(1);
+        result = worker.get();
+        cleanupSignals = probe.signals;
+        success(release, "release unrelated caller gate");
+        GetProcessHandleCount(GetCurrentProcess(), &handlesAfter);
+        std::printf("%s V%u: before_gate_release=%u hr=%08lx context=%p failures=%u fences=%u "
+                    "signals=%u acquire_signals=%u rejected_bytes=%llu handles=%lu->%lu native=1\n",
+                    rejectAllocation ? "allocation" : "destroy",
+                    version,
+                    completed,
+                    static_cast<unsigned long>(result),
+                    context,
+                    probe.failures,
+                    probe.fencesAtFailure,
+                    probe.signals,
+                    probe.acquireSignals,
+                    static_cast<unsigned long long>(probe.rejectedBytes),
+                    handlesBefore,
+                    handlesAfter);
+        if (rejectAllocation)
+            check(result == E_OUTOFMEMORY && !context && probe.failures == 1 && probe.fencesAtFailure >= 3,
+                  "late FidelityFX allocation returns original failure with no context");
+        else
+            success(result, "successfully initialized context drains before destruction");
+    }
+    const auto drain = gpu.nextFence++;
+    success(gpu.queue->Signal(gpu.fence.Get(), drain), "caller cleanup signal");
+    gpu.wait(gpu.fence.Get(), drain);
+    check(gpu.transfer(input.Get(), nullptr) == pixels, "failed initialization preserves caller input bytes");
+    success(gpu.device->GetDeviceRemovedReason(), "device survives failed initialization cleanup");
+    std::puts("caller input bytes unchanged; device removal reason S_OK");
+    check(FreeLibrary(module) != 0, "unload failed initialization module");
+    check(rejectAllocation ? completed && cleanupSignals == 0 : !completed && cleanupSignals != 0,
+          "only failed initialization skips the caller queue drain");
+    std::puts("PASS: initialization cleanup respects caller queue ownership");
+}
+
 int main(int argc, char** argv) {
     try {
+        if (argc == 4 && (std::string(argv[2]) == "allocation" || std::string(argv[2]) == "destroy")) {
+            queueCleanup(argv[1], static_cast<unsigned>(std::stoul(argv[3])), std::string(argv[2]) == "allocation");
+            return 0;
+        }
         check(argc == 2 || argc == 3 || argc == 5,
               "module path, optional signal index, and optional host multiplier required");
         const bool hostOwned = argc == 5;

@@ -46,7 +46,7 @@ includes = ['nr-frame-generation/include', 'virtualdesktop-openxr', 'RuntimeConf
             'packages/Microsoft.GameInput.2.2.26100.6114/native/include']
 libraries = ['dxgi.lib', 'dxguid.lib', 'd3d11.lib', 'd3d12.lib', 'opengl32.lib', 'ntdll.lib', 'kernel32.lib', 'user32.lib',
              'gdi32.lib', 'winspool.lib', 'comdlg32.lib', 'advapi32.lib', 'shell32.lib', 'ole32.lib', 'oleaut32.lib',
-             'uuid.lib', 'odbc32.lib', 'odbccp32.lib', 'd3dcompiler.lib']
+             'uuid.lib', 'odbc32.lib', 'odbccp32.lib', 'd3dcompiler.lib', 'bcrypt.lib']
 native_libraries = ['packages/Detours.4.0.1/lib/native/libs/x64/detours.lib',
                     'packages/Microsoft.GameInput.2.2.26100.6114/native/lib/x64/GameInput.lib',
                     'external/Vulkan-SDK/lib/vulkan-1.lib', 'external/DLSS/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib']
@@ -67,28 +67,57 @@ for source in args.sources:
     test_object = out / (name + '.obj')
     flags = ['/nologo', '/std:c++17', '/EHsc', '/W3', '/MT', '/O2', '/Gy', '/c', '/fp:precise',
              '/DRUNTIME_NAMESPACE=virtualdesktop_openxr', '/DNDEBUG', '/DUNICODE', '/D_UNICODE',
-             '/D_CRT_SECURE_NO_WARNINGS', '/DUSING_GAMEINPUT']
+             '/D_CRT_SECURE_NO_WARNINGS', '/DUSING_GAMEINPUT', '/DVDXR_FG_PRODUCER_FENCE=1']
+    if name in {'nr_fg_runtime_regression', 'nr_spatial_runtime_regression', 'nr_input_toggle_regression',
+                'runtime_delivery_regression', 'native_runtime_delivery_probe', 'controlled_runtime_delivery_probe',
+                'nr_fg_prebegin_overlap_regression', 'nr_fg_prebegin_fast_begin_regression',
+                'nr_fg_prebegin_failure_regression', 'nr_fg_prebegin_cancel_regression',
+                'nr_fg_copy_ready_poison_regression', 'nr_fg_pending_current_copy_regression'}:
+        flags += ['/DVDXR_NR_SPATIAL_CANDIDATE=1']
     if new:
         flags += ['/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS', '/D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR']
     if asan:
         flags += ['/fsanitize=address', '/Zi', '/Fd' + str(out / (name + '-compile.pdb'))]
-    flags += ['/I' + str(repo / item) for item in includes] + ['/I' + str(objects), str(source_path), '/Fo' + str(test_object)]
-    response(out / (name + '-cl.rsp'), flags)
+    flags += ['/I' + str(repo / item) for item in includes] + ['/I' + str(objects)]
+    response(out / (name + '-cl.rsp'), flags + [str(source_path), '/Fo' + str(test_object)])
     extra_objects = []
     helper_commands = ''
-    if name == 'nr_fg_early_dispatch_regression':
-        helper_object = out / (name + '-context-methods.obj')
-        helper_response = out / (name + '-context-methods-cl.rsp')
-        response(helper_response, flags[:-2] + [str(repo / 'tests/context_method_addresses.cpp'), '/Fo' + str(helper_object)])
+
+    def compile_helper(label, source, definitions=()):
+        global helper_commands
+        helper_object = out / (name + '-' + label + '.obj')
+        helper_response = out / (name + '-' + label + '-cl.rsp')
+        response(helper_response, flags + list(definitions) + [str(repo / source), '/Fo' + str(helper_object)])
         extra_objects.append(helper_object)
-        helper_commands = 'cl.exe @"' + str(helper_response) + '"\nif errorlevel 1 exit /b %errorlevel%\n'
+        helper_commands += 'cl.exe @"' + str(helper_response) + '"\nif errorlevel 1 exit /b %errorlevel%\n'
+
+    if name == 'nr_fg_early_dispatch_regression':
+        compile_helper('context-methods', 'tests/context_method_addresses.cpp')
+    if name in {'fg_delivery_isolation_regression', 'fg_delivery_dependencies_regression',
+                'delivery_transport_regression', 'nr_fg_copy_ready_poison_regression',
+                'nr_fg_pending_current_copy_regression'}:
+        compile_helper('delivery-context-slots', 'tests/delivery_context_slots.cpp')
+    if name == 'fg_delivery_dependencies_regression':
+        compile_helper('delivery-queue-slots', 'tests/delivery_queue_slots.cpp')
+    # Only isolated SDK fixtures replace system.obj. Native probes retain the real SDK loader.
+    private_system = name in {'controlled_runtime_delivery_probe', 'nr_fg_prebegin_overlap_regression',
+                             'nr_fg_prebegin_fast_begin_regression', 'nr_fg_prebegin_failure_regression',
+                             'nr_fg_prebegin_cancel_regression', 'nr_fg_copy_ready_poison_regression',
+                             'nr_fg_pending_current_copy_regression', 'fg_delivery_isolation_regression',
+                             'fg_delivery_dependencies_regression', 'delivery_transport_regression',
+                             'nr_fg_runtime_regression', 'nr_spatial_runtime_regression',
+                             'nr_input_toggle_regression', 'runtime_delivery_regression'}
+    if private_system:
+        compile_helper('private-system', 'virtualdesktop-openxr/system.cpp', ['/DLOAD_LOCAL_LIBOVR'])
     link_args = ['/nologo', '/SUBSYSTEM:CONSOLE', '/DEBUG', '/OUT:' + str(out / (name + '.exe')), str(test_object), *map(str, extra_objects)]
     if not asan:
         link_args += ['/LTCG']
     # Command-context fixture is intentionally header-only; others use all matched runtime objects.
     header_only = name in {'nr_command_context_regression', 'nr_fence_regression', 'runtime_negotiation_regression', 'runtime_redirect_regression'}
+    runtime_objects = []
     if not header_only:
-        link_args += [str(item) for item in sorted(objects.glob('*.obj'))]
+        runtime_objects = [item for item in sorted(objects.glob('*.obj')) if not (private_system and item.name == 'system.obj')]
+        link_args += list(map(str, runtime_objects))
     link_args += libraries + [str(repo / item) for item in native_libraries]
     response(out / (name + '-link.rsp'), link_args)
     batch = out / (name + '-build.cmd')
@@ -108,7 +137,7 @@ for source in args.sources:
     provenance.write_receipt(out / (name + '-source.json'), repo, 'fixture', before_sources, [out / (name + '.exe'), test_object, *extra_objects])
     manifest = {'source_sha256': hashlib.sha256(source_path.read_bytes()).hexdigest(), 'compiler': version,
                 'cohort': str(cohort), 'exe_sha256': hashlib.sha256((out / (name + '.exe')).read_bytes()).hexdigest(),
-                'runtime_objects': {} if header_only else {item.name: hashlib.sha256(item.read_bytes()).hexdigest() for item in objects.glob('*.obj')},
+                'runtime_objects': {item.name: hashlib.sha256(item.read_bytes()).hexdigest() for item in runtime_objects},
                 'helper_objects': {item.name: hashlib.sha256(item.read_bytes()).hexdigest() for item in extra_objects},
                 'seconds': time.monotonic() - started}
     (out / (name + '-provenance.json')).write_text(json.dumps(manifest, indent=2))

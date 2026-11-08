@@ -10,6 +10,11 @@
 #include <algorithm>
 
 namespace {
+#ifdef VDXR_FG_PATCH_MOTION_EXPERIMENT
+    constexpr UINT srvCount = 8, uavCount = 4;
+#else
+    constexpr UINT srvCount = 7, uavCount = 3;
+#endif
     UINT side = 64;
     constexpr UINT eyes = 2, block = 8;
     using Pixels = std::vector<uint8_t>;
@@ -70,8 +75,8 @@ namespace {
             const auto imageFormat = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
             const auto allocationFormat = srgb ? DXGI_FORMAT_R8G8B8A8_TYPELESS : imageFormat;
             D3D12_DESCRIPTOR_RANGE ranges[2]{};
-            ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 7, 0, 0, 0};
-            ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0, 0, 0};
+            ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, srvCount, 0, 0, 0};
+            ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, uavCount, 0, 0, 0};
             D3D12_ROOT_PARAMETER parameters[3]{};
             parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
             parameters[0].Constants = {0, 0, 62};
@@ -125,7 +130,7 @@ namespace {
             success(gpu.device->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(&nvidia)), "NVIDIA production PSO");
             D3D12_DESCRIPTOR_HEAP_DESC heap{};
             heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-            heap.NumDescriptors = 10;
+            heap.NumDescriptors = srvCount + uavCount;
             heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
             success(gpu.device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&descriptors)), "shader descriptors");
             descriptorStride = gpu.device->GetDescriptorHandleIncrementSize(heap.Type);
@@ -139,7 +144,7 @@ namespace {
             resources[2] = texture(side / allocationBlock, side * eyes / allocationBlock, 1, DXGI_FORMAT_R32G32_SINT);
             resources[3] = texture(side / allocationBlock, side * eyes / allocationBlock, 1, DXGI_FORMAT_R32_UINT);
             resources[4] = texture(side, side, eyes, allocationFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
-            for (UINT index = 0; index < 7; ++index) {
+            for (UINT index = 0; index < srvCount; ++index) {
                 const UINT resource = std::min(index, 3u);
                 auto desc = resources[resource]->GetDesc();
                 D3D12_SHADER_RESOURCE_VIEW_DESC view{};
@@ -155,16 +160,18 @@ namespace {
                 }
                 if (index == 6)
                     view.Format = DXGI_FORMAT_R32G32_FLOAT;
+                if (index == 7)
+                    view.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
                 auto handle = descriptors->GetCPUDescriptorHandleForHeapStart();
                 handle.ptr += index * descriptorStride;
                 gpu.device->CreateShaderResourceView(index < 4 ? resources[index].Get() : nullptr, &view, handle);
             }
-            for (UINT index = 0; index < 3; ++index) {
+            for (UINT index = 0; index < uavCount; ++index) {
                 D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
-                view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                view.Format = index == 3 ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
                 view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
                 auto handle = descriptors->GetCPUDescriptorHandleForHeapStart();
-                handle.ptr += (index + 7) * descriptorStride;
+                handle.ptr += (index + srvCount) * descriptorStride;
                 gpu.device->CreateUnorderedAccessView(nullptr, nullptr, &view, handle);
             }
             for (UINT eye = 0; eye < eyes; ++eye) {
@@ -324,7 +331,7 @@ namespace {
             list->SetDescriptorHeaps(1, heaps);
             auto table = descriptors->GetGPUDescriptorHandleForHeapStart();
             list->SetGraphicsRootDescriptorTable(1, table);
-            table.ptr += 7 * descriptorStride;
+            table.ptr += srvCount * descriptorStride;
             list->SetGraphicsRootDescriptorTable(2, table);
             D3D12_VIEWPORT viewport{0, 0, static_cast<float>(side), static_cast<float>(side), 0, 1};
             D3D12_RECT scissor{0, 0, static_cast<LONG>(side), static_cast<LONG>(side)};

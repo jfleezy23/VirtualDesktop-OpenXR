@@ -68,6 +68,10 @@ compiler for both candidate and diagnostic baseline; comparisons never mix compi
 C++17 with `/fp:precise`, and the synthesis module remains C++20. This compiler policy does not enable fast math,
 PGO, new CPU instruction requirements, or change the installed NR model and appearance settings.
 
+Use the [retained frame-generation build recipe](docs/build-retained-fg.md) for the checkpoint's qualified
+DXC/grid/depth variant. It records the exact cache flags, external compiler/dependency inputs, and PGO-disabled build
+command. The generic NR/FG build helper retains its existing defaults.
+
 For `stable`, check `Release` and `ReleaseBundle` on Win32 and x64. For `experimental-nr`, check both configurations on x64;
 Win32 NR is unsupported until its inherited NGX architecture gap is fixed and verified. Compile and analyze fresh baseline
 and candidate sources with the same tools and configuration. Require no newly introduced compiler/analyzer diagnostics;

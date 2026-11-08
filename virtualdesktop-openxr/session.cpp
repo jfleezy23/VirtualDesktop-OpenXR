@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 #include "pch.h"
+#include "PairCaptureNrPrivate.h"
 
 #include "log.h"
 #include "runtime.h"
@@ -164,6 +165,7 @@ namespace virtualdesktop_openxr {
                     enterVisibleMode();
                 }
 
+                initializeRuntimeDelivery();
                 initializePrecompositorResources();
             } else {
                 // We initialize a submission device since OVR needs one to create a swapchain before being able to wait
@@ -219,6 +221,7 @@ namespace virtualdesktop_openxr {
                 updateSessionState(true);
                 m_sessionCreated = true;
                 *session = (XrSession)1;
+                nr_capture::hostSessionCreated(this, reinterpret_cast<uint64_t>(*session));
             }
 
             TraceLoggingWrite(g_traceProvider, "xrCreateSession", TLXArg(*session, "Session"));
@@ -247,6 +250,7 @@ namespace virtualdesktop_openxr {
         }
 
         cleanupSessionResources();
+        nr_capture::hostSessionDestroyed(this);
         return XR_SUCCESS;
     }
 
@@ -264,6 +268,8 @@ namespace virtualdesktop_openxr {
             m_needStartAsyncSubmissionThread = true;
         }
 
+        if (m_deliveryTransport)
+            m_deliveryTransport->drain();
         // The worker is joined before releasing either retained frame payload.
         cleanupFrameGeneration();
         m_layersForFrame.clear();
@@ -325,7 +331,7 @@ namespace virtualdesktop_openxr {
             CHECK_XRCMD(xrDestroySwapchain(*m_swapchains.begin()));
         }
         if (m_headlessSwapchain) {
-            ovr_DestroyTextureSwapChain(m_ovrSession, m_headlessSwapchain);
+            destroySubmissionSwapchain(m_ovrSession, m_headlessSwapchain);
             m_headlessSwapchain = nullptr;
         }
 
@@ -337,7 +343,14 @@ namespace virtualdesktop_openxr {
         cleanupVulkan();
         cleanupD3D12();
         cleanupD3D11();
+        // NR and producer cleanup can retire additional transport chains.
         cleanupSubmissionDevice();
+        m_deliveryForFrame = m_deliveryForSubmission = {};
+        m_fgDepthDelivery = {};
+        if (m_deliveryTransport) {
+            m_deliveryTransport->shutdown();
+            m_deliveryTransport.reset();
+        }
         {
             std::unique_lock frameLock(m_frameMutex);
             m_sessionState = XR_SESSION_STATE_UNKNOWN;
@@ -405,9 +418,10 @@ namespace virtualdesktop_openxr {
                                                          requestedFrameGeneration == 3 || requestedFrameGeneration == 4)
                                     ? static_cast<uint32_t>(requestedFrameGeneration)
                                     : 0;
-        // Snapshot both FG requests together. Registry notifications only refresh live NR;
-        // mode and backend remain fixed until the next session begins.
+        // Snapshot all FG requests together. Registry notifications only refresh live NR;
+        // multiplier, backend and depth mode remain fixed until the next session begins.
         m_frameGenerationBackend = startupSettings.get("FrameGenerationBackend").value_or(0);
+        m_frameGenerationDepthMode = startupSettings.get("FrameGenerationDepthMode").value_or(1);
         if (!startupSettings.fgValid) {
             ErrorLog("Invalid frame-generation profile/global setting %s; disabling FG.\n",
                      startupSettings.invalidName.c_str());
@@ -416,6 +430,8 @@ namespace virtualdesktop_openxr {
         m_frameGenerationMode = 0;
 #endif
         m_frameGenerationUnavailable = false;
+        m_fgDepthGuidanceRequested = false;
+        m_fgDepthModeFallbackWarned = false;
         m_fgWaitedReservation = m_fgBegunReservation = {};
         m_fgNextReservedNativeId = 0;
         m_fgLastReservedTime = m_fgPreviousCapturedTime = 0;

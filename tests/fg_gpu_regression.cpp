@@ -4,7 +4,11 @@
 void run(const char* modulePath, uint32_t multiplier, const std::string& requestedScenario = "motion") {
     const bool early = requestedScenario.rfind("early-", 0) == 0;
     const auto scenario = early ? requestedScenario.substr(6) : requestedScenario;
-    const bool stationary = scenario == "stationary";
+    const bool stationaryReference = scenario == "stationary-reference";
+    const bool strictStationary = scenario == "stationary";
+    const bool stationary = strictStationary || stationaryReference;
+    check(!stationaryReference || (!early && (multiplier == 2 || multiplier == 3)),
+          "stationary eye-isolation reference requires ordinary 2X or 3X");
     Gpu gpu;
     HMODULE module =
         LoadLibraryExA(modulePath, nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -253,7 +257,7 @@ void run(const char* modulePath, uint32_t multiplier, const std::string& request
             check(secondDump.good(), "write second stereo-control evidence");
         }
     }
-    if (stationary) {
+    if (strictStationary) {
         for (const auto* synthetic : std::array<const std::vector<uint8_t>*, 2>{&s1, &s2}) {
             if (synthetic->empty())
                 continue;
@@ -308,7 +312,7 @@ void run(const char* modulePath, uint32_t multiplier, const std::string& request
     success(api.GetStatistics(context, &second), "repeat statistics poll");
     check(second.last_gpu_us == statistics.last_gpu_us && second.flow_gpu_us == statistics.flow_gpu_us,
           "latest completed timing persists across polling");
-    if (stationary) {
+    if (strictStationary) {
         // Move, hold, reverse, hold. Identical pairs after genuine movement
         // must not retain the estimator's previous direction or displacement.
         int previousOffset{};

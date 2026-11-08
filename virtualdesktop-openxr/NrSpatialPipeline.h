@@ -1,6 +1,8 @@
 #pragma once
 
 #include "NrSpatialPolicy.h"
+#include "NrOwnershipViews.h"
+#include "PairCaptureNrPipelineFacts.h"
 #include <array>
 #include <memory>
 #include <d3d12.h>
@@ -54,6 +56,9 @@ namespace virtualdesktop_openxr::nr_spatial {
         ~Pipeline();
         Pipeline(const Pipeline&) = delete;
         Pipeline& operator=(const Pipeline&) = delete;
+        bool BorrowActiveOwnership(vdxrfg::pair_capture::nr::NrPipelineOwnership&) const noexcept;
+        bool BorrowActivePrograms(nr_capture::PipelineProgramFacts&) const noexcept;
+        bool BorrowActiveDescriptorCreations(nr_capture::PipelineDescriptorCreations&) const noexcept;
         bool Matches(const FrameInput&) const;
         HRESULT Prepare(const FrameInput&);
         WorkingEye GetWorkingEye(uint32_t) const;
@@ -62,6 +67,10 @@ namespace virtualdesktop_openxr::nr_spatial {
         void RecordResolve(ID3D12GraphicsCommandList*);
         void MarkSubmitted(uint64_t);
         void DiscardRecording();
+        // After a successful caller drain, release completed descriptor batches
+        // using a destroyed swapchain import. Preserve active/pending batches,
+        // unrelated warmed bindings, and all generation scratch resources.
+        void RetireCompletedResource(ID3D12Resource*);
         void Clear();
 
       private:

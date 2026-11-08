@@ -21,10 +21,15 @@
 // SOFTWARE.
 
 #include "pch.h"
+#include "PairCaptureNrEngine.h"
+#include "PairCaptureNrPostFx.h"
+#include "PairCaptureNrWarmLayouts.h"
+#include "PairCaptureNrSources.h"
 
 #include "log.h"
 #include "runtime.h"
 #include "utils.h"
+#include "depth_projection.h"
 
 #include "UpscalingCS.h"
 #include "SharpeningCS.h"
@@ -74,10 +79,15 @@ namespace virtualdesktop_openxr {
         XrExtent2Di sourceExtent;
         XrOffset2Di destinationOrigin;
         XrExtent2Di destinationExtent;
+        DepthEncodingTransform encoding;
+        float padding[3]{};
     };
-    static_assert(sizeof(AlignDepthPSConstants) == 32);
+    static_assert(sizeof(AlignDepthPSConstants) == 64);
 
     void OpenXrRuntime::upscaler(const XrSwapchainSubImage** subImages, ovrLayerEyeFov& layer) {
+        auto& nrEngine = nr_capture::captureEngine();
+        const auto nrFrame = nrEngine.selectedFrame(m_frameBegun);
+        nr_capture::CapturePostFxInput nrPostFx{};
         const bool upscaling = std::abs(m_upscalingMultiplier - 1.f) > FLT_EPSILON;
         const bool sharpening = m_precompositor.sharpenFactor > 0.f;
         const bool neuralInput = m_dlssnrOutputSwapchain && layer.ColorTexture[0] == m_dlssnrOutputSwapchain &&
@@ -119,6 +129,7 @@ namespace virtualdesktop_openxr {
                         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
                         CHECK_HRCMD(
                             m_ovrSubmissionDevice->CreateTexture2D(&desc, nullptr, candidate.image.GetAddressOf()));
+                        nr_capture::nrBankTextureObserved(candidate.image.Get(), m_ovrSubmissionDevice.Get());
                         setDebugName(
                             candidate.image.Get(),
                             fmt::format("Precompositor Intermediate Texture [{}, {}]", eye, (void*)&xrSwapchain));
@@ -130,6 +141,7 @@ namespace virtualdesktop_openxr {
                         desc.Texture2D.MipLevels = -1;
                         CHECK_HRCMD(m_ovrSubmissionDevice->CreateShaderResourceView(
                             candidate.image.Get(), &desc, candidate.srv.GetAddressOf()));
+                        nr_capture::postFxSrvCreated(candidate.image.Get(), candidate.srv.Get(), desc);
                         setDebugName(candidate.srv.Get(),
                                      fmt::format("Precompositor Intermediate SRV [{}, {}]", eye, (void*)&xrSwapchain));
                     }
@@ -139,6 +151,7 @@ namespace virtualdesktop_openxr {
                         desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
                         CHECK_HRCMD(m_ovrSubmissionDevice->CreateUnorderedAccessView(
                             candidate.image.Get(), &desc, candidate.uav.GetAddressOf()));
+                        nr_capture::postFxUavCreated(candidate.image.Get(), candidate.uav.Get(), desc);
                         setDebugName(candidate.uav.Get(),
                                      fmt::format("Precompositor Intermediate UAV [{}, {}]", eye, (void*)&xrSwapchain));
                     }
@@ -156,6 +169,7 @@ namespace virtualdesktop_openxr {
 
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
             Swapchain& swapchain = *(Swapchain*)subImages[eye]->swapchain;
+            nr_capture::PostFxRecord nrEasu{}, nrCas{};
             ID3D11ShaderResourceView* inputSrv = nullptr;
             XrRect2Di inputRect = subImages[eye]->imageRect;
             ovrSizei inputSize = {swapchain.ovrDesc.Width, swapchain.ovrDesc.Height};
@@ -195,13 +209,39 @@ namespace virtualdesktop_openxr {
                 (int)xr::math::AlignTo<4>((uint32_t)(inputRect.extent.width / m_upscalingMultiplier)),
                 (int)xr::math::AlignTo<4>((uint32_t)(inputRect.extent.height / m_upscalingMultiplier))};
 
+            nr_capture::postFxGeometry(nrEasu,
+                                       inputRect.offset.x,
+                                       inputRect.offset.y,
+                                       inputRect.extent.width,
+                                       inputRect.extent.height,
+                                       inputSize.w,
+                                       inputSize.h,
+                                       outputResolution.w,
+                                       outputResolution.h,
+                                       upscaling,
+                                       sharpening,
+                                       neuralInput);
+            nr_capture::postFxGeometry(nrCas,
+                                       inputRect.offset.x,
+                                       inputRect.offset.y,
+                                       inputRect.extent.width,
+                                       inputRect.extent.height,
+                                       inputSize.w,
+                                       inputSize.h,
+                                       outputResolution.w,
+                                       outputResolution.h,
+                                       upscaling,
+                                       sharpening,
+                                       neuralInput);
+
             // Prepare swapchain outputs.
             int imageIndex = 0;
-            CHECK_OVRCMD(ovr_GetTextureSwapChainCurrentIndex(
-                m_ovrSession, xrSwapchain.stereoProjection[eye].ovrSwapchain, &imageIndex));
+            CHECK_OVRCMD(
+                submissionSwapchainIndex(m_ovrSession, xrSwapchain.stereoProjection[eye].ovrSwapchain, &imageIndex));
 
             if (upscaling) {
                 m_ovrSubmissionContext->CSSetShader(m_upscaleShader.Get(), nullptr, 0);
+                nr_capture::postFxBindingObserved(nrEasu, nr_capture::PostFxBinding::shader, m_upscaleShader.Get());
                 {
                     UpscaleCSConstants constants{};
                     constants.topLeftNormalized = {(float)inputRect.offset.x / inputSize.w,
@@ -227,11 +267,22 @@ namespace virtualdesktop_openxr {
                                (AF1)outputResolution.h);
 
                     D3D11_MAPPED_SUBRESOURCE mappedResources;
-                    CHECK_HRCMD(m_ovrSubmissionContext->Map(
-                        m_upscalerConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResources));
+                    const HRESULT nrMapResult = m_ovrSubmissionContext->Map(
+                        m_upscalerConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResources);
+                    nr_capture::postFxMapReturned(
+                        nrEasu, m_ovrSubmissionContext.Get(), m_upscalerConstants.Get(), nrMapResult);
+                    CHECK_HRCMD(nrMapResult);
                     memcpy(mappedResources.pData, &constants, sizeof(constants));
+                    nr_capture::postFxConstants(nrEasu,
+                                                m_ovrSubmissionContext.Get(),
+                                                m_upscalerConstants.Get(),
+                                                mappedResources.pData,
+                                                sizeof(constants));
                     m_ovrSubmissionContext->Unmap(m_upscalerConstants.Get(), 0);
+                    nr_capture::postFxUnmapReturned(nrEasu, m_ovrSubmissionContext.Get(), m_upscalerConstants.Get());
                     m_ovrSubmissionContext->CSSetConstantBuffers(0, 1, m_upscalerConstants.GetAddressOf());
+                    nr_capture::postFxBindingObserved(
+                        nrEasu, nr_capture::PostFxBinding::buffer, m_upscalerConstants.Get());
                 }
                 if (sharpening) {
                     m_ovrSubmissionContext->CSSetUnorderedAccessViews(
@@ -240,18 +291,41 @@ namespace virtualdesktop_openxr {
                     m_ovrSubmissionContext->CSSetUnorderedAccessViews(
                         0, 1, xrSwapchain.stereoProjection[eye].uavs[imageIndex].GetAddressOf(), nullptr);
                 }
+                nr_capture::postFxBindingObserved(nrEasu,
+                                                  nr_capture::PostFxBinding::uav,
+                                                  sharpening
+                                                      ? xrSwapchain.intermediate[eye].uav.Get()
+                                                      : xrSwapchain.stereoProjection[eye].uavs[imageIndex].Get());
                 m_ovrSubmissionContext->CSSetSamplers(0, 1, m_linearClampSampler.GetAddressOf());
+                nr_capture::postFxBindingObserved(
+                    nrEasu, nr_capture::PostFxBinding::sampler, m_linearClampSampler.Get());
                 m_ovrSubmissionContext->CSSetShaderResources(0, 1, &inputSrv);
+                nr_capture::postFxBindingObserved(nrEasu, nr_capture::PostFxBinding::srv, inputSrv);
 
                 const uint32_t blockWidth = 16;
                 const uint32_t blockHeight = 16;
                 m_ovrSubmissionContext->Dispatch(((outputResolution.w + blockWidth - 1) / blockWidth),
                                                  ((outputResolution.h + blockHeight - 1) / blockHeight),
                                                  1);
+                nr_capture::sourceBankWriteObserved(sharpening
+                                                        ? xrSwapchain.intermediate[eye].image.Get()
+                                                        : xrSwapchain.stereoProjection[eye].images[imageIndex].Get(),
+                                                    m_ovrSubmissionContext.Get(),
+                                                    m_frameBegun,
+                                                    NR_DISPATCH);
+                nr_capture::observePostFxDispatch(nrEasu,
+                                                  m_frameBegun,
+                                                  eye,
+                                                  3,
+                                                  m_ovrSubmissionContext.Get(),
+                                                  (outputResolution.w + blockWidth - 1) / blockWidth,
+                                                  (outputResolution.h + blockHeight - 1) / blockHeight,
+                                                  1);
             }
 
             if (sharpening) {
                 m_ovrSubmissionContext->CSSetShader(m_sharpenShader.Get(), nullptr, 0);
+                nr_capture::postFxBindingObserved(nrCas, nr_capture::PostFxBinding::shader, m_sharpenShader.Get());
                 {
                     SharpenCSConstants constants{};
                     // If we upscaled at the previous stage, the image occupies the entire texture.
@@ -272,34 +346,88 @@ namespace virtualdesktop_openxr {
                              (AF1)outputResolution.h);
 
                     D3D11_MAPPED_SUBRESOURCE mappedResources;
-                    CHECK_HRCMD(m_ovrSubmissionContext->Map(
-                        m_upscalerConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResources));
+                    const HRESULT nrMapResult = m_ovrSubmissionContext->Map(
+                        m_upscalerConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResources);
+                    nr_capture::postFxMapReturned(
+                        nrCas, m_ovrSubmissionContext.Get(), m_upscalerConstants.Get(), nrMapResult);
+                    CHECK_HRCMD(nrMapResult);
                     memcpy(mappedResources.pData, &constants, sizeof(constants));
+                    nr_capture::postFxConstants(nrCas,
+                                                m_ovrSubmissionContext.Get(),
+                                                m_upscalerConstants.Get(),
+                                                mappedResources.pData,
+                                                sizeof(constants));
                     m_ovrSubmissionContext->Unmap(m_upscalerConstants.Get(), 0);
+                    nr_capture::postFxUnmapReturned(nrCas, m_ovrSubmissionContext.Get(), m_upscalerConstants.Get());
                     m_ovrSubmissionContext->CSSetConstantBuffers(0, 1, m_upscalerConstants.GetAddressOf());
+                    nr_capture::postFxBindingObserved(
+                        nrCas, nr_capture::PostFxBinding::buffer, m_upscalerConstants.Get());
                 }
                 m_ovrSubmissionContext->CSSetUnorderedAccessViews(
                     0, 1, xrSwapchain.stereoProjection[eye].uavs[imageIndex].GetAddressOf(), nullptr);
+                nr_capture::postFxBindingObserved(
+                    nrCas, nr_capture::PostFxBinding::uav, xrSwapchain.stereoProjection[eye].uavs[imageIndex].Get());
                 if (upscaling) {
                     m_ovrSubmissionContext->CSSetShaderResources(
                         0, 1, xrSwapchain.intermediate[eye].srv.GetAddressOf());
                 } else {
                     m_ovrSubmissionContext->CSSetShaderResources(0, 1, &inputSrv);
                 }
+                nr_capture::postFxBindingObserved(nrCas,
+                                                  nr_capture::PostFxBinding::srv,
+                                                  upscaling ? xrSwapchain.intermediate[eye].srv.Get() : inputSrv);
 
                 const uint32_t blockWidth = 16;
                 const uint32_t blockHeight = 16;
                 m_ovrSubmissionContext->Dispatch(((outputResolution.w + blockWidth - 1) / blockWidth),
                                                  ((outputResolution.h + blockHeight - 1) / blockHeight),
                                                  1);
+                nr_capture::sourceBankWriteObserved(xrSwapchain.stereoProjection[eye].images[imageIndex].Get(),
+                                                    m_ovrSubmissionContext.Get(),
+                                                    m_frameBegun,
+                                                    NR_DISPATCH);
+                nr_capture::observePostFxDispatch(nrCas,
+                                                  m_frameBegun,
+                                                  eye,
+                                                  4,
+                                                  m_ovrSubmissionContext.Get(),
+                                                  (outputResolution.w + blockWidth - 1) / blockWidth,
+                                                  (outputResolution.h + blockHeight - 1) / blockHeight,
+                                                  1);
             }
 
             if (m_frameGenerationMode) {
                 m_precompositor.pendingColourCommits[eye + 1] = xrSwapchain.stereoProjection[eye].ovrSwapchain;
             } else {
-                CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, xrSwapchain.stereoProjection[eye].ovrSwapchain));
+                CHECK_OVRCMD(commitSubmissionSwapchain(m_ovrSession, xrSwapchain.stereoProjection[eye].ovrSwapchain));
             }
             xrSwapchain.stereoProjection[eye].lastCommittedIndex = imageIndex;
+            if (nrFrame < 2) {
+                nrPostFx.finalColour[eye] = xrSwapchain.stereoProjection[eye].images[imageIndex].Get();
+                if (upscaling) {
+                    nrPostFx.easu[eye] =
+                        sharpening ? xrSwapchain.intermediate[eye].image.Get() : nrPostFx.finalColour[eye];
+                    auto& binding = nrPostFx.bindings[nrPostFx.bindingCount++];
+                    binding.kind = 3;
+                    binding.eye = eye;
+                    binding.shader = m_upscaleShader.Get();
+                    binding.buffer = m_upscalerConstants.Get();
+                    binding.srv = inputSrv;
+                    binding.uav = sharpening ? xrSwapchain.intermediate[eye].uav.Get()
+                                             : xrSwapchain.stereoProjection[eye].uavs[imageIndex].Get();
+                    binding.sampler = m_linearClampSampler.Get();
+                }
+                if (sharpening) {
+                    nrPostFx.cas[eye] = nrPostFx.finalColour[eye];
+                    auto& binding = nrPostFx.bindings[nrPostFx.bindingCount++];
+                    binding.kind = 4;
+                    binding.eye = eye;
+                    binding.shader = m_sharpenShader.Get();
+                    binding.buffer = m_upscalerConstants.Get();
+                    binding.srv = upscaling ? xrSwapchain.intermediate[eye].srv.Get() : inputSrv;
+                    binding.uav = xrSwapchain.stereoProjection[eye].uavs[imageIndex].Get();
+                }
+            }
             if (m_frameGenerationMode) {
                 m_precompositor.finalColour[eye] = xrSwapchain.stereoProjection[eye].images[imageIndex];
             }
@@ -322,12 +450,65 @@ namespace virtualdesktop_openxr {
             ID3D11UnorderedAccessView* nullUAV[] = {nullptr};
             m_ovrSubmissionContext->CSSetUnorderedAccessViews(0, 1, nullUAV, nullptr);
         }
+        if (nrFrame < 2) {
+            FrameGeneration::PrivateNrCanonicalBorrow canonical{};
+            auto* returnGuard = nr_capture::SourceReturnGuard::current();
+            CHECK_MSG(neuralInput && m_frameGeneration && returnGuard &&
+                          m_frameGeneration->borrowPrivateNrCanonical(canonical),
+                      "private NR postFX canonical source unavailable");
+            nrPostFx.canonical = canonical.texture;
+            nrPostFx.canonicalLifetime = canonical.resourceLifetime;
+            nrPostFx.fgContext = reinterpret_cast<uint64_t>(canonical.context);
+            nrPostFx.originalGlobalUnbindReturned = true;
+            CHECK_MSG(nrEngine.acquirePostFx(nrFrame, nrPostFx, *returnGuard),
+                      "private NR postFX source ownership failed");
+            for (uint32_t eye = 0; eye < 2; ++eye) {
+                const auto captureStage = [&](uint64_t role, uint32_t kind) {
+                    nr_capture::PostFxRecord record{};
+                    CHECK_MSG(nr_capture::copyPostFxRecord(m_frameBegun, eye, kind, record),
+                              "private NR actual postFX geometry unavailable");
+                    nr_capture::SnapshotRoleMetadata geometry{};
+                    geometry.hostSerial = m_frameBegun;
+                    geometry.geometryObserved = true;
+                    geometry.rectWidth = record.outputWidth;
+                    geometry.rectHeight = record.outputHeight;
+                    geometry.cropWidth = geometry.rectWidth;
+                    geometry.cropHeight = geometry.rectHeight;
+                    geometry.releasedIndex =
+                        static_cast<uint32_t>(xrSwapchain.stereoProjection[eye].lastCommittedIndex);
+                    CHECK_MSG(nrEngine.capturePostFxRole(nrFrame, role, eye, *returnGuard, geometry),
+                              "private NR postFX snapshot failed");
+                };
+                if (upscaling)
+                    captureStage(NR_POST_EASU, 3);
+                if (sharpening)
+                    captureStage(NR_POST_CAS, 4);
+            }
+        }
+        if (nr_capture::hostRequest().valid) {
+            // Both eyes have finished and every original compute binding is now unbound.
+            for (uint32_t eye = 0; eye < 2; ++eye) {
+                auto* finalColour = m_precompositor.finalColour[eye].Get();
+                if (upscaling)
+                    nr_capture::warmLayout11(m_frameBegun,
+                                             NR_POST_EASU,
+                                             eye,
+                                             sharpening ? xrSwapchain.intermediate[eye].image.Get() : finalColour);
+                if (sharpening)
+                    nr_capture::warmLayout11(m_frameBegun, NR_POST_CAS, eye, finalColour);
+            }
+        }
     }
 
     void OpenXrRuntime::alignDepthLayer(const XrSwapchainSubImage** color,
                                         const XrSwapchainSubImage** depth,
+                                        const XrCompositionLayerDepthInfoKHR* const* depthMetadata,
                                         ovrLayerEyeFovDepth& layer) {
         Swapchain& owner = *(Swapchain*)color[0]->swapchain;
+        const bool reencode =
+            depthMetadata[0] && depthMetadata[1] && !sameDepthEncoding(*depthMetadata[0], *depthMetadata[1]);
+        if (reencode)
+            layer.ProjectionDesc = commonDepthProjection(*depthMetadata[0], *depthMetadata[1]);
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
             if (!depth[eye]) {
                 continue;
@@ -335,12 +516,19 @@ namespace virtualdesktop_openxr {
             Swapchain& input = *(Swapchain*)depth[eye]->swapchain;
             const auto& sourceRect = depth[eye]->imageRect;
             const auto& destinationRect = layer.Viewport[eye];
+            const bool captureDepth = m_frameGenerationMode && m_precompositor.isFirstProjectionLayer;
+            const auto encoding =
+                reencode ? depthEncodingTransform(*depthMetadata[eye], layer.ProjectionDesc) : DepthEncodingTransform{};
             ovrTextureSwapChainDesc colorDesc{};
-            CHECK_OVRCMD(ovr_GetTextureSwapChainDesc(m_ovrSession, layer.ColorTexture[eye], &colorDesc));
-            if (input.ovrDesc.Width == colorDesc.Width && input.ovrDesc.Height == colorDesc.Height &&
+            CHECK_OVRCMD(submissionSwapchainDescription(m_ovrSession, layer.ColorTexture[eye], &colorDesc));
+            if (!reencode && input.ovrDesc.Width == colorDesc.Width && input.ovrDesc.Height == colorDesc.Height &&
                 sourceRect.offset.x == destinationRect.Pos.x && sourceRect.offset.y == destinationRect.Pos.y &&
                 sourceRect.extent.width == destinationRect.Size.w &&
                 sourceRect.extent.height == destinationRect.Size.h) {
+                if (captureDepth) {
+                    const auto& source = input.resolvedSlices[depth[eye]->imageArrayIndex];
+                    m_precompositor.finalDepth[eye] = source.images.at(source.lastCommittedIndex);
+                }
                 continue;
             }
 
@@ -349,7 +537,7 @@ namespace virtualdesktop_openxr {
             auto& output = owner.depthProjection[m_precompositor.layerIndex][eye];
             ovrTextureSwapChainDesc outputDesc{};
             if (output.ovrSwapchain) {
-                CHECK_OVRCMD(ovr_GetTextureSwapChainDesc(m_ovrSession, output.ovrSwapchain, &outputDesc));
+                CHECK_OVRCMD(submissionSwapchainDescription(m_ovrSession, output.ovrSwapchain, &outputDesc));
             }
             if (!output.ovrSwapchain || outputDesc.Width != colorDesc.Width || outputDesc.Height != colorDesc.Height) {
                 outputDesc = {};
@@ -360,19 +548,19 @@ namespace virtualdesktop_openxr {
                 outputDesc.ArraySize = outputDesc.MipLevels = outputDesc.SampleCount = 1;
                 outputDesc.BindFlags = ovrTextureBind_DX_DepthStencil;
                 SwapchainSlice candidate;
-                CHECK_OVRCMD(ovr_CreateTextureSwapChainDX(
+                CHECK_OVRCMD(createSubmissionSwapchain(
                     m_ovrSession, m_ovrSubmissionDevice.Get(), &outputDesc, &candidate.ovrSwapchain));
                 auto releaseCandidate = MakeScopeGuard([&] {
                     if (candidate.ovrSwapchain) {
-                        ovr_DestroyTextureSwapChain(m_ovrSession, candidate.ovrSwapchain);
+                        destroySubmissionSwapchain(m_ovrSession, candidate.ovrSwapchain);
                     }
                 });
                 int count = 0;
-                CHECK_OVRCMD(ovr_GetTextureSwapChainLength(m_ovrSession, candidate.ovrSwapchain, &count));
+                CHECK_OVRCMD(submissionSwapchainLength(m_ovrSession, candidate.ovrSwapchain, &count));
                 CHECK_MSG(count > 0, "Aligned depth swapchain has no images");
                 for (int index = 0; index < count; index++) {
                     ComPtr<ID3D11Texture2D> image;
-                    CHECK_OVRCMD(ovr_GetTextureSwapChainBufferDX(
+                    CHECK_OVRCMD(submissionSwapchainBuffer(
                         m_ovrSession, candidate.ovrSwapchain, index, IID_PPV_ARGS(image.GetAddressOf())));
                     D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
                     desc.Format = DXGI_FORMAT_D32_FLOAT;
@@ -386,7 +574,7 @@ namespace virtualdesktop_openxr {
                     flushSubmissionContext();
                     output.dsvs.clear();
                     output.images.clear();
-                    ovr_DestroyTextureSwapChain(m_ovrSession, output.ovrSwapchain);
+                    destroySubmissionSwapchain(m_ovrSession, output.ovrSwapchain);
                 }
                 output = std::move(candidate);
                 candidate.ovrSwapchain = nullptr;
@@ -411,51 +599,79 @@ namespace virtualdesktop_openxr {
                                                                m_d3d11ContextState.ReleaseAndGetAddressOf());
             }
             int index = 0;
-            CHECK_OVRCMD(ovr_GetTextureSwapChainCurrentIndex(m_ovrSession, output.ovrSwapchain, &index));
+            CHECK_OVRCMD(submissionSwapchainIndex(m_ovrSession, output.ovrSwapchain, &index));
             CHECK_MSG(index >= 0 && (size_t)index < output.dsvs.size(), "Aligned depth swapchain is incomplete");
-            AlignDepthPSConstants constants{sourceRect.offset,
-                                            sourceRect.extent,
-                                            {destinationRect.Pos.x, destinationRect.Pos.y},
-                                            {destinationRect.Size.w, destinationRect.Size.h}};
-            D3D11_MAPPED_SUBRESOURCE mapped{};
-            CHECK_HRCMD(
-                m_ovrSubmissionContext->Map(m_alignDepthConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
-            memcpy(mapped.pData, &constants, sizeof(constants));
-            m_ovrSubmissionContext->Unmap(m_alignDepthConstants.Get(), 0);
-            m_ovrSubmissionContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            m_ovrSubmissionContext->VSSetShader(m_fullQuadVS.Get(), nullptr, 0);
-            m_ovrSubmissionContext->PSSetShader(m_alignDepthShader.Get(), nullptr, 0);
-            m_ovrSubmissionContext->PSSetConstantBuffers(0, 1, m_alignDepthConstants.GetAddressOf());
-            m_ovrSubmissionContext->PSSetShaderResources(0, 1, source.srvs[source.lastCommittedIndex].GetAddressOf());
-            m_ovrSubmissionContext->OMSetRenderTargets(0, nullptr, output.dsvs[index].Get());
-            m_ovrSubmissionContext->OMSetDepthStencilState(m_noDepthReadState.Get(), 0xff);
-            m_ovrSubmissionContext->RSSetState(nullptr);
-            D3D11_VIEWPORT viewport{(float)destinationRect.Pos.x,
-                                    (float)destinationRect.Pos.y,
-                                    (float)destinationRect.Size.w,
-                                    (float)destinationRect.Size.h,
-                                    0.f,
-                                    1.f};
-            m_ovrSubmissionContext->RSSetViewports(1, &viewport);
-            m_ovrSubmissionContext->Draw(3, 0);
-            m_ovrSubmissionContext->OMSetRenderTargets(0, nullptr, nullptr);
-            m_ovrSubmissionContext->VSSetShader(nullptr, nullptr, 0);
-            m_ovrSubmissionContext->PSSetShader(nullptr, nullptr, 0);
-            ID3D11ShaderResourceView* nullSrv[] = {nullptr};
-            m_ovrSubmissionContext->PSSetShaderResources(0, 1, nullSrv);
-            ID3D11Buffer* nullCb[] = {nullptr};
-            m_ovrSubmissionContext->PSSetConstantBuffers(0, 1, nullCb);
-            CHECK_OVRCMD(ovr_CommitTextureSwapChain(m_ovrSession, output.ovrSwapchain));
+            renderDepth(source.srvs[source.lastCommittedIndex].Get(),
+                        output.dsvs[index].Get(),
+                        sourceRect,
+                        destinationRect,
+                        encoding);
+            if (captureDepth) {
+                // Accepted FG consumes a private bank, never this chain. Only
+                // the complete legacy fallback is allowed to commit it.
+                m_precompositor.finalDepth[eye] = output.images[index];
+                m_precompositor.pendingDepthCommits[eye] = output.ovrSwapchain;
+            } else {
+                CHECK_OVRCMD(commitSubmissionSwapchain(m_ovrSession, output.ovrSwapchain));
+            }
             layer.DepthTexture[eye] = output.ovrSwapchain;
         }
+    }
+
+    void OpenXrRuntime::renderDepth(ID3D11ShaderResourceView* source,
+                                    ID3D11DepthStencilView* destination,
+                                    const XrRect2Di& sourceRect,
+                                    const ovrRecti& destinationRect) {
+        renderDepth(source, destination, sourceRect, destinationRect, DepthEncodingTransform{});
+    }
+
+    void OpenXrRuntime::renderDepth(ID3D11ShaderResourceView* source,
+                                    ID3D11DepthStencilView* destination,
+                                    const XrRect2Di& sourceRect,
+                                    const ovrRecti& destinationRect,
+                                    const DepthEncodingTransform& encoding) {
+        AlignDepthPSConstants constants{sourceRect.offset,
+                                        sourceRect.extent,
+                                        {destinationRect.Pos.x, destinationRect.Pos.y},
+                                        {destinationRect.Size.w, destinationRect.Size.h},
+                                        encoding};
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        CHECK_HRCMD(m_ovrSubmissionContext->Map(m_alignDepthConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
+        memcpy(mapped.pData, &constants, sizeof(constants));
+        m_ovrSubmissionContext->Unmap(m_alignDepthConstants.Get(), 0);
+        m_ovrSubmissionContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        m_ovrSubmissionContext->VSSetShader(m_fullQuadVS.Get(), nullptr, 0);
+        m_ovrSubmissionContext->PSSetShader(m_alignDepthShader.Get(), nullptr, 0);
+        m_ovrSubmissionContext->PSSetConstantBuffers(0, 1, m_alignDepthConstants.GetAddressOf());
+        m_ovrSubmissionContext->PSSetShaderResources(0, 1, &source);
+        m_ovrSubmissionContext->OMSetRenderTargets(0, nullptr, destination);
+        m_ovrSubmissionContext->OMSetDepthStencilState(m_noDepthReadState.Get(), 0xff);
+        m_ovrSubmissionContext->RSSetState(nullptr);
+        D3D11_VIEWPORT viewport{(float)destinationRect.Pos.x,
+                                (float)destinationRect.Pos.y,
+                                (float)destinationRect.Size.w,
+                                (float)destinationRect.Size.h,
+                                0.f,
+                                1.f};
+        m_ovrSubmissionContext->RSSetViewports(1, &viewport);
+        m_ovrSubmissionContext->Draw(3, 0);
+        m_ovrSubmissionContext->OMSetRenderTargets(0, nullptr, nullptr);
+        m_ovrSubmissionContext->VSSetShader(nullptr, nullptr, 0);
+        m_ovrSubmissionContext->PSSetShader(nullptr, nullptr, 0);
+        ID3D11ShaderResourceView* nullSrv{};
+        m_ovrSubmissionContext->PSSetShaderResources(0, 1, &nullSrv);
+        ID3D11Buffer* nullCb{};
+        m_ovrSubmissionContext->PSSetConstantBuffers(0, 1, &nullCb);
     }
 
     void OpenXrRuntime::initializePrecompositorResources() {
         CHECK_HRCMD(m_ovrSubmissionDevice->CreateComputeShader(
             g_SharpeningCS, sizeof(g_SharpeningCS), nullptr, m_sharpenShader.ReleaseAndGetAddressOf()));
+        nr_capture::postFxShaderCreated(m_sharpenShader.Get(), g_SharpeningCS, sizeof(g_SharpeningCS));
         setDebugName(m_sharpenShader.Get(), "Sharpen CS");
         CHECK_HRCMD(m_ovrSubmissionDevice->CreateComputeShader(
             g_UpscalingCS, sizeof(g_UpscalingCS), nullptr, m_upscaleShader.ReleaseAndGetAddressOf()));
+        nr_capture::postFxShaderCreated(m_upscaleShader.Get(), g_UpscalingCS, sizeof(g_UpscalingCS));
         setDebugName(m_sharpenShader.Get(), "Upscale CS");
         CHECK_HRCMD(m_ovrSubmissionDevice->CreatePixelShader(
             g_AlignDepthPS, sizeof(g_AlignDepthPS), nullptr, m_alignDepthShader.ReleaseAndGetAddressOf()));
@@ -477,6 +693,7 @@ namespace virtualdesktop_openxr {
 
             CHECK_HRCMD(
                 m_ovrSubmissionDevice->CreateBuffer(&desc, nullptr, m_upscalerConstants.ReleaseAndGetAddressOf()));
+            nr_capture::postFxBufferCreated(m_upscalerConstants.Get());
             setDebugName(m_upscalerConstants.Get(), "Upscale/Sharpen Constants");
         }
     }

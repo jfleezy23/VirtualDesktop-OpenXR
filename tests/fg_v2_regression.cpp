@@ -376,8 +376,10 @@ void emptyPrimeSubmission(HMODULE module) {
         check(ordinary.primeOperations.submits == 4 && legacy.primeOperations.submits == 4 &&
                   ordinary.resetPrimeOperations.submits == 4 && legacy.resetPrimeOperations.submits == 4,
               "V1 and ordinary V2 primes retain actual real-image pack submissions");
-        check(ordinary.operations.submits == owned.operations.submits + 1,
-              "host-owned pairs also omit the final current-only repack submission");
+        check(ordinary.operations.submits == owned.operations.submits + 2 &&
+                  ordinary.operations.listResets == owned.operations.listResets + 2 &&
+                  ordinary.operations.listCloses == owned.operations.listCloses + 2,
+              "host-owned pairs omit outer repacking and the backend's barrier-only current-copy list");
     }
 }
 
@@ -414,7 +416,7 @@ void directHistoryCapture(HMODULE module) {
                                                    : (fidelityFx ? 4u
                                                       : timed    ? 6u
                                                                  : 5u) -
-                                                         (hostOwned ? 1u : 0u);
+                                                         (hostOwned ? 2u : 0u);
                     const unsigned resets =
                         prime ? (fidelityFx ? (hostOwned ? 3u : 4u) : (hostOwned ? 4u : 5u)) : submits;
                     const unsigned copies = hostOwned ? 2u : 4u;

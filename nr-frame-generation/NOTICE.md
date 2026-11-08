@@ -23,6 +23,13 @@ Binary releases include matching corresponding source for the module, generated 
 Use the release's source archive for the exact binary snapshot; the GitHub branch may advance after publication.
 Build instructions are in [tests/frame-generation.md](../tests/frame-generation.md).
 
+The current qualified source recipe builds the retained files in `prepared-ofxr`
+with `module-checkpoint/include` taking precedence for module headers. The derivation
+scripts remain available as history and tooling; regenerating from them does not
+reproduce all retained adaptations automatically. Follow the
+[retained module recipe](../docs/build-retained-fg.md) and the release's corresponding
+source manifest, which distinguishes portable publication inputs from as-built inputs.
+
 The proprietary neural-rendering DLL `nvngx_dlssnr.dll` is supplied separately and is not part of this release.
 
 The optional V4 early-output readiness adaptation follows the first-output/tail

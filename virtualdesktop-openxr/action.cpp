@@ -1165,13 +1165,15 @@ namespace virtualdesktop_openxr {
 
         // Latch the state of all inputs, and we will let the further calls to xrGetActionState*() do the triage.
         CHECK_OVRCMD(ovr_GetInputState(m_ovrSession, ovrControllerType_Touch, &m_cachedInputState));
+        const auto controllerTypes =
+            (doSide[xr::Side::Left] || doSide[xr::Side::Right]) ? ovr_GetConnectedControllerTypes(m_ovrSession) : 0u;
         for (uint32_t side = 0; side < xr::Side::Count; side++) {
             if (!doSide[side]) {
                 continue;
             }
 
             bool controllerTypeChanged = false;
-            const auto controllerTypes = ovr_GetConnectedControllerTypes(m_ovrSession);
+
             const bool isLingering =
                 (std::chrono::high_resolution_clock::now() - m_lastControllerSeenTime[side]).count() <
                 m_controllerLingerTimeout.load(std::memory_order_relaxed);

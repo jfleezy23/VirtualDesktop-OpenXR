@@ -23,11 +23,13 @@
 #pragma once
 
 #include <atomic>
+#include <type_traits>
 
 #include "framework/dispatch.gen.h"
 
 #include "accessibility.h"
 #include "frame_generation.h"
+#include "delivery_transport.h"
 #include "utils.h"
 #include "NrSpatialPipeline.h"
 
@@ -38,6 +40,8 @@
 #include <RuntimeConfiguration.h>
 
 namespace virtualdesktop_openxr {
+
+    struct DepthEncodingTransform;
 
     using namespace virtualdesktop_openxr::utils;
 
@@ -423,6 +427,11 @@ namespace virtualdesktop_openxr {
 
         struct PrecompositorState {
             std::array<ComPtr<ID3D11Texture2D>, xr::StereoView::Count> finalColour;
+            // Actual images written by resolve/alignment, before their chains
+            // can advance. Only the first projection can enter FG.
+            std::array<ComPtr<ID3D11Texture2D>, xr::StereoView::Count> finalDepth;
+            std::array<FrameGenerationDepthSource, xr::StereoView::Count> originalFgDepth;
+            std::array<ovrTextureSwapChain, xr::StereoView::Count> pendingDepthCommits{};
             // NR plus the two final sharpen/upscale outputs. Commit only final
             // chains actually sent down the legacy path.
             std::array<ovrTextureSwapChain, 3> pendingColourCommits{};
@@ -630,7 +639,9 @@ namespace virtualdesktop_openxr {
         XrSpaceLocationFlags getBodyJointPose(XrFullBodyJointMETA joint, XrTime time, XrPosef& pose) const;
 
         // frame.cpp
-        XrResult handleProjectionLayer(const XrCompositionLayerProjection& proj, ovrLayer_Union& layer);
+        XrResult handleProjectionLayer(const XrCompositionLayerProjection& proj,
+                                       ovrLayer_Union& layer,
+                                       std::unique_lock<std::mutex>* producerLease = nullptr);
         XrResult handleQuadCylinderLayer(const XrCompositionLayerQuad& quad,
                                          const XrCompositionLayerCylinderKHR& cylinder,
                                          ovrLayer_Union& layer);
@@ -650,6 +661,41 @@ namespace virtualdesktop_openxr {
         void initializeSubmissionDevice(const std::string& appGraphicsApi);
         void initializeSubmissionResources();
         void cleanupSubmissionDevice();
+        void initializeRuntimeDelivery();
+        ovrResult createSubmissionSwapchain(
+            ovrSession, IUnknown*, const ovrTextureSwapChainDesc*, ovrTextureSwapChain*, bool nativeOnly = false) const;
+        ovrResult submissionSwapchainLength(ovrSession, ovrTextureSwapChain, int*) const;
+        ovrResult submissionSwapchainDescription(ovrSession, ovrTextureSwapChain, ovrTextureSwapChainDesc*) const;
+        ovrResult submissionSwapchainIndex(ovrSession, ovrTextureSwapChain, int*) const;
+        ovrResult submissionSwapchainBuffer(ovrSession, ovrTextureSwapChain, int, REFIID, void**) const;
+        ovrResult commitSubmissionSwapchain(ovrSession, ovrTextureSwapChain) const;
+        void destroySubmissionSwapchain(ovrSession, ovrTextureSwapChain) const;
+        DeliveryTransport::Batch prepareDeliveryLayers(const std::vector<ovrLayer_Union>&, uint64_t);
+        ID3D11Device5* presentationDevice() const;
+        ID3D11DeviceContext4* presentationContext() const;
+        template <typename F>
+        decltype(auto) nativeRenderingCall(F&& operation,
+                                           const char* name = "NativeRendering",
+                                           long long nativeId = -1) const {
+            auto lease =
+                m_deliveryTransport ? m_deliveryTransport->sdkLease(name, nativeId) : DeliveryTransport::SdkLease{};
+            if (!lease.tracing())
+                return operation();
+            lease.enterCall();
+            if constexpr (std::is_void_v<decltype(operation())>) {
+                operation();
+                lease.leaveCall();
+                return;
+            } else {
+                decltype(auto) result = operation();
+                lease.leaveCall();
+                return result;
+            }
+        }
+        ovrResult waitToBeginSubmissionFrame(ovrSession, long long) const;
+        ovrResult beginSubmissionFrame(ovrSession, long long) const;
+        ovrResult endSubmissionFrame(
+            ovrSession, long long, const ovrViewScaleDesc*, const ovrLayerHeader* const*, unsigned) const;
         void cleanupSessionResources();
         void ensureAppSwapchainImages(Swapchain& xrSwapchain);
         std::vector<HANDLE> getSwapchainImages(Swapchain& xrSwapchain);
@@ -667,8 +713,8 @@ namespace virtualdesktop_openxr {
                                     const char* debugName) const;
         void flushD3D11Context();
         void flushSubmissionContext();
-        void serializeD3D11Frame();
-        void waitOnSubmissionDevice();
+        void serializeD3D11Frame(std::unique_lock<std::mutex>* producerLease = nullptr, uint64_t earlyAppFence = 0);
+        void waitOnSubmissionDevice(std::unique_lock<std::mutex>* producerLease = nullptr);
         bool requireNTHandleSharing() const;
 
         // d3d12_interop.cpp
@@ -677,7 +723,7 @@ namespace virtualdesktop_openxr {
         bool isD3D12Session() const;
         XrResult getSwapchainImagesD3D12(Swapchain& xrSwapchain, XrSwapchainImageD3D12KHR* d3d12Images, uint32_t count);
         void flushD3D12CommandQueue();
-        void serializeD3D12Frame();
+        void serializeD3D12Frame(std::unique_lock<std::mutex>* producerLease = nullptr);
 
         // vulkan_interop.cpp
         XrResult initializeVulkan(const XrGraphicsBindingVulkanKHR& vkBindings);
@@ -703,6 +749,7 @@ namespace virtualdesktop_openxr {
         void upscaler(const XrSwapchainSubImage** subImages, ovrLayerEyeFov& layer);
         void alignDepthLayer(const XrSwapchainSubImage** color,
                              const XrSwapchainSubImage** depth,
+                             const XrCompositionLayerDepthInfoKHR* const* depthMetadata,
                              ovrLayerEyeFovDepth& layer);
         void initializePrecompositorResources();
 
@@ -717,6 +764,7 @@ namespace virtualdesktop_openxr {
 
         // dlssnr.cpp
         void initializeDlssnrResources();
+        void observePrivateNrRawFrame(const XrFrameEndInfo& info);
         void cleanupDlssnrResources();
         void retainDlssnrRuntimeOnCleanupFailure() noexcept;
         void unloadDlssnrModule();
@@ -726,14 +774,16 @@ namespace virtualdesktop_openxr {
                                 const XrSwapchainSubImage** depth,
                                 const bool* depthInverted,
                                 ovrLayerEyeFov& layer,
-                                bool finalColour);
+                                bool finalColour,
+                                std::unique_lock<std::mutex>* producerLease = nullptr);
         void ensureDlssnrSwapchainResources(ovrTextureFormat format, const ovrSizei& resolution);
         void ensureSwapchainDlssnrResources(Swapchain& xrSwapchain, uint32_t slice);
         void upliftLayer(const XrSwapchainSubImage** views,
                          const XrSwapchainSubImage** depth,
                          const bool* depthInverted,
                          ovrLayerEyeFov& layer,
-                         bool finalColour);
+                         bool finalColour,
+                         std::unique_lock<std::mutex>* producerLease = nullptr);
 
         // Instance & OVR state.
         uint32_t m_apiMinor{0};
@@ -789,6 +839,9 @@ namespace virtualdesktop_openxr {
         bool m_isHeadless{false};
         ComPtr<ID3D11Device5> m_ovrSubmissionDevice;
         ComPtr<ID3D11DeviceContext4> m_ovrSubmissionContext;
+        std::unique_ptr<DeliveryTransport> m_deliveryTransport;
+        DeliveryTransport::Batch m_deliveryForFrame, m_deliveryForSubmission;
+        std::array<DeliveryTransport::Batch, 2> m_fgDepthDelivery;
         ComPtr<ID3DDeviceContextState> m_ovrSubmissionContextState;
         ComPtr<ID3D11Fence> m_ovrSubmissionFence;
         // Submission work has its own timeline; application signals must not satisfy these waits.
@@ -904,16 +957,29 @@ namespace virtualdesktop_openxr {
 
         uint32_t m_frameGenerationMode{};
         uint32_t m_frameGenerationBackend{};
+        uint32_t m_frameGenerationDepthMode{1};
         ComPtr<ID3D12Device> m_fgDevice;
         ComPtr<ID3D11Fence> m_fgSourceFence11;
         ComPtr<ID3D12Fence> m_fgSourceFence12;
         bool m_frameGenerationUnavailable{};
+        bool m_fgDepthGuidanceRequested{};
+        bool m_fgDepthModeFallbackWarned{};
         std::atomic<uint32_t> m_fgDesiredMultiplier{1};
         std::atomic<bool> m_fgNeedReprime{false};
         std::atomic<bool> m_fgTimelineReanchor{false};
         std::atomic<uint64_t> m_fgWorkerGroupNativeId{0}, m_fgPublishedEndNativeId{0};
         // Graphics/host methods use this lease. Queue waits never hold it.
         std::mutex m_fgContextMutex;
+        // Protected by m_asyncSubmissionMutex. A grant ends at acquisition,
+        // before the producer can yield its context for a GPU dependency.
+        bool m_fgProducerContextWaiting{};
+        void lockFrameGenerationProducerContext(std::unique_lock<std::mutex>& contextLease);
+        wil::unique_handle m_fgProducerFenceEvent;
+        void waitForFrameGenerationProducerFence(ID3D11Fence* fence,
+                                                 uint64_t value,
+                                                 std::unique_lock<std::mutex>* producerLease,
+                                                 const char* dependency,
+                                                 bool synchronousWait = false);
         // Protected by m_asyncSubmissionMutex. Legacy chains require full drain.
         bool m_fgActiveSubmission{}, m_fgActiveOwnedPixels{};
         std::unique_ptr<FrameGeneration> m_frameGeneration;
@@ -930,15 +996,42 @@ namespace virtualdesktop_openxr {
         OwnedFrameTransaction m_fgTransactionForFrame, m_fgTransactionForSubmission;
         OwnedFrameTransaction m_fgFailedTransaction;
         std::vector<ovrLayer_Union> m_fgFailedLayers;
+        // Synthetic roles live only in bank 0 and are owned by the serial worker.
+        // Real B has two banks for producer precopy overlapping active presentation.
         std::array<std::array<SwapchainSlice, 4>, 2> m_fgPresentationBanks;
+        struct FrameGenerationDepthBank {
+            SwapchainSlice output;
+            std::array<ComPtr<ID3D11Texture2D>, 2> sources;
+            std::array<ComPtr<ID3D11Texture2D>, 2> inputCopies;
+            std::array<ComPtr<ID3D11ShaderResourceView>, 2> srvs;
+            int preparedImage{-1};
+            uint64_t token{};
+        };
+        // Producer-owned snapshots share B's ticket bank and real-copy fence.
+        // Keep every source/view/chain alive on unknown consumer completion.
+        std::array<FrameGenerationDepthBank, 2> m_fgDepthPresentationBanks;
+        bool m_fgDepthSnapshotForFrame{};
+        bool m_fgDepthCompletionUnknown{};
         PredictionReservation m_fgReservationForSubmission;
         ovrSizei m_fgEyeResolution{};
         DXGI_FORMAT m_fgFormat{DXGI_FORMAT_UNKNOWN};
         bool prepareFrameGeneration(const XrFrameEndInfo& info);
-        void protectFrameGenerationSources();
+        void snapshotFrameGenerationDepth(OwnedFrameTransaction& transaction, const ovrLayerEyeFovDepth& layer);
+        void renderDepth(ID3D11ShaderResourceView* source,
+                         ID3D11DepthStencilView* destination,
+                         const XrRect2Di& sourceRect,
+                         const ovrRecti& destinationRect);
+        void renderDepth(ID3D11ShaderResourceView* source,
+                         ID3D11DepthStencilView* destination,
+                         const XrRect2Di& sourceRect,
+                         const ovrRecti& destinationRect,
+                         const DepthEncodingTransform& encoding);
+        void protectFrameGenerationSources(bool ordinaryFallback = false);
+        void orderApplicationAfterSourceReads(uint64_t complete);
         void cleanupFrameGeneration();
         void asyncFrameGenerationThread();
         void waitForFrameGenerationCapacity();
+        void noteFrameGenerationPresentationMiss() noexcept;
 
         // Body tracking thread.
         bool m_terminateBodyStateThread{false};
@@ -979,6 +1072,7 @@ namespace virtualdesktop_openxr {
         // Due to Vulkan semaphore transference rules(?) it looks like we may not be able to both signal and wait on an
         // imported semaphore. Use a separate fence for host-side flushes.
         VkFence m_vkFenceForFlush{VK_NULL_HANDLE};
+        bool m_vkFlushPending{false};
 
         // Workaround: the AMD driver does not seem to like closing the handle for the shared fence when using
         // OpenGL. We keep it alive for the whole session.

@@ -570,10 +570,16 @@ namespace virtualdesktop_openxr {
             // Cache common information.
             m_displayRefreshRate = m_displayRefreshRateChanged = hmdInfo.DisplayRefreshRate;
             m_idealFrameDuration = m_predictedFrameDuration = 1.0 / hmdInfo.DisplayRefreshRate;
-            m_cachedEyeInfo[xr::StereoView::Left] =
-                ovr_GetRenderDesc(m_ovrSession, ovrEye_Left, m_cachedHmdInfo.DefaultEyeFov[ovrEye_Left]);
-            m_cachedEyeInfo[xr::StereoView::Right] =
-                ovr_GetRenderDesc(m_ovrSession, ovrEye_Right, m_cachedHmdInfo.DefaultEyeFov[ovrEye_Right]);
+            m_cachedEyeInfo[xr::StereoView::Left] = nativeRenderingCall(
+                [&] {
+                    return ovr_GetRenderDesc(m_ovrSession, ovrEye_Left, m_cachedHmdInfo.DefaultEyeFov[ovrEye_Left]);
+                },
+                "RenderDescLeft");
+            m_cachedEyeInfo[xr::StereoView::Right] = nativeRenderingCall(
+                [&] {
+                    return ovr_GetRenderDesc(m_ovrSession, ovrEye_Right, m_cachedHmdInfo.DefaultEyeFov[ovrEye_Right]);
+                },
+                "RenderDescRight");
 
             for (uint32_t i = 0; i < xr::StereoView::Count; i++) {
                 m_cachedEyeFov[i].angleDown = -atan(m_cachedEyeInfo[i].Fov.DownTan);

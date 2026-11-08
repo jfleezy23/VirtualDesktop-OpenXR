@@ -2,7 +2,13 @@
 // Copyright (c) 2026 VirtualDesktop-OpenXR contributors.
 
 #include "pch.h"
+#include "PairCaptureNrEngine.h"
+#include "PairCaptureNrWarmLayouts.h"
 #include "runtime.h"
+#include "PairCaptureNrSdk.h"
+#include "PairCaptureNrPrivate.h"
+#include "PairCaptureNrReturnGuard.h"
+#include "PairCaptureNrSources.h"
 #include "log.h"
 
 namespace virtualdesktop_openxr {
@@ -11,7 +17,8 @@ namespace virtualdesktop_openxr {
                                            const XrSwapchainSubImage** depth,
                                            const bool* depthInverted,
                                            ovrLayerEyeFov& layer,
-                                           bool finalColour) {
+                                           bool finalColour,
+                                           std::unique_lock<std::mutex>* producerLease) {
         using namespace log;
         const auto& settings = m_precompositor.dlssnrSettings;
         const auto fallback = [&](int reason, const char* description) {
@@ -92,7 +99,7 @@ namespace virtualdesktop_openxr {
             ensureDlssnrSwapchainResources(format, resolution);
         }
         int imageIndex{};
-        CHECK_OVRCMD(ovr_GetTextureSwapChainCurrentIndex(m_ovrSession, m_dlssnrOutputSwapchain, &imageIndex));
+        CHECK_OVRCMD(submissionSwapchainIndex(m_ovrSession, m_dlssnrOutputSwapchain, &imageIndex));
         input.output = m_dlssnrOutputSwapchainImages.at(imageIndex).Get();
         if (!m_nrSpatialPipeline) {
             try {
@@ -133,52 +140,253 @@ namespace virtualdesktop_openxr {
         const bool reset = changed || featureChanged || sourceChains != m_nrSpatialSourceChains ||
                            m_nrSpatialLastFrame == UINT64_MAX || m_frameBegun != m_nrSpatialLastFrame + 1;
         bool submitAttempted{}, registered{};
+        nr_capture::NrWarmSubmissionFacts nrWarmSubmission{};
+        uint64_t nrSubmitBegin{};
+        auto& nrEngine = nr_capture::captureEngine();
+        const auto nrFrame = nrEngine.selectedFrame(m_frameBegun);
+        auto* nrReturnGuard = nr_capture::SourceReturnGuard::current();
+        const auto nrCapture = [&](uint64_t role, uint64_t eye) {
+            if (nrFrame < 2) {
+                nr_capture::SnapshotRoleMetadata geometry{};
+                geometry.hostSerial = m_frameBegun;
+                geometry.geometryObserved = true;
+                if (eye == 2) {
+                    geometry.rectWidth = uint64_t(resolution.w) * 2;
+                    geometry.rectHeight = resolution.h;
+                    geometry.releasedIndex = static_cast<uint32_t>(imageIndex);
+                } else {
+                    const auto* sub = role == NR_MODEL_DEPTH ? depth[eye] : views[eye];
+                    CHECK_MSG(sub, "private NR original geometry missing");
+                    geometry.rectXbits = static_cast<uint32_t>(sub->imageRect.offset.x);
+                    geometry.rectYbits = static_cast<uint32_t>(sub->imageRect.offset.y);
+                    geometry.rectWidth = sub->imageRect.extent.width;
+                    geometry.rectHeight = sub->imageRect.extent.height;
+                    geometry.releasedIndex =
+                        static_cast<uint32_t>(reinterpret_cast<Swapchain*>(sub->swapchain)->lastReleasedIndex);
+                    if (role == NR_PROXY || role == NR_PROXY_DEPTH || role == NR_SPATIAL_ANSWER ||
+                        role == NR_EXACT_PROXY) {
+                        geometry.rectXbits = geometry.rectYbits = 0;
+                        geometry.rectWidth = working[eye].w;
+                        geometry.rectHeight = working[eye].h;
+                    }
+                    if (role == NR_MODEL_DEPTH || role == NR_PROXY_DEPTH) {
+                        const auto& original = m_precompositor.originalFgDepth[eye];
+                        const auto bits = [](float value) noexcept {
+                            uint32_t b{};
+                            std::memcpy(&b, &value, sizeof b);
+                            return b;
+                        };
+                        geometry.minDepthBits = bits(original.minDepth);
+                        geometry.maxDepthBits = bits(original.maxDepth);
+                        geometry.nearZBits = bits(original.nearZ);
+                        geometry.farZBits = bits(original.farZ);
+                    }
+                }
+                // Resolved NR inputs and pipeline intermediates select slice zero;
+                // original app array selection remains in raw role/source640.
+                geometry.cropXbits = geometry.rectXbits;
+                geometry.cropYbits = geometry.rectYbits;
+                geometry.cropWidth = geometry.rectWidth;
+                geometry.cropHeight = geometry.rectHeight;
+                CHECK_MSG(nrReturnGuard && nrEngine.captureNrRole(nrFrame, role, eye, *nrReturnGuard, geometry),
+                          "private NR phase snapshot could not be recorded");
+            }
+        };
         try {
             ++m_submissionFenceValue;
-            CHECK_HRCMD(m_ovrSubmissionContext->Signal(m_ovrSubmissionCompletionFence.Get(), m_submissionFenceValue));
-            CHECK_HRCMD(m_dlssnrContext->GetCommandQueue()->Wait(m_dlssnrInFence.Get(), m_submissionFenceValue));
+            const auto nrInputSignalBegin = nr_capture::sourceClock();
+            const auto nrInputSignalResult =
+                m_ovrSubmissionContext->Signal(m_ovrSubmissionCompletionFence.Get(), m_submissionFenceValue);
+            const auto nrInputSignalEnd = nr_capture::sourceClock();
+            if (auto* returnGuard = nr_capture::SourceReturnGuard::current())
+                returnGuard->observeInputSignal(m_ovrSubmissionDevice.Get(),
+                                                m_ovrSubmissionContext.Get(),
+                                                m_ovrSubmissionCompletionFence.Get(),
+                                                m_submissionFenceValue,
+                                                nrInputSignalResult,
+                                                nrInputSignalBegin,
+                                                nrInputSignalEnd);
+            CHECK_HRESULT(nrInputSignalResult, "original NR input producer Signal");
+            // Raw app-to-S copies end at this existing input-ready value.
+            // Protect application reuse without waiting for inference/output.
+            if (m_deliveryTransport)
+                orderApplicationAfterSourceReads(m_submissionFenceValue);
+            const auto nrInputWaitBegin = nr_capture::sourceClock();
+            const auto nrInputWaitQueue = m_dlssnrContext->GetCommandQueue();
+            const auto nrInputWaitResult = nrInputWaitQueue->Wait(m_dlssnrInFence.Get(), m_submissionFenceValue);
+            const auto nrInputWaitEnd = nr_capture::sourceClock();
+            if (auto* returnGuard = nr_capture::SourceReturnGuard::current())
+                returnGuard->observeInputWait(m_dlssnrDevice.Get(),
+                                              m_dlssnrContext.get(),
+                                              m_dlssnrContext->GetObservedLifetimeEpoch(),
+                                              nrInputWaitQueue,
+                                              m_dlssnrInFence.Get(),
+                                              m_submissionFenceValue,
+                                              nrInputWaitResult,
+                                              nrInputWaitBegin,
+                                              nrInputWaitEnd);
+            CHECK_HRESULT(nrInputWaitResult, "original NR input queue Wait");
             auto commandList = m_dlssnrContext->GetCommandList();
+            vdxrfg::pair_capture::nr::NrRecordingOwnership nrRecordingFacts{};
+            if (m_dlssnrContext->BorrowRecordingOwnership(commandList, nrRecordingFacts))
+                nr_capture::sdkRecording(m_frameBegun, m_dlssnrContext.get(), nrRecordingFacts);
+
+            if (nrFrame < 2) {
+                nr_capture::CaptureNrInput nrSelected{};
+                nrSelected.recording = nrRecordingFacts;
+                nrSelected.pipelineObject = m_nrSpatialPipeline.get();
+                CHECK_MSG(m_nrSpatialPipeline && m_nrSpatialPipeline->BorrowActiveOwnership(nrSelected.pipeline) &&
+                              m_nrSpatialPipeline->BorrowActivePrograms(nrSelected.programs),
+                          "private NR actual pipeline borrow failed");
+                CHECK_MSG(m_dlssnrContext->TryObserveNextSubmission(nrSelected.prospectiveContextLifetime,
+                                                                    nrSelected.prospectiveSignalValue) &&
+                              nrEngine.acquireNr(nrFrame, nrSelected),
+                          "private NR late submission reservation or acquisition failed");
+                for (uint32_t eye = 0; eye < 2; ++eye) {
+                    nrCapture(NR_MODEL_COLOUR, eye);
+                    nrCapture(NR_MODEL_DEPTH, eye);
+                }
+            }
             m_nrSpatialPipeline->RecordInputs(commandList.Commands.Get());
+            if (nrFrame < 2)
+                for (uint32_t eye = 0; eye < 2; ++eye) {
+                    nrCapture(NR_PROXY, eye);
+                    nrCapture(NR_PROXY_DEPTH, eye);
+                }
             m_nrSpatialFeatures = true;
             for (uint32_t eye = 0; eye < 2; ++eye) {
                 const auto work = m_nrSpatialPipeline->GetWorkingEye(eye);
-                m_ngxParameters->Set("DLSSNR.DepthInverted", depthInverted[eye]);
-                m_ngxParameters->Set("DLSSNR.Enabled", true);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.DepthInverted", depthInverted[eye]);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.Enabled", true);
                 createDlssnrFeature(eye, working[eye], commandList.Commands.Get());
                 m_nrSpatialFeatureExtents[eye] = working[eye];
-                m_ngxParameters->Set("DLSSNR.Color", work.proxy);
-                m_ngxParameters->Set("DLSSNR.Output", work.answer);
-                m_ngxParameters->Set("DLSSNR.ColorSubrectBaseX", 0);
-                m_ngxParameters->Set("DLSSNR.ColorSubrectBaseY", 0);
-                m_ngxParameters->Set("DLSSNR.ColorSubrectWidth", working[eye].w);
-                m_ngxParameters->Set("DLSSNR.ColorSubrectHeight", working[eye].h);
-                m_ngxParameters->Set("DLSSNR.OutputSubrectBaseX", 0);
-                m_ngxParameters->Set("DLSSNR.OutputSubrectBaseY", 0);
-                m_ngxParameters->Set("DLSSNR.OutputSubrectWidth", working[eye].w);
-                m_ngxParameters->Set("DLSSNR.OutputSubrectHeight", working[eye].h);
-                m_ngxParameters->Set("DLSSNR.Depth", work.depth);
-                m_ngxParameters->Set("DLSSNR.DepthSubrectBaseX", 0);
-                m_ngxParameters->Set("DLSSNR.DepthSubrectBaseY", 0);
-                m_ngxParameters->Set("DLSSNR.DepthSubrectWidth", work.depth ? working[eye].w : 0);
-                m_ngxParameters->Set("DLSSNR.DepthSubrectHeight", work.depth ? working[eye].h : 0);
-                m_ngxParameters->Set("DLSSNR.Reset", reset);
-                m_ngxParameters->Set("DLSSNR.UseAutoMask", true);
-                m_ngxParameters->Set("DLSSNR.Style", settings.style);
-                m_ngxParameters->Set("DLSSNR.Intensity", settings.intensity);
-                m_ngxParameters->Set("DLSSNR.LocalToneStrength", settings.localToneStrength);
-                m_ngxParameters->Set("DLSSNR.LocalStructureStrength", settings.localStructureStrength);
-                m_ngxParameters->Set("DLSSNR.SkinStructureStrength", settings.skinStructureStrength);
-                m_ngxParameters->Set("DLSSNR.UICorrection", 0);
-                CHECK_NGXCMD(m_dlssnrFeatureEvaluate[eye](
-                    commandList.Commands.Get(), m_dlssnrFeature[eye], m_ngxParameters, nullptr));
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.Color", work.proxy);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.Output", work.answer);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.ColorSubrectBaseX", 0);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.ColorSubrectBaseY", 0);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.ColorSubrectWidth", working[eye].w);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.ColorSubrectHeight", working[eye].h);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.OutputSubrectBaseX", 0);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.OutputSubrectBaseY", 0);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.OutputSubrectWidth", working[eye].w);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.OutputSubrectHeight", working[eye].h);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.Depth", work.depth);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.DepthSubrectBaseX", 0);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.DepthSubrectBaseY", 0);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.DepthSubrectWidth", work.depth ? working[eye].w : 0);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.DepthSubrectHeight", work.depth ? working[eye].h : 0);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.Reset", reset);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.UseAutoMask", true);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.Style", settings.style);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.Intensity", settings.intensity);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.LocalToneStrength", settings.localToneStrength);
+                nr_capture::ObserveSet(
+                    m_ngxParameters, "DLSSNR.LocalStructureStrength", settings.localStructureStrength);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.SkinStructureStrength", settings.skinStructureStrength);
+                nr_capture::ObserveSet(m_ngxParameters, "DLSSNR.UICorrection", 0);
+                CHECK_NGXCMD(nr_capture::ObserveSdkCall(
+                    NR_EVALUATE,
+                    eye,
+                    reinterpret_cast<uint64_t>(m_dlssnrFeatureEvaluate[eye]),
+                    commandList.Commands.Get(),
+                    m_ngxParameters,
+                    &m_dlssnrFeature[eye],
+                    reinterpret_cast<uint64_t>(m_dlssnrFeatureEvaluate[eye]),
+                    reinterpret_cast<uint64_t>(m_dlssnrFeatureRelease[eye]),
+                    [&] {
+                        return m_dlssnrFeatureEvaluate[eye](
+                            commandList.Commands.Get(), m_dlssnrFeature[eye], m_ngxParameters, nullptr);
+                    }));
             }
+            if (nrFrame < 2)
+                for (uint32_t eye = 0; eye < 2; ++eye) {
+                    nrCapture(NR_SPATIAL_ANSWER, eye);
+                    nrCapture(NR_POST_EVAL_COLOUR, eye);
+                    nrCapture(NR_PRE_RESOLVE_COLOUR, eye);
+                    nrCapture(NR_EXACT_PROXY, eye);
+                }
             m_nrSpatialPipeline->RecordResolve(commandList.Commands.Get());
+            nrCapture(NR_POST_RESOLVE, 2);
+            vdxrfg::pair_capture::nr::NrPipelineOwnership nrWarmGraph{};
+            const bool nrWarmInventory =
+                nr_capture::hostRequest().valid && m_nrSpatialPipeline &&
+                m_nrSpatialPipeline->BorrowActiveOwnership(nrWarmGraph) &&
+                nrWarmGraph.observedEpochs == vdxrfg::pair_capture::nr::NrPipelineOwnership::allEpochs &&
+                nrWarmGraph.device == nrRecordingFacts.device && nrWarmGraph.fence == nrRecordingFacts.fence &&
+                (nrWarmGraph.scratch[0].proxy && nrWarmGraph.scratch[0].answer && nrWarmGraph.scratch[0].depth &&
+                 nrWarmGraph.scratch[1].proxy && nrWarmGraph.scratch[1].answer && nrWarmGraph.scratch[1].depth);
+            if (nrWarmInventory) {
+                ID3D12Resource* noNativeDepth[2]{};
+                nr_capture::warmLayoutGraph12(m_frameBegun,
+                                              NR_SPATIAL85,
+                                              nrRecordingFacts.facts.nrCommandContextLifetimeEpoch,
+                                              nrWarmGraph,
+                                              noNativeDepth);
+            }
+            auto* nrToken = nrFrame < 2 ? nrEngine.beginNrSubmission(nrFrame) : nullptr;
+            CHECK_MSG(nrFrame >= 2 || nrToken, "private NR submission token unavailable");
             submitAttempted = true;
-            const auto fence = m_dlssnrContext->SubmitCommandList(std::move(commandList));
+            nrSubmitBegin = nr_capture::sourceClock();
+            const auto fence = m_dlssnrContext->SubmitCommandList(
+                std::move(commandList), nrToken, nr_capture::hostRequest().valid ? &nrWarmSubmission : nullptr);
+            const auto nrSubmitEnd = nr_capture::sourceClock();
+            if (auto* returnGuard = nr_capture::SourceReturnGuard::current())
+                returnGuard->observeSubmission(nrWarmSubmission, nrSubmitBegin, nrSubmitEnd);
+            if (nrFrame < 2)
+                CHECK_MSG(nrReturnGuard &&
+                              nrEngine.finishNrSubmission(nrFrame, nrWarmSubmission, fence, *nrReturnGuard),
+                          "private NR actual submission facts did not reconcile");
             m_nrSpatialPipeline->MarkSubmitted(fence);
             registered = true;
-            CHECK_HRCMD(m_ovrSubmissionContext->Wait(m_dlssnrOutFence.Get(), fence));
+            // Future NR must not block the active group's SDK GPU handoffs.
+            waitForFrameGenerationProducerFence(m_dlssnrOutFence.Get(), fence, producerLease, "NR-output");
+            const auto nrOutputWaitBegin = nr_capture::sourceClock();
+            const auto nrOutputWaitResult = m_ovrSubmissionContext->Wait(m_dlssnrOutFence.Get(), fence);
+            const auto nrOutputWaitEnd = nr_capture::sourceClock();
+            if (nr_capture::hostRequest().valid) {
+                nr_capture::SdkWarmFacts nrSdkWarm{};
+                const vdxrfg::pair_capture::nr::NrSubmissionKey actualBorrow{
+                    reinterpret_cast<uint64_t>(nrRecordingFacts.queue),
+                    reinterpret_cast<uint64_t>(nrRecordingFacts.fence),
+                    reinterpret_cast<uint64_t>(nrRecordingFacts.list),
+                    reinterpret_cast<uint64_t>(nrRecordingFacts.allocator),
+                    nrRecordingFacts.facts.nrRecordingEpoch};
+                const bool completeSubmission =
+                    nr_capture::warmSubmissionComplete(nrWarmSubmission,
+                                                       reinterpret_cast<uint64_t>(m_dlssnrContext.get()),
+                                                       nrRecordingFacts.facts.nrCommandContextLifetimeEpoch,
+                                                       actualBorrow,
+                                                       fence);
+                if (auto* returnGuard = nr_capture::SourceReturnGuard::current()) {
+                    returnGuard->observeNr(nrWarmSubmission, completeSubmission);
+                    returnGuard->observeOutputWait(m_ovrSubmissionContext.Get(),
+                                                   m_dlssnrOutFence.Get(),
+                                                   fence,
+                                                   nrOutputWaitResult,
+                                                   nrOutputWaitBegin,
+                                                   nrOutputWaitEnd);
+                }
+                nr_capture::sdkWarmFacts(nrSdkWarm);
+                nr_capture::hostWarmFrame(m_frameBegun,
+                                          nrRecordingFacts.facts.nrCommandContextLifetimeEpoch,
+                                          nrSdkWarm,
+                                          fence,
+                                          completeSubmission ? nrWarmSubmission.calls.original.result : E_FAIL,
+                                          nrOutputWaitResult,
+                                          nrWarmInventory && completeSubmission);
+            }
+            CHECK_HRESULT(nrOutputWaitResult, "m_ovrSubmissionContext->Wait(m_dlssnrOutFence.Get(), fence)");
         } catch (...) {
+            if (nrFrame < 2 && nrReturnGuard && nrSubmitBegin)
+                nrEngine.finishNrSubmission(nrFrame, nrWarmSubmission, 0, *nrReturnGuard);
+            if (auto* returnGuard = nr_capture::SourceReturnGuard::current()) {
+                if (nrSubmitBegin && !returnGuard->submissionEnd())
+                    returnGuard->observeSubmission(nrWarmSubmission, nrSubmitBegin, nr_capture::sourceClock());
+            }
+            if (auto* returnGuard = nr_capture::SourceReturnGuard::current())
+                if (!returnGuard->facts().nrSignalObserved)
+                    returnGuard->observeNr(nrWarmSubmission, false);
+            nr_capture::hostInvalidateWarm();
             m_nrSpatialNeedsFeatureReset = true;
             if (!submitAttempted) {
                 m_nrSpatialPipeline->DiscardRecording();

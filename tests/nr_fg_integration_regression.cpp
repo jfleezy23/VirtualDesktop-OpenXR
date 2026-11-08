@@ -3,9 +3,156 @@
 
 #include <d3d11_4.h>
 #include <chrono>
+#include <cstdlib>
 #include <thread>
+#include <detours.h>
 
 using namespace virtualdesktop_openxr;
+
+namespace {
+    // Fault injection at the actual COM boundary, including LTCG-inlined host
+    // methods. Real queue signals and event registrations are forwarded. Only
+    // the reported completion snapshots are scripted; this is not a physical
+    // device-removal or GPU-latency reproduction.
+    struct FenceCompletionScript {
+        enum class Mode {
+            Complete,
+            PendingReady,
+            StaleWake,
+            SplitSentinel,
+            RemovedInitial,
+            RemovedAfterWake,
+            CapturePending,
+            CapturePendingReady,
+            CapturePendingRemoved
+        };
+        using Completed = UINT64(STDMETHODCALLTYPE*)(ID3D11Fence*);
+        using Event = HRESULT(STDMETHODCALLTYPE*)(ID3D11Fence*, UINT64, HANDLE);
+        using Signal = HRESULT(STDMETHODCALLTYPE*)(ID3D11DeviceContext4*, ID3D11Fence*, UINT64);
+        inline static Completed originalCompleted{};
+        inline static Event originalEvent{};
+        inline static Signal originalSignal{};
+        inline static thread_local FenceCompletionScript* active{};
+        inline static thread_local bool forwarding{};
+        ID3D11DeviceContext4* context{};
+        ID3D11Fence* fence{};
+        UINT64 signaledValue{};
+        void* completedEntry{};
+        void* eventEntry{};
+        Mode mode{Mode::Complete};
+        bool measuring{}, registered{}, covered{};
+        unsigned initialReads{}, postReads{}, eventCalls{}, signals{};
+
+        static HRESULT STDMETHODCALLTYPE signal(ID3D11DeviceContext4* context, ID3D11Fence* fence, UINT64 value) {
+            auto* self = active;
+            if (self && context == self->context) {
+                ++self->signals;
+                if (!self->fence) {
+                    self->fence = fence;
+                    self->signaledValue = value;
+                    const auto table = *reinterpret_cast<void***>(fence);
+                    self->covered = table[8] == self->completedEntry && table[9] == self->eventEntry;
+                }
+            }
+            const auto wasForwarding = forwarding;
+            forwarding = true;
+            const auto result = originalSignal(context, fence, value);
+            forwarding = wasForwarding;
+            return result;
+        }
+        static HRESULT STDMETHODCALLTYPE event(ID3D11Fence* fence, UINT64 value, HANDLE handle) {
+            auto* self = active;
+            const bool observed = self && self->measuring && fence == self->fence && !forwarding;
+            if (observed)
+                ++self->eventCalls;
+            const auto wasForwarding = forwarding;
+            forwarding = true;
+            const auto result = originalEvent(fence, value, handle);
+            forwarding = wasForwarding;
+            if (observed && SUCCEEDED(result))
+                self->registered = true;
+            return result;
+        }
+        static UINT64 STDMETHODCALLTYPE completed(ID3D11Fence* fence) {
+            auto* self = active;
+            if (!self || !self->measuring || forwarding || fence != self->fence)
+                return originalCompleted(fence);
+            if (!self->registered) {
+                ++self->initialReads;
+                if (self->mode == Mode::RemovedInitial)
+                    return UINT64_MAX;
+                if (self->mode == Mode::CapturePendingReady && self->initialReads > 1)
+                    return originalCompleted(fence);
+                if (self->mode == Mode::CapturePendingRemoved && self->initialReads > 1)
+                    return UINT64_MAX;
+                return self->mode == Mode::Complete ? originalCompleted(fence) : 0;
+            }
+            ++self->postReads;
+            if (self->mode == Mode::RemovedAfterWake)
+                return UINT64_MAX;
+            if (self->mode == Mode::SplitSentinel)
+                return self->postReads == 1 ? 0 : UINT64_MAX;
+            if (self->mode == Mode::StaleWake)
+                return 0;
+            return originalCompleted(fence);
+        }
+        FenceCompletionScript(ID3D11Device5* device, ID3D11DeviceContext4* source) : context(source) {
+            check(!active, "one COM fence completion script");
+            ComPtr<ID3D11Fence> sample;
+            success(device->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&sample)),
+                    "completion script sample fence");
+            const auto table = *reinterpret_cast<void***>(sample.Get());
+            completedEntry = table[8];
+            eventEntry = table[9];
+            originalCompleted = reinterpret_cast<Completed>(completedEntry);
+            originalEvent = reinterpret_cast<Event>(eventEntry);
+            originalSignal = reinterpret_cast<Signal>((*reinterpret_cast<void***>(source))[147]);
+            active = this;
+            check(DetourTransactionBegin() == NO_ERROR && DetourUpdateThread(GetCurrentThread()) == NO_ERROR &&
+                      DetourAttach(reinterpret_cast<PVOID*>(&originalCompleted), completed) == NO_ERROR &&
+                      DetourAttach(reinterpret_cast<PVOID*>(&originalEvent), event) == NO_ERROR &&
+                      DetourAttach(reinterpret_cast<PVOID*>(&originalSignal), signal) == NO_ERROR &&
+                      DetourTransactionCommit() == NO_ERROR,
+                  "install real COM fence completion script");
+        }
+        ~FenceCompletionScript() {
+            if (DetourTransactionBegin() || DetourUpdateThread(GetCurrentThread()) ||
+                DetourDetach(reinterpret_cast<PVOID*>(&originalCompleted), completed) ||
+                DetourDetach(reinterpret_cast<PVOID*>(&originalEvent), event) ||
+                DetourDetach(reinterpret_cast<PVOID*>(&originalSignal), signal) || DetourTransactionCommit())
+                std::_Exit(3);
+            active = nullptr;
+        }
+        void begin(Mode selected) {
+            mode = selected;
+            registered = false;
+            initialReads = postReads = eventCalls = 0;
+            measuring = true;
+        }
+        void end() noexcept {
+            measuring = false;
+        }
+        void settleRealSignal() const {
+            check(fence && signaledValue && covered, "observer selected the actual queue-signaled COM fence");
+            const auto handle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            check(handle != nullptr, "completion observer real settling event");
+            const auto registered = originalEvent(fence, signaledValue, handle);
+            const auto waited = SUCCEEDED(registered) ? WaitForSingleObject(handle, 5000) : WAIT_FAILED;
+            CloseHandle(handle);
+            success(registered, "register actual copy completion before fault injection");
+            check(waited == WAIT_OBJECT_0, "actual copied GPU work settles before scripted observations");
+        }
+        void report(const char* scope) const {
+            std::printf("COM_FENCE_FAULT_OBSERVER scope=%s initial=%u postwake=%u events=%u signals=%u covered=%u\n",
+                        scope,
+                        initialReads,
+                        postReads,
+                        eventCalls,
+                        signals,
+                        unsigned(covered));
+        }
+    };
+} // namespace
 
 struct Interop {
     Gpu gpu;
@@ -97,6 +244,7 @@ struct Interop {
 };
 
 void run(const char* path, const std::string& scenario) {
+    const bool copyWaitProbe = scenario.rfind("copy-wait-", 0) == 0;
     Interop hw;
     FrameGeneration fg;
     FrameGeneration::InitInfo init{hw.device.Get(),
@@ -139,6 +287,58 @@ void run(const char* path, const std::string& scenario) {
         input.views[eye].fov[1] = input.views[eye].fov[2] = .8f;
     }
     OwnedFrameTransaction prime;
+    if (scenario.rfind("capture-query-", 0) == 0) {
+        using Mode = FenceCompletionScript::Mode;
+        const bool complete = scenario == "capture-query-complete";
+        const bool pending = scenario == "capture-query-pending";
+        const bool pendingReady = scenario == "capture-query-pending-ready";
+        const bool removedInitial = scenario == "capture-query-removed-initial";
+        const bool removedPending = scenario == "capture-query-pending-removed";
+        check(complete || pending || pendingReady || removedInitial || removedPending,
+              "known capture producer completion observation");
+        FenceCompletionScript observed(hw.device.Get(), hw.context.Get());
+        success(fg.capture(input, prime), "capture selects the actual producer fence");
+        observed.settleRealSignal();
+        hw.await(fg, prime);
+        ++input.serial;
+        input.time += 3 * input.period;
+        input.colour[0] = input.colour[1] = hw.texture(&b);
+        input.slots = cadence.plan(cadence.reserve(input.time - 30000000, input.time - 20000000, input.period, 3, 3),
+                                   input.time - 30000000,
+                                   true);
+        OwnedFrameTransaction next;
+        observed.begin(complete         ? Mode::Complete
+                       : pendingReady   ? Mode::CapturePendingReady
+                       : removedInitial ? Mode::RemovedInitial
+                       : removedPending ? Mode::CapturePendingRemoved
+                                        : Mode::CapturePending);
+        const auto result = fg.capture(input, next);
+        observed.end();
+        observed.report(scenario.c_str());
+        std::printf("CAPTURE_QUERY_RESULT hr=0x%08lx accepted=%u\n",
+                    static_cast<unsigned long>(result),
+                    unsigned(bool(next.ticket.token)));
+        const auto expected = removedInitial || removedPending ? VDXRFG_E_POISONED : pending ? VDXRFG_E_BUSY : S_OK;
+        check(result == expected, "capture preserves pending second chance and poisons either removal snapshot");
+        check(observed.covered && observed.initialReads == (complete || removedInitial ? 1u : 2u) &&
+                  observed.postReads == 0 && observed.eventCalls == 0,
+              "capture reads a completed producer once and preserves a pending producer's second chance");
+        if (removedInitial || removedPending) {
+            check(prime.ticket.token && !next.ticket.token && !fg.initialized() && fg.shutdown() == VDXRFG_E_POISONED,
+                  "producer removal retains the owned graph and accepts no new transaction");
+            std::puts("PASS: COM removal observation; no physical GPU reset is claimed");
+            return;
+        }
+        check(bool(next.ticket.token) == !pending, "only completed producer snapshots accept a new transaction");
+        if (next.ticket.token) {
+            hw.await(fg, next);
+            hw.retire(fg, next);
+        }
+        hw.retire(fg, prime);
+        success(fg.shutdown(), "shutdown settled capture producer observation host");
+        hw.gpu.noErrors();
+        return;
+    }
     if (scenario == "invalid-plan") {
         input.slots.count = 0;
         check(fg.capture(input, prime) == VDXRFG_E_REJECTED && !prime.ticket.token,
@@ -147,9 +347,65 @@ void run(const char* path, const std::string& scenario) {
         return;
     }
     success(fg.capture(input, prime), "capture finalized D3D11 stereo pixels");
-    hw.await(fg, prime);
+    if (copyWaitProbe) {
+        HANDLE event{};
+        const auto prepared = fg.prepareOutputReadyWait(prime, event);
+        if (prepared == VDXRFG_E_BUSY) {
+            check(event && WaitForSingleObject(event, 5000) == WAIT_OBJECT_0,
+                  "bounded real output-ready event before copy wait probe");
+            success(fg.prepareOutputReadyWait(prime, event), "authoritative output readiness after event");
+        } else {
+            success(prepared, "completed real output before copy wait probe");
+        }
+    } else {
+        hw.await(fg, prime);
+    }
     check(fg.shutdown() == VDXRFG_E_BUSY && fg.reset(0) == VDXRFG_E_BUSY, "live interop ticket retains graph");
     auto output = hw.texture();
+    if (copyWaitProbe) {
+        using Mode = FenceCompletionScript::Mode;
+        check(scenario == "copy-wait-complete" || scenario == "copy-wait-pending-ready" ||
+                  scenario == "copy-wait-stale-wake" || scenario == "copy-wait-removed-initial" ||
+                  scenario == "copy-wait-removed-postwake",
+              "known copy-wait COM observation");
+        FenceCompletionScript observed(hw.device.Get(), hw.context.Get());
+        success(fg.copyOutput(prime, FrameGenerationRole::real, output.Get()), "queue actual observed real-role copy");
+        check(observed.signals == 1 && observed.signaledValue == prime.consumerValue,
+              "observer selected this validated role's actual consumer fence and value");
+        observed.settleRealSignal();
+        check(hw.read(output.Get()) == a, "actual copied pixels precede scripted fence observations");
+        const bool complete = scenario == "copy-wait-complete";
+        const bool removedInitial = scenario == "copy-wait-removed-initial";
+        const bool removedPost = scenario == "copy-wait-removed-postwake";
+        const bool stale = scenario == "copy-wait-stale-wake";
+        observed.begin(complete         ? Mode::Complete
+                       : removedInitial ? Mode::RemovedInitial
+                       : removedPost    ? Mode::RemovedAfterWake
+                       : stale          ? Mode::StaleWake
+                                        : Mode::PendingReady);
+        const auto result = fg.waitForCopy(prime, FrameGenerationRole::real, 1000);
+        observed.end();
+        observed.report(scenario.c_str());
+        const auto expected = removedInitial || removedPost ? VDXRFG_E_POISONED : stale ? VDXRFG_E_BUSY : S_OK;
+        check(result == expected, "copy wait honors the authoritative current role's completion snapshot");
+        check(observed.covered && observed.initialReads == 1 &&
+                  observed.postReads == (complete || removedInitial ? 0u : 1u) &&
+                  observed.eventCalls == (complete || removedInitial ? 0u : 1u),
+              "copy wait uses one validated initial snapshot and at most one authoritative post-event snapshot");
+        if (removedInitial || removedPost) {
+            check(prime.ticket.token && !fg.initialized() && fg.shutdown() == VDXRFG_E_POISONED &&
+                      fg.shutdown() == VDXRFG_E_POISONED,
+                  "injected removal keeps the owned transaction and poisoned graph retained");
+            std::puts("PASS: COM removal fault observation retains the graph; no physical GPU reset is claimed");
+            return;
+        }
+        success(fg.waitForCopy(prime, FrameGenerationRole::real, 1000),
+                "removing the observer restores actual completed-copy readiness");
+        success(fg.retire(prime), "retire the actual settled copy after bounded observer case");
+        success(fg.shutdown(), "shutdown settled copy-wait observation host");
+        hw.gpu.noErrors();
+        return;
+    }
     if (scenario == "source-overwrite") {
         success(fg.copyOutput(prime, FrameGenerationRole::real, output.Get()), "protect real pixels before reuse");
         hw.context->UpdateSubresource(input.colour[0].Get(), 0, nullptr, b.data(), width * 4, 0);

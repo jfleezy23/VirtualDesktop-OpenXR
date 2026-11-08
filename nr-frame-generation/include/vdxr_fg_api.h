@@ -190,6 +190,74 @@ typedef struct VDXRFG_ApiV4 {
 
 typedef HRESULT(WINAPI* VDXRFG_GetApiV4Fn)(VDXRFG_ApiV4*) VDXRFG_NOEXCEPT;
 
+/* V5 retains all V3 color semantics and optionally snapshots a canonical
+ * R32_FLOAT stereo atlas. It is one mip/slice/sample, exactly color width /
+ * height, same device, COMMON at handoff. Base views describe its normalized
+ * final-color projection. Old envelopes and exports remain unchanged. */
+#define VDXRFG_API_VERSION_5 5u
+#define VDXRFG_DEPTH_CANONICAL_TRANSPORT 1u
+/* Advertised only when the NVIDIA Medium endpoint preference consumer is
+ * linked. V5 Create rejects a guide with FIDELITYFX_FULL. */
+#define VDXRFG_DEPTH_ENDPOINT_PREFERENCE 2u
+/* V5 Reset can change semantic opacity on guided NVIDIA contexts after all
+ * tickets retire. Advertised only with the implemented endpoint consumer. */
+#define VDXRFG_DEPTH_OPACITY_RESET 4u
+/* Optional V5 NVIDIA camera reconstruction consumer. Advertised only when
+ * that implementation is compiled; no public structure or table is extended. */
+#define VDXRFG_DEPTH_RECONSTRUCTION 8u
+#define VDXRFG_GUIDE_ENCODING_INVERSE_Z 1u
+/* V5 only, with a non-null guide_input and endpoint-preference support.
+ * Color is compositionally opaque regardless of stored alpha. This bypasses
+ * only depth-preference alpha eligibility; output alpha remains unchanged.
+ * Unsupported with FidelityFX. Initial mode; changing it requires negotiated
+ * DEPTH_OPACITY_RESET and a successful V5 Reset with one mode flag below. */
+#define VDXRFG_CREATE_COLOR_OPAQUE 16u
+/* V5 only: requires DEPTH_RECONSTRUCTION, this supported create bit, a
+ * non-null canonical guide_input and NVIDIA. Immutable for the context's
+ * lifetime, including history and opacity resets. Missing depth on a Submit
+ * preserves ordinary color FG rather than fabricating a guide. */
+#define VDXRFG_CREATE_DEPTH_RECONSTRUCTION 32u
+/* Reset reasons 0/1 retain their existing history-reset behavior and preserve
+ * opacity. V5 with DEPTH_OPACITY_RESET additionally accepts exactly one of
+ * these mode bits, optionally combined with reason 1. Unknown or conflicting
+ * bits, legacy entrypoints/contexts, and no-guide contexts are rejected.
+ * BUSY/rejection/failure does not change opacity or publish fresh lineage.
+ * Success clears color/guide pair history, then changes opacity; the next
+ * Submit primes a fresh pair. Submitted work retains its captured mode. */
+#define VDXRFG_RESET_COLOR_OPAQUE 0x100u
+#define VDXRFG_RESET_COLOR_ALPHA 0x200u
+
+typedef struct VDXRFG_CreateInfoV5 {
+    uint32_t struct_size, api_version;
+    VDXRFG_CreateInfoV3 base;
+    void* guide_input; /* Optional, retained until context destruction. */
+} VDXRFG_CreateInfoV5;
+
+typedef struct VDXRFG_SubmitInfoV5 {
+    uint32_t struct_size, api_version;
+    VDXRFG_SubmitInfoV3 base;
+    uint64_t guide_serial, guide_epoch;
+    /* Mask is 0 or 3. Mask 0 requires zero serial/epoch/encoding. Mask 3
+     * requires retained guide_input, base.serial and nonzero epoch. Invalid
+     * samples are -1; positive inverse view-axis meters include infinity=0. */
+    uint32_t guide_mask, guide_encoding;
+} VDXRFG_SubmitInfoV5;
+
+typedef struct VDXRFG_ApiV5 {
+    uint32_t struct_size, api_version;
+    uint32_t supported_create_flags, max_multiplier;
+    uint32_t supported_depth_capabilities, reserved;
+    HRESULT(WINAPI* Create)(const VDXRFG_CreateInfoV5*, void**) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Submit)(void*, const VDXRFG_SubmitInfoV5*, VDXRFG_TicketV1*) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Retire)(void*, uint64_t) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Reset)(void*, uint32_t) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* GetStatistics)(void*, VDXRFG_StatisticsV1*) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Destroy)(void*) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* GetOutputReadiness)(void*, uint64_t, uint32_t, VDXRFG_OutputReadinessV4*) VDXRFG_NOEXCEPT;
+} VDXRFG_ApiV5;
+
+typedef HRESULT(WINAPI* VDXRFG_GetApiV5Fn)(VDXRFG_ApiV5*) VDXRFG_NOEXCEPT;
+
 #ifdef __cplusplus
 }
 #endif

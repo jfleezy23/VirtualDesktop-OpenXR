@@ -11,6 +11,11 @@
 #include <algorithm>
 
 namespace {
+#ifdef VDXR_FG_PATCH_MOTION_EXPERIMENT
+    constexpr UINT srvCount = 8, uavCount = 4;
+#else
+    constexpr UINT srvCount = 7, uavCount = 3;
+#endif
     constexpr UINT imageWidth = 67, imageHeight = 43, eyes = 2, flowBlock = 4;
     using Pixels = std::vector<uint8_t>;
     using Pair = std::array<Pixels, 2>;
@@ -49,8 +54,8 @@ namespace {
             flowHeight = eyeStride * eyes / flowBlock;
             const auto viewFormat = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
             const auto allocationFormat = srgb ? DXGI_FORMAT_R8G8B8A8_TYPELESS : viewFormat;
-            D3D12_DESCRIPTOR_RANGE ranges[2]{{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 7, 0, 0, 0},
-                                             {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0, 0, 0}};
+            D3D12_DESCRIPTOR_RANGE ranges[2]{{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, srvCount, 0, 0, 0},
+                                             {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, uavCount, 0, 0, 0}};
             D3D12_ROOT_PARAMETER parameters[3]{};
             parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
             parameters[0].Constants = {0, 0, 62};
@@ -110,7 +115,7 @@ namespace {
 #endif
             D3D12_DESCRIPTOR_HEAP_DESC heap{};
             heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-            heap.NumDescriptors = 10;
+            heap.NumDescriptors = srvCount + uavCount;
             heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
             success(gpu.device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&descriptors)), "MRT shader descriptors");
             descriptorStride = gpu.device->GetDescriptorHandleIncrementSize(heap.Type);
@@ -126,11 +131,13 @@ namespace {
             for (UINT phase = 0; phase < 2; ++phase)
                 resources[phase + 4] =
                     texture(imageWidth * 2, imageHeight, 1, allocationFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
-            for (UINT index = 0; index < 7; ++index) {
+            for (UINT index = 0; index < srvCount; ++index) {
                 D3D12_SHADER_RESOURCE_VIEW_DESC view{};
                 view.Format = index < 2                  ? viewFormat
                               : index == 3 || index == 5 ? DXGI_FORMAT_R32_UINT
                                                          : DXGI_FORMAT_R32G32_SINT;
+                if (index == 7)
+                    view.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
                 view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 if (index < 2 || index == 6) {
                     view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
@@ -146,12 +153,12 @@ namespace {
                 handle.ptr += index * descriptorStride;
                 gpu.device->CreateShaderResourceView(index < 4 ? resources[index].Get() : nullptr, &view, handle);
             }
-            for (UINT index = 0; index < 3; ++index) {
+            for (UINT index = 0; index < uavCount; ++index) {
                 D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
-                view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                view.Format = index == 3 ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
                 view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
                 auto handle = descriptors->GetCPUDescriptorHandleForHeapStart();
-                handle.ptr += (index + 7) * descriptorStride;
+                handle.ptr += (index + srvCount) * descriptorStride;
                 gpu.device->CreateUnorderedAccessView(nullptr, nullptr, &view, handle);
             }
             for (UINT phase = 0; phase < 2; ++phase)
@@ -386,7 +393,7 @@ namespace {
             list->SetDescriptorHeaps(1, heaps);
             auto table = descriptors->GetGPUDescriptorHandleForHeapStart();
             list->SetGraphicsRootDescriptorTable(1, table);
-            table.ptr += 7 * descriptorStride;
+            table.ptr += srvCount * descriptorStride;
             list->SetGraphicsRootDescriptorTable(2, table);
             list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             const UINT lowFlags = parameters.flags & 0xffu;

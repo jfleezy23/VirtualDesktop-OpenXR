@@ -75,7 +75,7 @@ if ($UseExistingInputObjects) {
 }
 $libraries = @('dxgi.lib', 'dxguid.lib', 'd3d11.lib', 'd3d12.lib', 'opengl32.lib', 'ntdll.lib',
     'kernel32.lib', 'user32.lib', 'gdi32.lib', 'winspool.lib', 'comdlg32.lib', 'advapi32.lib',
-    'shell32.lib', 'ole32.lib', 'oleaut32.lib', 'uuid.lib', 'odbc32.lib', 'odbccp32.lib',
+    'shell32.lib', 'ole32.lib', 'oleaut32.lib', 'uuid.lib', 'odbc32.lib', 'odbccp32.lib', 'bcrypt.lib',
     (Join-Path $repo 'packages/Detours.4.0.1/lib/native/libs/x64/detours.lib'),
     (Join-Path $repo 'packages/Microsoft.GameInput.2.2.26100.6114/native/lib/x64/GameInput.lib'),
     (Join-Path $repo 'external/Vulkan-SDK/lib/vulkan-1.lib'),

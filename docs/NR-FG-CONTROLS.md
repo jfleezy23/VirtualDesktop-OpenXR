@@ -10,7 +10,7 @@ selector chooses stock or custom VDXR for the next VR launch.
 *The screenshots show the actual app with example settings. The appearance sliders are
 examples, not a preset applied by installation.*
 
-The 2026.10.27.1 release includes this same Controls executable with refreshed guides. The earlier-handoff
+The 2026.11.07.1 release includes this same Controls executable with refreshed guides. The earlier-handoff
 improvement is in the runtime and FG module; install the matching runtime package. Your saved global and game
 profiles remain in place.
 
@@ -222,7 +222,7 @@ From a full source checkout on Windows x64 with Python 3.13 and Tcl/Tk:
 
 Building Controls needs the pinned Python requirements below. The full regression
 command also compiles sampler shaders and requires Windows SDK **10.0.26100.0**
-(including FXC); see the [FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.10.27.1/tests/frame-generation.md).
+(including FXC); see the [FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.07.1/tests/frame-generation.md).
 
 ```powershell
 python -m venv bin/controls-build-env
