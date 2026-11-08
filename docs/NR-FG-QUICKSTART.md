@@ -1,7 +1,7 @@
 # Try VDXR NR and OFXR frame generation
 
-The [October 27 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.07.1)
-improves the first generated frame's handoff to Virtual Desktop. **OFXR 2×/3×/4×** and automatic per-game
+The [November 7 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.07.1)
+improves frame delivery while the next real frame prepares. **OFXR 2×/3×/4×** and automatic per-game
 NR/FG profiles are included; there is no new switch to enable the handoff improvement.
 NR processing resolution and coverage are independent, including **95% coverage / 80% processing** and
 **90% coverage / 85% processing**. FG offers Off, 2×, 3× and 4× and also works with NR off.
