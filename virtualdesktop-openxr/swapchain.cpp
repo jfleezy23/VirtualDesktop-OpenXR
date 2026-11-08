@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 #include "pch.h"
+#include "PairCaptureNrSources.h"
 
 #include "log.h"
 #include "runtime.h"
@@ -190,8 +191,14 @@ namespace virtualdesktop_openxr {
                 fov.RightTan = tan(m_cachedEyeFov[i].angleRight);
 
                 const float pixelDensity = m_supersamplingFactor * m_upscalingMultiplier;
-                const ovrSizei viewportSize = ovr_GetFovTextureSize(
-                    m_ovrSession, (i % xr::StereoView::Count) == 0 ? ovrEye_Left : ovrEye_Right, fov, pixelDensity);
+                const ovrSizei viewportSize = nativeRenderingCall(
+                    [&] {
+                        return ovr_GetFovTextureSize(m_ovrSession,
+                                                     (i % xr::StereoView::Count) == 0 ? ovrEye_Left : ovrEye_Right,
+                                                     fov,
+                                                     pixelDensity);
+                    },
+                    "FovTextureSize");
                 views[i].recommendedImageRectWidth =
                     xr::math::AlignTo<4>(std::min((uint32_t)viewportSize.w, views[i].maxImageRectWidth));
                 views[i].recommendedImageRectHeight =
@@ -371,6 +378,8 @@ namespace virtualdesktop_openxr {
         if (desc.MipLevels > 1) {
             desc.MiscFlags |= ovrTextureMisc_AllowGenerateMips;
         }
+        if (m_deliveryTransport && (createInfo->createFlags & XR_SWAPCHAIN_CREATE_PROTECTED_CONTENT_BIT))
+            return XR_ERROR_FEATURE_UNSUPPORTED;
         if (createInfo->createFlags & XR_SWAPCHAIN_CREATE_PROTECTED_CONTENT_BIT) {
             desc.MiscFlags |= ovrTextureMisc_ProtectedContent;
         }
@@ -393,7 +402,7 @@ namespace virtualdesktop_openxr {
         ovrTextureSwapChain ovrSwapchain{};
         auto releaseCandidate = MakeScopeGuard([&] {
             if (ovrSwapchain) {
-                ovr_DestroyTextureSwapChain(m_ovrSession, ovrSwapchain);
+                destroySubmissionSwapchain(m_ovrSession, ovrSwapchain);
             }
         });
         int length = 0;
@@ -402,13 +411,13 @@ namespace virtualdesktop_openxr {
         // - Our pre-processing shader does not support cubemaps.
         // - Our pre-processing shader does not support MSAA.
         // Additionally, OVR only uses KMT HANDLE, so if NT HANDLE are required, we must use our own images.
-        if (desc.Type == ovrTexture_2D && desc.SampleCount == 1 && !m_forceSlowpathSwapchains &&
+        if (desc.Type == ovrTexture_2D && desc.SampleCount == 1 && !m_forceSlowpathSwapchains && !m_deliveryTransport &&
             !requireNTHandleSharing()) {
             if (desc.ArraySize > 1) {
                 Log("Creating a swapchain with texture array\n");
             }
-            CHECK_OVRCMD(ovr_CreateTextureSwapChainDX(m_ovrSession, m_ovrSubmissionDevice.Get(), &desc, &ovrSwapchain));
-            CHECK_OVRCMD(ovr_GetTextureSwapChainLength(m_ovrSession, ovrSwapchain, &length));
+            CHECK_OVRCMD(createSubmissionSwapchain(m_ovrSession, m_ovrSubmissionDevice.Get(), &desc, &ovrSwapchain));
+            CHECK_OVRCMD(submissionSwapchainLength(m_ovrSession, ovrSwapchain, &length));
         } else {
             Log("Creating a slow-path swapchain (reason: %d)\n",
                 desc.Type != ovrTexture_2D ? 1
@@ -434,6 +443,7 @@ namespace virtualdesktop_openxr {
         }
         *swapchain = (XrSwapchain)candidate.release();
         releaseCandidate.Deactivate();
+        nr_capture::sourceSwapchainCreated(&xrSwapchain);
 
         TraceLoggingWrite(g_traceProvider, "xrCreateSwapchain", TLXArg(*swapchain, "Swapchain"));
 
@@ -480,21 +490,32 @@ namespace virtualdesktop_openxr {
 
         Swapchain& xrSwapchain = *(Swapchain*)swapchain;
 
+        // Flush above must succeed before retiring imports. Completed batches can
+        // otherwise pin destroyed swapchain images until a later rebind/session end.
+        for (const auto& slice : xrSwapchain.resolvedSlices) {
+            for (const auto& image : slice.dlssnrImages) {
+                if (m_nrSpatialPipeline)
+                    m_nrSpatialPipeline->RetireCompletedResource(image.Get());
+                if (m_nrNativePipeline)
+                    m_nrNativePipeline->RetireCompletedResource(image.Get());
+            }
+        }
+
         if (xrSwapchain.appSwapchain.ovrSwapchain &&
             (xrSwapchain.resolvedSlices.empty() ||
              xrSwapchain.resolvedSlices[0].ovrSwapchain != xrSwapchain.appSwapchain.ovrSwapchain)) {
-            ovr_DestroyTextureSwapChain(m_ovrSession, xrSwapchain.appSwapchain.ovrSwapchain);
+            destroySubmissionSwapchain(m_ovrSession, xrSwapchain.appSwapchain.ovrSwapchain);
         }
         while (!xrSwapchain.resolvedSlices.empty()) {
             auto ovrSwapchain = xrSwapchain.resolvedSlices.back().ovrSwapchain;
             if (ovrSwapchain) {
-                ovr_DestroyTextureSwapChain(m_ovrSession, ovrSwapchain);
+                destroySubmissionSwapchain(m_ovrSession, ovrSwapchain);
             }
             xrSwapchain.resolvedSlices.pop_back();
         }
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
             if (xrSwapchain.stereoProjection[eye].ovrSwapchain) {
-                ovr_DestroyTextureSwapChain(m_ovrSession, xrSwapchain.stereoProjection[eye].ovrSwapchain);
+                destroySubmissionSwapchain(m_ovrSession, xrSwapchain.stereoProjection[eye].ovrSwapchain);
             }
         }
         for (auto& [layerIndex, slices] : xrSwapchain.depthProjection) {
@@ -502,7 +523,7 @@ namespace virtualdesktop_openxr {
                 slice.dsvs.clear();
                 slice.images.clear();
                 if (slice.ovrSwapchain) {
-                    ovr_DestroyTextureSwapChain(m_ovrSession, slice.ovrSwapchain);
+                    destroySubmissionSwapchain(m_ovrSession, slice.ovrSwapchain);
                 }
             }
         }
@@ -510,8 +531,11 @@ namespace virtualdesktop_openxr {
         cleanupSwapchainImagesVulkan(xrSwapchain);
         cleanupSwapchainImagesOpenGL(xrSwapchain);
 
+        nr_capture::sourceSwapchainDestroyed(reinterpret_cast<const void*>(swapchain));
         delete &xrSwapchain;
         m_swapchains.erase(swapchain);
+        if (m_deliveryTransport)
+            m_deliveryTransport->collectRetired();
 
         return XR_SUCCESS;
     }
@@ -660,6 +684,7 @@ namespace virtualdesktop_openxr {
         // We never commit images here: this is because LibOVR producer/consumer model works much differently than
         // OpenXR. We will perform swapchain commits in preprocessSwapchainImage().
         xrSwapchain.lastReleasedIndex = xrSwapchain.lastWaitedIndex;
+        nr_capture::sourceImageReleased(&xrSwapchain, static_cast<uint32_t>(xrSwapchain.lastReleasedIndex));
         xrSwapchain.lastWaitedIndex = -1;
         xrSwapchain.dirty = true;
         xrSwapchain.acquiredIndices.pop_front();

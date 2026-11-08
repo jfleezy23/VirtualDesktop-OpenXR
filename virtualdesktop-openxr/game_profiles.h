@@ -71,7 +71,7 @@ namespace vdxr_profiles {
         int minimum;
         int maximum;
     };
-    inline constexpr std::array<Rule, 10> Rules{{
+    inline constexpr std::array<Rule, 11> Rules{{
         {"DLSSNR_Enabled", L"DLSSNR_Enabled", 0, 0, 1},
         {"DLSSNR_Style", L"DLSSNR_Style", 0, 0, 2},
         {"DLSSNR_Intensity", L"DLSSNR_Intensity", 100, 0, 100},
@@ -82,6 +82,7 @@ namespace vdxr_profiles {
         {"DLSSNR_ProcessingResolution", L"DLSSNR_ProcessingResolution", 100, 50, 100},
         {"FrameGenerationMode", L"FrameGenerationMode", 0, 0, 4},
         {"FrameGenerationBackend", L"FrameGenerationBackend", 0, 0, 1},
+        {"FrameGenerationDepthMode", L"FrameGenerationDepthMode", 1, 0, 2},
     }};
 
     inline bool isProfileSetting(const std::string& name) {

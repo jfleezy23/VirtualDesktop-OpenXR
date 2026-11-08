@@ -122,7 +122,9 @@ namespace {
                 bool reversedSlices,
                 bool markerEnabled,
                 const std::string& sharedMode = {},
-                bool enableShared3x = false) {
+                bool enableShared3x = false,
+                bool hostOwned = false,
+                bool deferred = false) {
         AtlasGpu gpu;
         auto input = gpu.texture(monoWidth, monoHeight, 2);
         std::array<ComPtr<ID3D12Resource>, 2> current;
@@ -134,6 +136,8 @@ namespace {
         for (UINT i = 0; i < 2; ++i) {
             current[i] = gpu.texture(monoWidth, monoHeight, 2, D3D12_RESOURCE_STATE_RENDER_TARGET);
             currentRaw[i] = current[i].Get();
+            if (hostOwned || deferred)
+                gpu.transfer(current[i].Get(), &arraySeed, D3D12_RESOURCE_STATE_RENDER_TARGET);
             if (i < multiplier - 1) {
                 synthetic[i] =
                     gpu.texture(atlas ? monoWidth * 2 : monoWidth, monoHeight, atlas ? 1 : 2, syntheticState);
@@ -171,7 +175,7 @@ namespace {
                                            backend,
                                            options,
                                            false,
-                                           true,
+                                           !hostOwned,
                                            xrfg::D3D12SyntheticOutputLayout::shared_stereo_atlas,
                                            enableShared3x),
                     "initialize opt-in shared synthetic atlases");
@@ -184,7 +188,9 @@ namespace {
                                            srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM,
                                            D3D12_RESOURCE_STATE_RENDER_TARGET,
                                            backend,
-                                           options),
+                                           options,
+                                           false,
+                                           !hostOwned),
                     "initialize unchanged default-native arrays");
         std::array<xrfg::D3D12ReprojectionView, 2> views{};
         for (UINT view = 0; view < 2; ++view) {
@@ -251,6 +257,8 @@ namespace {
             markerEnabled ? std::optional<xrfg::OverlayPlacement>(xrfg::OverlayPlacement{.07f, .03f, -2.0f, .23f, .17f})
                           : std::nullopt;
         const auto cycle = [&] {
+            if (hostOwned || deferred)
+                gpu.transfer(current[1].Get(), &arraySeed, D3D12_RESOURCE_STATE_RENDER_TARGET);
             const auto a = capture(0);
             xrfg::D3D12FrameSynthesisTicket prime{};
             success(synthesizer.submit_prime(a, views, 0, &prime), "prime backend differential");
@@ -278,9 +286,30 @@ namespace {
             }
             xrfg::D3D12FrameSynthesisTicket pair{};
             success(synthesizer.submit_pair_outputs(
-                        b, views, views, 0, 1, &pair, marker, {}, false, 1.0f / multiplier, extra),
+                        b, views, views, 0, 1, &pair, marker, {}, deferred, 1.0f / multiplier, extra),
                     "generate backend differential pair");
+            if (deferred) {
+                ComPtr<ID3D12Fence> fence;
+                success(synthesizer.completion_fence(&fence), "deferred completion fence");
+                gpu.wait(fence.Get(), pair.synthetic_fence_value);
+                if (!hostOwned) {
+                    check(pair.synthetic_fence_value < pair.fence_value &&
+                              fence->GetCompletedValue() < pair.fence_value,
+                          "legacy deferred copy retains distinct incomplete full ownership");
+                    check(gpu.transfer(current[1].Get(), nullptr, D3D12_RESOURCE_STATE_RENDER_TARGET) == arraySeed,
+                          "legacy deferred copy leaves the private real destination untouched before flush");
+                } else {
+                    check(pair.synthetic_fence_value == pair.fence_value,
+                          "host-owned restoration completes on synthesis with no deferred copy");
+                }
+                success(synthesizer.wait_for_previous_submission(10000),
+                        "bounded nonzero wait flushes deferred real copy and waits for full completion");
+            }
             completed(pair);
+            if (hostOwned || deferred)
+                check(gpu.transfer(current[1].Get(), nullptr, D3D12_RESOURCE_STATE_RENDER_TARGET) ==
+                          (hostOwned ? arraySeed : image(24)),
+                      "ordinary pair preserves host-owned private current or copies exact legacy B");
             snapshot();
             // This is a true repeated history ticket, with camera metadata
             // advancing while the captured image and slice identities remain.
@@ -294,6 +323,9 @@ namespace {
                         b, repeatedViews, repeatedViews, 0, 1, &repeated, marker, {}, false, 1.0f / multiplier, extra),
                     "generate true repeated-capture backend pair");
             completed(repeated);
+            if (hostOwned || deferred)
+                check(gpu.transfer(current[1].Get(), nullptr, D3D12_RESOURCE_STATE_RENDER_TARGET) == image(24),
+                      "true repeated capture still writes exact private current for both ownership modes");
             check(repeated.previous_serial == b.serial && repeated.current_serial == b.serial,
                   "backend repeated capture preserves capture identity");
             snapshot();
@@ -330,11 +362,16 @@ int main(int argc, char** argv) {
             gpuValidation->SetEnableSynchronizedCommandQueueValidation(TRUE);
             std::puts("GPU-based and synchronized queue validation enabled before device creation");
         }
-        check(argc == 4 || argc == 5,
+        check(argc >= 4 && argc <= 6,
               "nvidia|fidelityfx-full 2|3 full|srgb-crop-marker|reversed-crop-marker [shared-3x[-slow|-fast|-bidir]] "
               "required");
         const std::string backendName = argv[1], scenario = argv[3];
-        const std::string sharedMode = argc == 5 ? argv[4] : "";
+        const std::string sharedMode = argc >= 5 ? argv[4] : "";
+        const std::string workMode = argc == 6 ? argv[5] : "";
+        check(workMode.empty() || workMode == "deferred" || workMode == "host-deferred",
+              "known current-copy work mode");
+        const bool hostOwned = workMode == "host-deferred", deferred = !workMode.empty();
+        check(!deferred || scenario == "full", "current-copy controls use full unmarked pixels");
         check(sharedMode.empty() || sharedMode == "shared-3x" || sharedMode == "shared-3x-slow" ||
                   sharedMode == "shared-3x-fast" || sharedMode == "shared-3x-bidir",
               "known shared-3x opt-in/fallback control");
@@ -356,7 +393,10 @@ int main(int argc, char** argv) {
                                 cropped,
                                 scenario == "reversed-crop-marker",
                                 cropped,
-                                sharedMode);
+                                sharedMode,
+                                false,
+                                hostOwned,
+                                deferred);
         const auto atlas = run(true,
                                backend,
                                multiplier,
@@ -365,7 +405,9 @@ int main(int argc, char** argv) {
                                scenario == "reversed-crop-marker",
                                cropped,
                                sharedMode,
-                               !sharedMode.empty());
+                               !sharedMode.empty(),
+                               hostOwned,
+                               deferred);
         check(native == atlas,
               "default-native and opted atlas outputs match exactly across repeated/marker/rebuild paths");
         std::puts("PASS: native/atlas backend byte identity, repeated captures, markers and rebuilds");

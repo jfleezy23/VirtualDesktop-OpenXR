@@ -16,13 +16,18 @@ def snapshot(repo, kind):
     folders = {"runtime": ["virtualdesktop-openxr", "RuntimeConfiguration", "nr-frame-generation/include"],
                "module": ["nr-frame-generation"],
                "fixture": ["virtualdesktop-openxr", "RuntimeConfiguration", "nr-frame-generation/include", "tests"]}
-    suffixes = {".c", ".cpp", ".h", ".hpp", ".hlsl", ".props", ".vcxproj", ".filters"}
+    suffixes = {".c", ".cpp", ".h", ".hpp", ".hlsl", ".hlsli", ".inc", ".props", ".vcxproj", ".filters"}
     for folder in folders[kind]:
         paths.update(p for p in (repo / folder).rglob("*") if p.is_file() and
                      (p.suffix in suffixes or p.name == "CMakeLists.txt"))
+    if kind in {"runtime", "fixture"}:
+        paths.add(repo / "nr-frame-generation/src/pair_capture_nr_validate.c")
+    if kind == "fixture":
+        paths.add(repo / "tests/build-fg-runtime-fixtures.py")
     if kind == "module":
-        for name in ("frame_generation", "frame_generation_pacing"):
+        for name in ("frame_generation", "frame_generation_pacing", "PairCaptureNrOwner"):
             paths.update((repo / "virtualdesktop-openxr" / (name + suffix)) for suffix in (".cpp", ".h"))
+        paths.add(repo / "virtualdesktop-openxr/PairCaptureNrPrivateApi.h")
         paths.update((repo / "tests").glob("fg_*.*"))
         paths.update(repo / "tests" / (name + ".cpp") for name in ("nr_fg_integration_regression", "nr_fg_presenter_regression", "nr_fg_event_regression", "nr_fg_ready_regression", "nr_fg_ready_wait_regression", "nr_fg_pack_regression", "nr_fg_bgra_regression", "nr_fg_early_ready_regression"))
         paths.add(repo / "virtualdesktop-openxr/FrameGenerationCopyCS.hlsl")

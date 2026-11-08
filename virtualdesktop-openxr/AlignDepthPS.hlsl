@@ -22,6 +22,12 @@ cbuffer config : register(b0)
     int2 sourceExtent;
     int2 destinationOrigin;
     int2 destinationExtent;
+    float sourceMin;
+    float sourceMax;
+    float targetNear;
+    float targetFar;
+    uint reencode;
+    float3 padding;
 };
 
 Texture2D<float> sourceDepth : register(t0);
@@ -33,5 +39,14 @@ float main(float4 position : SV_Position) : SV_Depth
     float2 relative = position.xy - float2(destinationOrigin);
     int2 source = sourceOrigin + int2(relative * float2(sourceExtent) / float2(destinationExtent));
     source = clamp(source, sourceOrigin, sourceOrigin + sourceExtent - 1);
-    return sourceDepth.Load(int3(source, 0));
+    float value = sourceDepth.Load(int3(source, 0));
+    // Retain exact raw bytes on the common identity path. Re-encode only
+    // when per-eye OpenXR projections differ from the shared OVR projection.
+    if (!reencode)
+        return value;
+    // Separate endpoint weights preserve the far endpoint of forward depth;
+    // 1-u or rounded projection coefficients can cancel it into infinity.
+    precise float nearWeight = (sourceMax - value) / (sourceMax - sourceMin);
+    precise float farWeight = (value - sourceMin) / (sourceMax - sourceMin);
+    return nearWeight * targetNear + farWeight * targetFar;
 }

@@ -21,9 +21,17 @@
 // SOFTWARE.
 
 #include "pch.h"
+#include "PairCaptureNrEngine.h"
+#include "PairCaptureNrPostFx.h"
+#include "PairCaptureNrWarmLayouts.h"
 
 #include "log.h"
 #include "runtime.h"
+#include "PairCaptureNrSdk.h"
+#include "PairCaptureNrPrivate.h"
+#include "PairCaptureNrReturnGuard.h"
+#include "PairCaptureNrSources.h"
+#include "PairCaptureNrModules.h"
 #include "utils.h"
 
 #define NVSDK_NGX_Parameter_DLSSNR_Width "DLSSNR.Width"
@@ -172,7 +180,24 @@ namespace ngx {
     }
 
     void loadModule(const std::filesystem::path& path) {
+        // Declared before candidate: original candidate destruction happens first.
+        // A cleanup-failure move into the global owner remains a live lease.
+        struct NrCandidateLease {
+            HMODULE module{};
+            ~NrCandidateLease() noexcept {
+                if (module && dlssnrModule.get() != module)
+                    virtualdesktop_openxr::nr_capture::observeManualModuleOwnerRelease(module);
+            }
+        } nrCandidateLease;
+        const auto nrLoadBegin = virtualdesktop_openxr::nr_capture::hostRequest().valid
+                                     ? virtualdesktop_openxr::nr_capture::sourceClock()
+                                     : 0;
         wil::unique_hmodule candidate(LoadLibraryW(path.c_str()));
+        if (virtualdesktop_openxr::nr_capture::hostRequest().valid)
+            nrCandidateLease.module = candidate.get();
+        if (virtualdesktop_openxr::nr_capture::hostRequest().valid)
+            virtualdesktop_openxr::nr_capture::observeManualModuleLoad(
+                candidate.get(), nrLoadBegin, virtualdesktop_openxr::nr_capture::sourceClock());
         CHECK_MSG(candidate.get(), "Failed to load DLSS-NR module");
         const auto init = reinterpret_cast<InitExt>(GetProcAddress(candidate.get(), "NVSDK_NGX_D3D12_Init_Ext"));
         const auto shutdown =
@@ -203,6 +228,14 @@ namespace ngx {
         NVSDK_NGX_D3D12_CreateFeature = create;
         NVSDK_NGX_D3D12_ReleaseFeature = release;
         NVSDK_NGX_D3D12_EvaluateFeature = evaluate;
+        if (virtualdesktop_openxr::nr_capture::hostRequest().valid) {
+            const uint64_t nrFunctions[5] = {reinterpret_cast<uint64_t>(init),
+                                             reinterpret_cast<uint64_t>(shutdown),
+                                             reinterpret_cast<uint64_t>(create),
+                                             reinterpret_cast<uint64_t>(evaluate),
+                                             reinterpret_cast<uint64_t>(release)};
+            virtualdesktop_openxr::nr_capture::observeManualModulePublication(dlssnrModule.get(), nrFunctions);
+        }
     }
 
 } // namespace ngx
@@ -216,19 +249,35 @@ namespace virtualdesktop_openxr {
                                             const ovrSizei& resolution,
                                             ID3D12GraphicsCommandList* commands) {
         if (!m_dlssnrFeature[eye]) {
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Width, resolution.w);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Height, resolution.h);
+            nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_Width, resolution.w);
+            nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_Height, resolution.h);
             // Select the lightweight network explicitly; the appearance Style is independent.
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Hint_Render_Preset, 2 /* Preset B */);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_CreationNodeMask, 1u);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_VisibilityNodeMask, 1u);
+            nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_Hint_Render_Preset, 2 /* Preset B */);
+            nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_CreationNodeMask, 1u);
+            nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_VisibilityNodeMask, 1u);
 
             // Keep each opaque feature paired with the dispatch table that created it.
             auto release = ngx::NVSDK_NGX_D3D12_ReleaseFeature;
             auto evaluate = ngx::NVSDK_NGX_D3D12_EvaluateFeature;
-            if (ngx::forceManualLoad ||
-                NVSDK_NGX_FAILED(ngx::NVSDK_NGX_D3D12_CreateFeature(
-                    commands, NVSDK_NGX_Feature_Reserved18 /* DLSS-NR */, m_ngxParameters, &m_dlssnrFeature[eye]))) {
+            const auto create = ngx::NVSDK_NGX_D3D12_CreateFeature;
+            // Only complete loadModule publication replaces this original SDK
+            // pointer. A retained module alone does not identify the active table.
+            const auto createKind = create == &::NVSDK_NGX_D3D12_CreateFeature ? NR_CREATE_SDK : NR_CREATE_MANUAL;
+            if (ngx::forceManualLoad || NVSDK_NGX_FAILED(nr_capture::ObserveSdkCall(
+                                            createKind,
+                                            eye,
+                                            reinterpret_cast<uint64_t>(create),
+                                            commands,
+                                            m_ngxParameters,
+                                            &m_dlssnrFeature[eye],
+                                            reinterpret_cast<uint64_t>(evaluate),
+                                            reinterpret_cast<uint64_t>(release),
+                                            [&] {
+                                                return create(commands,
+                                                              NVSDK_NGX_Feature_Reserved18 /* DLSS-NR */,
+                                                              m_ngxParameters,
+                                                              &m_dlssnrFeature[eye]);
+                                            }))) {
                 // User might be using an unsigned nvngx_dlssnr.dll that gets bounced by the NGX SDK. Try loading it
                 // manually.
                 if (!ngx::dlssnrModule) {
@@ -238,18 +287,35 @@ namespace virtualdesktop_openxr {
 
                 if (ngx::initializedDevice.Get() != m_dlssnrDevice.Get()) {
                     CHECK_MSG(ngx::Init_Ext && ngx::Shutdown1, "DLSS-NR module load did not complete");
-                    CHECK_NGXCMD(ngx::Init_Ext(123456,
-                                               virtualdesktop_openxr::programData.c_str(),
-                                               m_dlssnrDevice.Get(),
-                                               NVSDK_NGX_Version_API,
-                                               nullptr));
+                    CHECK_NGXCMD(nr_capture::ObserveSdkInit(
+                        reinterpret_cast<uint64_t>(ngx::Init_Ext), m_dlssnrDevice.Get(), [&] {
+                            return ngx::Init_Ext(123456,
+                                                 virtualdesktop_openxr::programData.c_str(),
+                                                 m_dlssnrDevice.Get(),
+                                                 NVSDK_NGX_Version_API,
+                                                 nullptr);
+                        }));
                     ngx::initializedDevice = m_dlssnrDevice;
                 }
 
                 release = ngx::NVSDK_NGX_D3D12_ReleaseFeature;
                 evaluate = ngx::NVSDK_NGX_D3D12_EvaluateFeature;
-                CHECK_NGXCMD(ngx::NVSDK_NGX_D3D12_CreateFeature(
-                    commands, NVSDK_NGX_Feature_Reserved18 /* DLSS-NR */, m_ngxParameters, &m_dlssnrFeature[eye]));
+                const auto manualCreate = ngx::NVSDK_NGX_D3D12_CreateFeature;
+                CHECK_NGXCMD(nr_capture::ObserveSdkCall(NR_CREATE_MANUAL,
+                                                        eye,
+                                                        reinterpret_cast<uint64_t>(manualCreate),
+                                                        commands,
+                                                        m_ngxParameters,
+                                                        &m_dlssnrFeature[eye],
+                                                        reinterpret_cast<uint64_t>(evaluate),
+                                                        reinterpret_cast<uint64_t>(release),
+                                                        [&] {
+                                                            return manualCreate(
+                                                                commands,
+                                                                NVSDK_NGX_Feature_Reserved18 /* DLSS-NR */,
+                                                                m_ngxParameters,
+                                                                &m_dlssnrFeature[eye]);
+                                                        }));
             }
             m_dlssnrFeatureRelease[eye] = release;
             m_dlssnrFeatureEvaluate[eye] = evaluate;
@@ -260,7 +326,16 @@ namespace virtualdesktop_openxr {
     void OpenXrRuntime::releaseDlssnrFeatures() {
         for (uint32_t eye = 0; eye < xr::StereoView::Count; ++eye) {
             if (m_dlssnrFeature[eye]) {
-                CHECK_NGXCMD(m_dlssnrFeatureRelease[eye](m_dlssnrFeature[eye]));
+                CHECK_NGXCMD(
+                    nr_capture::ObserveSdkCall(NR_RELEASE_FEATURE,
+                                               eye,
+                                               reinterpret_cast<uint64_t>(m_dlssnrFeatureRelease[eye]),
+                                               nullptr,
+                                               m_ngxParameters,
+                                               &m_dlssnrFeature[eye],
+                                               reinterpret_cast<uint64_t>(m_dlssnrFeatureEvaluate[eye]),
+                                               reinterpret_cast<uint64_t>(m_dlssnrFeatureRelease[eye]),
+                                               [&] { return m_dlssnrFeatureRelease[eye](m_dlssnrFeature[eye]); }));
                 m_dlssnrFeature[eye] = nullptr;
                 m_dlssnrFeatureRelease[eye] = nullptr;
                 m_dlssnrFeatureEvaluate[eye] = nullptr;
@@ -277,7 +352,8 @@ namespace virtualdesktop_openxr {
                                     const XrSwapchainSubImage** depth,
                                     const bool* depthInverted,
                                     ovrLayerEyeFov& layer,
-                                    bool finalColour) {
+                                    bool finalColour,
+                                    std::unique_lock<std::mutex>* producerLease) {
         // Recovery precedes route selection: changing processing/format must not
         // bypass an uncertain submission's retained descriptors and resources.
         if (m_nrNativeNeedsDrain || m_nrNativeNeedsFeatureReset || m_nrSpatialNeedsDrain ||
@@ -294,7 +370,7 @@ namespace virtualdesktop_openxr {
             m_nrSpatialNeedsFeatureReset = false;
         }
         if (m_precompositor.dlssnrSettings.processingResolution < 100 &&
-            upliftSpatialLayer(views, depth, depthInverted, layer, finalColour)) {
+            upliftSpatialLayer(views, depth, depthInverted, layer, finalColour, producerLease)) {
             // Entering spatial mode already drained the previous native features
             // before preparing its own generation. Retire the inactive scratch.
             if (m_nrNativePipeline) {
@@ -369,7 +445,16 @@ namespace virtualdesktop_openxr {
             // Destroy DLSS-NR feature - it will be re-created in the loop further below.
             for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
                 if (m_dlssnrFeature[eye]) {
-                    CHECK_NGXCMD(m_dlssnrFeatureRelease[eye](m_dlssnrFeature[eye]));
+                    CHECK_NGXCMD(
+                        nr_capture::ObserveSdkCall(NR_RELEASE_FEATURE,
+                                                   eye,
+                                                   reinterpret_cast<uint64_t>(m_dlssnrFeatureRelease[eye]),
+                                                   nullptr,
+                                                   m_ngxParameters,
+                                                   &m_dlssnrFeature[eye],
+                                                   reinterpret_cast<uint64_t>(m_dlssnrFeatureEvaluate[eye]),
+                                                   reinterpret_cast<uint64_t>(m_dlssnrFeatureRelease[eye]),
+                                                   [&] { return m_dlssnrFeatureRelease[eye](m_dlssnrFeature[eye]); }));
                     m_dlssnrFeature[eye] = nullptr;
                     m_dlssnrFeatureRelease[eye] = nullptr;
                     m_dlssnrFeatureEvaluate[eye] = nullptr;
@@ -380,7 +465,7 @@ namespace virtualdesktop_openxr {
         }
 
         int imageIndex = 0;
-        CHECK_OVRCMD(ovr_GetTextureSwapChainCurrentIndex(m_ovrSession, m_dlssnrOutputSwapchain, &imageIndex));
+        CHECK_OVRCMD(submissionSwapchainIndex(m_ovrSession, m_dlssnrOutputSwapchain, &imageIndex));
         nr_spatial::FrameInput nativeInput{};
         nativeInput.nativeAnswer = true;
         nativeInput.output = m_dlssnrOutputSwapchainImages.at(imageIndex).Get();
@@ -439,14 +524,128 @@ namespace virtualdesktop_openxr {
         }
 
         bool submitAttempted{}, registered{};
+        nr_capture::NrWarmSubmissionFacts nrWarmSubmission{};
+        uint64_t nrSubmitBegin{};
+        auto& nrEngine = nr_capture::captureEngine();
+        const auto nrFrame = nrEngine.selectedFrame(m_frameBegun);
+        auto* nrReturnGuard = nr_capture::SourceReturnGuard::current();
+        const auto nrCapture = [&](uint64_t role, uint64_t eye) {
+            if (nrFrame < 2) {
+                nr_capture::SnapshotRoleMetadata geometry{};
+                geometry.hostSerial = m_frameBegun;
+                geometry.geometryObserved = true;
+                if (eye == 2) {
+                    geometry.rectWidth = uint64_t(resolution.w) * 2;
+                    geometry.rectHeight = resolution.h;
+                    geometry.releasedIndex = static_cast<uint32_t>(imageIndex);
+                } else {
+                    const auto* sub = role == NR_MODEL_DEPTH ? depth[eye] : views[eye];
+                    CHECK_MSG(sub, "private NR original geometry missing");
+                    geometry.rectXbits = static_cast<uint32_t>(sub->imageRect.offset.x);
+                    geometry.rectYbits = static_cast<uint32_t>(sub->imageRect.offset.y);
+                    geometry.rectWidth = sub->imageRect.extent.width;
+                    geometry.rectHeight = sub->imageRect.extent.height;
+                    geometry.releasedIndex =
+                        static_cast<uint32_t>(reinterpret_cast<Swapchain*>(sub->swapchain)->lastReleasedIndex);
+                    if (role == NR_MODEL_DEPTH || role == NR_PROXY_DEPTH) {
+                        const auto& original = m_precompositor.originalFgDepth[eye];
+                        const auto bits = [](float value) noexcept {
+                            uint32_t b{};
+                            std::memcpy(&b, &value, sizeof b);
+                            return b;
+                        };
+                        geometry.minDepthBits = bits(original.minDepth);
+                        geometry.maxDepthBits = bits(original.maxDepth);
+                        geometry.nearZBits = bits(original.nearZ);
+                        geometry.farZBits = bits(original.farZ);
+                    }
+                }
+                // Resolved NR inputs and pipeline intermediates select slice zero;
+                // original app array selection remains in raw role/source640.
+                geometry.cropXbits = geometry.rectXbits;
+                geometry.cropYbits = geometry.rectYbits;
+                geometry.cropWidth = geometry.rectWidth;
+                geometry.cropHeight = geometry.rectHeight;
+                CHECK_MSG(nrReturnGuard && nrEngine.captureNrRole(nrFrame, role, eye, *nrReturnGuard, geometry),
+                          "private NR phase snapshot could not be recorded");
+            }
+        };
         try {
             // Serialize inputs.
             m_submissionFenceValue++;
-            CHECK_HRCMD(m_ovrSubmissionContext->Signal(m_ovrSubmissionCompletionFence.Get(), m_submissionFenceValue));
-            CHECK_HRCMD(m_dlssnrContext->GetCommandQueue()->Wait(m_dlssnrInFence.Get(), m_submissionFenceValue));
+            const auto nrInputSignalBegin = nr_capture::sourceClock();
+            const auto nrInputSignalResult =
+                m_ovrSubmissionContext->Signal(m_ovrSubmissionCompletionFence.Get(), m_submissionFenceValue);
+            const auto nrInputSignalEnd = nr_capture::sourceClock();
+            if (auto* returnGuard = nr_capture::SourceReturnGuard::current())
+                returnGuard->observeInputSignal(m_ovrSubmissionDevice.Get(),
+                                                m_ovrSubmissionContext.Get(),
+                                                m_ovrSubmissionCompletionFence.Get(),
+                                                m_submissionFenceValue,
+                                                nrInputSignalResult,
+                                                nrInputSignalBegin,
+                                                nrInputSignalEnd);
+            CHECK_HRESULT(nrInputSignalResult, "original NR input producer Signal");
+            // Raw app-to-S copies end at this existing input-ready value.
+            // Protect application reuse without waiting for inference/output.
+            if (m_deliveryTransport)
+                orderApplicationAfterSourceReads(m_submissionFenceValue);
+            const auto nrInputWaitBegin = nr_capture::sourceClock();
+            const auto nrInputWaitQueue = m_dlssnrContext->GetCommandQueue();
+            const auto nrInputWaitResult = nrInputWaitQueue->Wait(m_dlssnrInFence.Get(), m_submissionFenceValue);
+            const auto nrInputWaitEnd = nr_capture::sourceClock();
+            if (auto* returnGuard = nr_capture::SourceReturnGuard::current())
+                returnGuard->observeInputWait(m_dlssnrDevice.Get(),
+                                              m_dlssnrContext.get(),
+                                              m_dlssnrContext->GetObservedLifetimeEpoch(),
+                                              nrInputWaitQueue,
+                                              m_dlssnrInFence.Get(),
+                                              m_submissionFenceValue,
+                                              nrInputWaitResult,
+                                              nrInputWaitBegin,
+                                              nrInputWaitEnd);
+            CHECK_HRESULT(nrInputWaitResult, "original NR input queue Wait");
 
             // Time to apply the effect.
             auto cmdList = m_dlssnrContext->GetCommandList();
+            vdxrfg::pair_capture::nr::NrRecordingOwnership nrRecordingFacts{};
+            if (m_dlssnrContext->BorrowRecordingOwnership(cmdList, nrRecordingFacts))
+                nr_capture::sdkRecording(m_frameBegun, m_dlssnrContext.get(), nrRecordingFacts);
+
+            ID3D12Resource* nrNativeDepth[2]{};
+            if (nr_capture::hostRequest().valid && depth[0] && depth[1]) {
+                // Cache both actual sources before eye zero can mutate the parameter table.
+                for (uint32_t eye = 0; eye < 2; ++eye) {
+                    if (!m_swapchains.count(depth[eye]->swapchain))
+                        break;
+                    const auto& source = *reinterpret_cast<const Swapchain*>(depth[eye]->swapchain);
+                    if (depth[eye]->imageArrayIndex >= source.resolvedSlices.size())
+                        break;
+                    const auto& slice = source.resolvedSlices[depth[eye]->imageArrayIndex];
+                    if (slice.lastCommittedIndex < 0 ||
+                        static_cast<size_t>(slice.lastCommittedIndex) >= slice.dlssnrImages.size())
+                        break;
+                    nrNativeDepth[eye] = slice.dlssnrImages[slice.lastCommittedIndex].Get();
+                }
+            }
+            if (nrFrame < 2) {
+                nr_capture::CaptureNrInput nrSelected{};
+                nrSelected.recording = nrRecordingFacts;
+                nrSelected.pipelineObject = m_nrNativePipeline.get();
+                CHECK_MSG(m_nrNativePipeline && m_nrNativePipeline->BorrowActiveOwnership(nrSelected.pipeline) &&
+                              m_nrNativePipeline->BorrowActivePrograms(nrSelected.programs),
+                          "private NR actual pipeline borrow failed");
+                nrSelected.nativeDepth[0] = nrNativeDepth[0];
+                nrSelected.nativeDepth[1] = nrNativeDepth[1];
+                CHECK_MSG(m_dlssnrContext->TryObserveNextSubmission(nrSelected.prospectiveContextLifetime,
+                                                                    nrSelected.prospectiveSignalValue) &&
+                              nrEngine.acquireNr(nrFrame, nrSelected),
+                          "private NR late submission reservation or acquisition failed");
+                for (uint32_t eye = 0; eye < 2; ++eye) {
+                    nrCapture(NR_MODEL_COLOUR, eye);
+                    nrCapture(NR_MODEL_DEPTH, eye);
+                }
+            }
             for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
                 const ovrSizei eyeResolution = {views[eye]->imageRect.extent.width,
                                                 views[eye]->imageRect.extent.height};
@@ -455,14 +654,15 @@ namespace virtualdesktop_openxr {
                     std::min(eyeResolution.h, (int)xr::math::AlignTo<4>((uint32_t)(eyeResolution.h * foveatedScale)))};
                 const ovrVector2i offset = {(eyeResolution.w - eyeFoveatedResolution.w) / 2,
                                             (eyeResolution.h - eyeFoveatedResolution.h) / 2};
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthInverted, depthInverted[eye]);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Enabled, true);
+                nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_DepthInverted, depthInverted[eye]);
+                nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_Enabled, true);
 
                 createDlssnrFeature(eye, foveatedResolution, cmdList.Commands.Get());
 
                 // Prepare feature evaluation.
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Output,
-                                     guard ? m_nrNativePipeline->GetNativeAnswer() : nativeInput.output);
+                nr_capture::ObserveSet(m_ngxParameters,
+                                       NVSDK_NGX_Parameter_DLSSNR_Output,
+                                       guard ? m_nrNativePipeline->GetNativeAnswer() : nativeInput.output);
 
                 Swapchain& xrSwapchain = *(Swapchain*)views[eye]->swapchain;
                 ID3D12Resource* inputImage =
@@ -475,11 +675,13 @@ namespace virtualdesktop_openxr {
                 colorBox.right = colorBox.left + eyeFoveatedResolution.w;
                 colorBox.bottom = colorBox.top + eyeFoveatedResolution.h;
                 SafeClamp(colorBox, inputBox[eye]);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Color, inputImage);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_ColorSubrectBaseX, colorBox.left);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_ColorSubrectBaseY, colorBox.top);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_ColorSubrectWidth, colorBox.right - colorBox.left);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_ColorSubrectHeight, colorBox.bottom - colorBox.top);
+                nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_Color, inputImage);
+                nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_ColorSubrectBaseX, colorBox.left);
+                nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_ColorSubrectBaseY, colorBox.top);
+                nr_capture::ObserveSet(
+                    m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_ColorSubrectWidth, colorBox.right - colorBox.left);
+                nr_capture::ObserveSet(
+                    m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_ColorSubrectHeight, colorBox.bottom - colorBox.top);
 
                 BOX destBox{};
                 destBox.left = eye * resolution.w + offset.x; // Double-wide.
@@ -487,29 +689,33 @@ namespace virtualdesktop_openxr {
                 destBox.right = destBox.left + eyeFoveatedResolution.w;
                 destBox.bottom = destBox.top + eyeFoveatedResolution.h;
                 SafeClamp(destBox, outputBox[eye]);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_OutputSubrectBaseX, destBox.left);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_OutputSubrectBaseY, destBox.top);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_OutputSubrectWidth, destBox.right - destBox.left);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_OutputSubrectHeight, destBox.bottom - destBox.top);
+                nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_OutputSubrectBaseX, destBox.left);
+                nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_OutputSubrectBaseY, destBox.top);
+                nr_capture::ObserveSet(
+                    m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_OutputSubrectWidth, destBox.right - destBox.left);
+                nr_capture::ObserveSet(
+                    m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_OutputSubrectHeight, destBox.bottom - destBox.top);
 
 #if 0
             // TODO: Use NVOFA to estimate motion.
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_MVec, motion);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_MVecSubrectBaseX, 0);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_MVecSubrectBaseY, 0);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_MVecSubrectWidth, w);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_MVecSubrectHeight, h);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_MVecScaleX, motionVectorScaleX);
-            m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_MVecScaleY, motionVectorScaleY);
+            nr_capture::ObserveSet(m_ngxParameters,NVSDK_NGX_Parameter_DLSSNR_MVec, motion);
+            nr_capture::ObserveSet(m_ngxParameters,NVSDK_NGX_Parameter_DLSSNR_MVecSubrectBaseX, 0);
+            nr_capture::ObserveSet(m_ngxParameters,NVSDK_NGX_Parameter_DLSSNR_MVecSubrectBaseY, 0);
+            nr_capture::ObserveSet(m_ngxParameters,NVSDK_NGX_Parameter_DLSSNR_MVecSubrectWidth, w);
+            nr_capture::ObserveSet(m_ngxParameters,NVSDK_NGX_Parameter_DLSSNR_MVecSubrectHeight, h);
+            nr_capture::ObserveSet(m_ngxParameters,NVSDK_NGX_Parameter_DLSSNR_MVecScaleX, motionVectorScaleX);
+            nr_capture::ObserveSet(m_ngxParameters,NVSDK_NGX_Parameter_DLSSNR_MVecScaleY, motionVectorScaleY);
 #endif
 
                 if (depth[0] && depth[1]) {
                     Swapchain& xrDepthSwapchain = *(Swapchain*)depth[eye]->swapchain;
-                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Depth,
-                                         xrDepthSwapchain.resolvedSlices[depth[eye]->imageArrayIndex]
-                                             .dlssnrImages[xrDepthSwapchain.resolvedSlices[depth[eye]->imageArrayIndex]
-                                                               .lastCommittedIndex]
-                                             .Get());
+                    nr_capture::ObserveSet(
+                        m_ngxParameters,
+                        NVSDK_NGX_Parameter_DLSSNR_Depth,
+                        xrDepthSwapchain.resolvedSlices[depth[eye]->imageArrayIndex]
+                            .dlssnrImages[xrDepthSwapchain.resolvedSlices[depth[eye]->imageArrayIndex]
+                                              .lastCommittedIndex]
+                            .Get());
                     BOX depthBox{};
                     const auto& rect = depth[eye]->imageRect;
                     // Map the color crop into the depth image's own coordinates, including its offset.
@@ -523,28 +729,34 @@ namespace virtualdesktop_openxr {
                         rect.offset.y + (int)(((int64_t)(offset.y + eyeFoveatedResolution.h) * rect.extent.height +
                                                eyeResolution.h - 1) /
                                               eyeResolution.h);
-                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseX, depthBox.left);
-                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseY, depthBox.top);
-                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectWidth, depthBox.right - depthBox.left);
-                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectHeight, depthBox.bottom - depthBox.top);
+                    nr_capture::ObserveSet(
+                        m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseX, depthBox.left);
+                    nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseY, depthBox.top);
+                    nr_capture::ObserveSet(
+                        m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_DepthSubrectWidth, depthBox.right - depthBox.left);
+                    nr_capture::ObserveSet(
+                        m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_DepthSubrectHeight, depthBox.bottom - depthBox.top);
                 } else {
                     // The parameter map persists across frames. Clear all optional depth bindings when unavailable.
-                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Depth, (ID3D12Resource*)nullptr);
-                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseX, 0);
-                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseY, 0);
-                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectWidth, 0);
-                    m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_DepthSubrectHeight, 0);
+                    nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_Depth, (ID3D12Resource*)nullptr);
+                    nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseX, 0);
+                    nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_DepthSubrectBaseY, 0);
+                    nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_DepthSubrectWidth, 0);
+                    nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_DepthSubrectHeight, 0);
                 }
 
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Reset, false);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_UseAutoMask, true);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Style, settings.style);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_Intensity, settings.intensity);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_LocalToneStrength, settings.localToneStrength);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_LocalStructureStrength,
-                                     settings.localStructureStrength);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_SkinStructureStrength, settings.skinStructureStrength);
-                m_ngxParameters->Set(NVSDK_NGX_Parameter_DLSSNR_UICorrection, 0);
+                nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_Reset, false);
+                nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_UseAutoMask, true);
+                nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_Style, settings.style);
+                nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_Intensity, settings.intensity);
+                nr_capture::ObserveSet(
+                    m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_LocalToneStrength, settings.localToneStrength);
+                nr_capture::ObserveSet(m_ngxParameters,
+                                       NVSDK_NGX_Parameter_DLSSNR_LocalStructureStrength,
+                                       settings.localStructureStrength);
+                nr_capture::ObserveSet(
+                    m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_SkinStructureStrength, settings.skinStructureStrength);
+                nr_capture::ObserveSet(m_ngxParameters, NVSDK_NGX_Parameter_DLSSNR_UICorrection, 0);
 
                 if (foveatedScale < 1.f && !guard) {
                     D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
@@ -601,21 +813,112 @@ namespace virtualdesktop_openxr {
                 }
 
                 // Go!
-                CHECK_NGXCMD(m_dlssnrFeatureEvaluate[eye](
-                    cmdList.Commands.Get(), m_dlssnrFeature[eye], m_ngxParameters, nullptr));
+                CHECK_NGXCMD(nr_capture::ObserveSdkCall(NR_EVALUATE,
+                                                        eye,
+                                                        reinterpret_cast<uint64_t>(m_dlssnrFeatureEvaluate[eye]),
+                                                        cmdList.Commands.Get(),
+                                                        m_ngxParameters,
+                                                        &m_dlssnrFeature[eye],
+                                                        reinterpret_cast<uint64_t>(m_dlssnrFeatureEvaluate[eye]),
+                                                        reinterpret_cast<uint64_t>(m_dlssnrFeatureRelease[eye]),
+                                                        [&] {
+                                                            return m_dlssnrFeatureEvaluate[eye](cmdList.Commands.Get(),
+                                                                                                m_dlssnrFeature[eye],
+                                                                                                m_ngxParameters,
+                                                                                                nullptr);
+                                                        }));
             }
 
+            if (nrFrame < 2) {
+                nrCapture(NR_NATIVE_ANSWER, 2);
+                for (uint32_t eye = 0; eye < 2; ++eye) {
+                    nrCapture(NR_POST_EVAL_COLOUR, eye);
+                    nrCapture(NR_PRE_RESOLVE_COLOUR, eye);
+                }
+            }
             // Serialize and commit output.
             if (guard)
                 m_nrNativePipeline->RecordResolve(cmdList.Commands.Get());
+            nrCapture(NR_POST_RESOLVE, 2);
+            vdxrfg::pair_capture::nr::NrPipelineOwnership nrWarmGraph{};
+            const bool nrWarmInventory =
+                nr_capture::hostRequest().valid && m_nrNativePipeline &&
+                m_nrNativePipeline->BorrowActiveOwnership(nrWarmGraph) &&
+                nrWarmGraph.observedEpochs == vdxrfg::pair_capture::nr::NrPipelineOwnership::allEpochs &&
+                nrWarmGraph.device == nrRecordingFacts.device && nrWarmGraph.fence == nrRecordingFacts.fence &&
+                nrWarmGraph.nativeAnswer;
+            if (nrWarmInventory)
+                nr_capture::warmLayoutGraph12(m_frameBegun,
+                                              NR_NATIVE100,
+                                              nrRecordingFacts.facts.nrCommandContextLifetimeEpoch,
+                                              nrWarmGraph,
+                                              nrNativeDepth);
+            auto* nrToken = nrFrame < 2 ? nrEngine.beginNrSubmission(nrFrame) : nullptr;
+            CHECK_MSG(nrFrame >= 2 || nrToken, "private NR submission token unavailable");
             submitAttempted = true;
-            const auto fenceValue = m_dlssnrContext->SubmitCommandList(std::move(cmdList));
+            nrSubmitBegin = nr_capture::sourceClock();
+            const auto fenceValue = m_dlssnrContext->SubmitCommandList(
+                std::move(cmdList), nrToken, nr_capture::hostRequest().valid ? &nrWarmSubmission : nullptr);
+            const auto nrSubmitEnd = nr_capture::sourceClock();
+            if (auto* returnGuard = nr_capture::SourceReturnGuard::current())
+                returnGuard->observeSubmission(nrWarmSubmission, nrSubmitBegin, nrSubmitEnd);
+            if (nrFrame < 2)
+                CHECK_MSG(nrReturnGuard &&
+                              nrEngine.finishNrSubmission(nrFrame, nrWarmSubmission, fenceValue, *nrReturnGuard),
+                          "private NR actual submission facts did not reconcile");
             CHECK_MSG(fenceValue && fenceValue != UINT64_MAX, "NR submission did not return a valid completion fence");
             if (guard)
                 m_nrNativePipeline->MarkSubmitted(fenceValue);
             registered = true;
-            CHECK_HRCMD(m_ovrSubmissionContext->Wait(m_dlssnrOutFence.Get(), fenceValue));
+            // Future NR must not block the active group's SDK GPU handoffs.
+            waitForFrameGenerationProducerFence(m_dlssnrOutFence.Get(), fenceValue, producerLease, "NR-output");
+            const auto nrOutputWaitBegin = nr_capture::sourceClock();
+            const auto nrOutputWaitResult = m_ovrSubmissionContext->Wait(m_dlssnrOutFence.Get(), fenceValue);
+            const auto nrOutputWaitEnd = nr_capture::sourceClock();
+            if (nr_capture::hostRequest().valid) {
+                nr_capture::SdkWarmFacts nrSdkWarm{};
+                const vdxrfg::pair_capture::nr::NrSubmissionKey actualBorrow{
+                    reinterpret_cast<uint64_t>(nrRecordingFacts.queue),
+                    reinterpret_cast<uint64_t>(nrRecordingFacts.fence),
+                    reinterpret_cast<uint64_t>(nrRecordingFacts.list),
+                    reinterpret_cast<uint64_t>(nrRecordingFacts.allocator),
+                    nrRecordingFacts.facts.nrRecordingEpoch};
+                const bool completeSubmission =
+                    nr_capture::warmSubmissionComplete(nrWarmSubmission,
+                                                       reinterpret_cast<uint64_t>(m_dlssnrContext.get()),
+                                                       nrRecordingFacts.facts.nrCommandContextLifetimeEpoch,
+                                                       actualBorrow,
+                                                       fenceValue);
+                if (auto* returnGuard = nr_capture::SourceReturnGuard::current()) {
+                    returnGuard->observeNr(nrWarmSubmission, completeSubmission);
+                    returnGuard->observeOutputWait(m_ovrSubmissionContext.Get(),
+                                                   m_dlssnrOutFence.Get(),
+                                                   fenceValue,
+                                                   nrOutputWaitResult,
+                                                   nrOutputWaitBegin,
+                                                   nrOutputWaitEnd);
+                }
+                nr_capture::sdkWarmFacts(nrSdkWarm);
+                nr_capture::hostWarmFrame(m_frameBegun,
+                                          nrRecordingFacts.facts.nrCommandContextLifetimeEpoch,
+                                          nrSdkWarm,
+                                          fenceValue,
+                                          completeSubmission ? nrWarmSubmission.calls.original.result : E_FAIL,
+                                          nrOutputWaitResult,
+                                          nrWarmInventory && completeSubmission);
+            }
+            CHECK_HRESULT(nrOutputWaitResult, "m_ovrSubmissionContext->Wait(m_dlssnrOutFence.Get(), fenceValue)");
         } catch (...) {
+            if (nrFrame < 2 && nrReturnGuard && nrSubmitBegin)
+                nrEngine.finishNrSubmission(nrFrame, nrWarmSubmission, 0, *nrReturnGuard);
+            if (auto* returnGuard = nr_capture::SourceReturnGuard::current()) {
+                if (nrSubmitBegin && !returnGuard->submissionEnd())
+                    returnGuard->observeSubmission(nrWarmSubmission, nrSubmitBegin, nr_capture::sourceClock());
+            }
+            if (auto* returnGuard = nr_capture::SourceReturnGuard::current())
+                if (!returnGuard->facts().nrSignalObserved)
+                    returnGuard->observeNr(nrWarmSubmission, false);
+            nr_capture::hostInvalidateWarm();
             m_nrNativeNeedsFeatureReset = true;
             if (!submitAttempted) {
                 if (guard)
@@ -653,7 +956,7 @@ namespace virtualdesktop_openxr {
         m_dlssnrOutputSwapchainTextures.clear();
         m_dlssnrOutputSwapchainSrvs.clear();
         if (m_dlssnrOutputSwapchain) {
-            ovr_DestroyTextureSwapChain(m_ovrSession, m_dlssnrOutputSwapchain);
+            destroySubmissionSwapchain(m_ovrSession, m_dlssnrOutputSwapchain);
             m_dlssnrOutputSwapchain = nullptr;
         }
         m_dlssnrOutputSwapchainLastWrittenIndex = -1;
@@ -671,10 +974,10 @@ namespace virtualdesktop_openxr {
         desc.BindFlags = ovrTextureBind_DX_RenderTarget | ovrTextureBind_DX_UnorderedAccess;
         desc.MiscFlags = ovrTextureMisc_DX_Typeless;
         CHECK_OVRCMD(
-            ovr_CreateTextureSwapChainDX(m_ovrSession, m_ovrSubmissionDevice.Get(), &desc, &m_dlssnrOutputSwapchain));
+            createSubmissionSwapchain(m_ovrSession, m_ovrSubmissionDevice.Get(), &desc, &m_dlssnrOutputSwapchain));
 
         int count = -1;
-        CHECK_OVRCMD(ovr_GetTextureSwapChainLength(m_ovrSession, m_dlssnrOutputSwapchain, &count));
+        CHECK_OVRCMD(submissionSwapchainLength(m_ovrSession, m_dlssnrOutputSwapchain, &count));
         m_dlssnrOutputSwapchainImages.reserve(count);
         m_dlssnrOutputSwapchainTextures.reserve(count);
         m_dlssnrOutputSwapchainSrvs.reserve(count);
@@ -682,8 +985,9 @@ namespace virtualdesktop_openxr {
         // Query the textures for the swapchain.
         for (int i = 0; i < count; i++) {
             ComPtr<ID3D11Texture2D> texture;
-            CHECK_OVRCMD(ovr_GetTextureSwapChainBufferDX(
+            CHECK_OVRCMD(submissionSwapchainBuffer(
                 m_ovrSession, m_dlssnrOutputSwapchain, i, IID_PPV_ARGS(texture.ReleaseAndGetAddressOf())));
+            nr_capture::nrBankTextureObserved(texture.Get(), m_ovrSubmissionDevice.Get());
 
             // A typed SRV preserves the same sRGB decoding used by the compositor.
             D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
@@ -692,10 +996,16 @@ namespace virtualdesktop_openxr {
             srvDesc.Texture2D.MipLevels = 1;
             ComPtr<ID3D11ShaderResourceView> srv;
             CHECK_HRCMD(m_ovrSubmissionDevice->CreateShaderResourceView(texture.Get(), &srvDesc, srv.GetAddressOf()));
+            nr_capture::postFxSrvCreated(texture.Get(), srv.Get(), srvDesc);
 
             // Export to the DLSS context.
             ComPtr<IDXGIResource1> dxgiResource;
-            CHECK_HRCMD(texture->QueryInterface(IID_PPV_ARGS(dxgiResource.ReleaseAndGetAddressOf())));
+            const auto nrQueryBegin = nr_capture::sourceClock();
+            const auto nrQueryResult = texture->QueryInterface(IID_PPV_ARGS(dxgiResource.ReleaseAndGetAddressOf()));
+            nr_capture::sourceNrQueryObserved(
+                texture.Get(), dxgiResource.Get(), nrQueryResult, nrQueryBegin, nr_capture::sourceClock());
+            CHECK_HRESULT(nrQueryResult,
+                          "texture->QueryInterface(IID_PPV_ARGS(dxgiResource.ReleaseAndGetAddressOf()))");
 
             D3D11_TEXTURE2D_DESC desc{};
             texture->GetDesc(&desc);
@@ -703,15 +1013,52 @@ namespace virtualdesktop_openxr {
             wil::unique_handle ntHandle;
             HANDLE textureHandle;
             if (!(desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE)) {
-                CHECK_HRCMD(dxgiResource->GetSharedHandle(&textureHandle));
+                const auto nrExportBegin = nr_capture::sourceClock();
+                const auto nrExportResult = dxgiResource->GetSharedHandle(&textureHandle);
+                nr_capture::sourceNrExportObserved(texture.Get(),
+                                                   SUCCEEDED(nrExportResult) ? textureHandle : nullptr,
+                                                   false,
+                                                   0,
+                                                   nrExportResult,
+                                                   nrExportBegin,
+                                                   nr_capture::sourceClock());
+                CHECK_HRESULT(nrExportResult, "dxgiResource->GetSharedHandle(&textureHandle)");
             } else {
-                CHECK_HRCMD(dxgiResource->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, ntHandle.put()));
+                const auto nrExportBegin = nr_capture::sourceClock();
+                auto nrExportResult = m_deliveryTransport
+                                          ? m_deliveryTransport->duplicateSharedHandle(texture.Get(), ntHandle.put())
+                                          : S_FALSE;
+                if (nrExportResult == S_FALSE)
+                    nrExportResult = dxgiResource->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, ntHandle.put());
+                nr_capture::sourceNrExportObserved(texture.Get(),
+                                                   ntHandle.get(),
+                                                   true,
+                                                   GENERIC_ALL,
+                                                   nrExportResult,
+                                                   nrExportBegin,
+                                                   nr_capture::sourceClock());
+                CHECK_HRESULT(nrExportResult,
+                              "dxgiResource->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, ntHandle.put())");
                 textureHandle = ntHandle.get();
             }
             ComPtr<ID3D12Resource> d3d12Resource;
-            CHECK_HRCMD(
-                m_dlssnrDevice->OpenSharedHandle(textureHandle, IID_PPV_ARGS(d3d12Resource.ReleaseAndGetAddressOf())));
-
+            const auto nrImportBegin = nr_capture::sourceClock();
+            const auto nrImportResult =
+                m_dlssnrDevice->OpenSharedHandle(textureHandle, IID_PPV_ARGS(d3d12Resource.ReleaseAndGetAddressOf()));
+            if (SUCCEEDED(nrImportResult))
+                nr_capture::sdkResourceCreated(d3d12Resource.Get());
+            nr_capture::sourceNrImportObserved(texture.Get(),
+                                               m_dlssnrDevice.Get(),
+                                               d3d12Resource.Get(),
+                                               nr_capture::sdkObservedResourceLifetime(d3d12Resource.Get()),
+                                               textureHandle,
+                                               (desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) != 0,
+                                               nrImportResult,
+                                               nrImportBegin,
+                                               nr_capture::sourceClock());
+            CHECK_HRESULT(nrImportResult,
+                          "m_dlssnrDevice->OpenSharedHandle(textureHandle, "
+                          "IID_PPV_ARGS(d3d12Resource.ReleaseAndGetAddressOf()))");
             // Publish the same bank only after all its resource setup succeeds.
             m_dlssnrOutputSwapchainImages.push_back(std::move(d3d12Resource));
             m_dlssnrOutputSwapchainTextures.push_back(std::move(texture));
@@ -731,14 +1078,27 @@ namespace virtualdesktop_openxr {
             for (const auto& image : resolved.images) {
                 // Export to the DLSS context.
                 ComPtr<IDXGIResource1> dxgiResource;
-                CHECK_HRCMD(image.As(&dxgiResource));
+                const auto nrQueryBegin = nr_capture::sourceClock();
+                const auto nrQueryResult = image.As(&dxgiResource);
+                nr_capture::sourceNrQueryObserved(
+                    image.Get(), dxgiResource.Get(), nrQueryResult, nrQueryBegin, nr_capture::sourceClock());
+                CHECK_HRESULT(nrQueryResult, "image.As(&dxgiResource)");
 
                 D3D11_TEXTURE2D_DESC desc{};
                 image->GetDesc(&desc);
 
                 HANDLE textureHandle;
                 if (!(desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE)) {
-                    CHECK_HRCMD(dxgiResource->GetSharedHandle(&textureHandle));
+                    const auto nrExportBegin = nr_capture::sourceClock();
+                    const auto nrExportResult = dxgiResource->GetSharedHandle(&textureHandle);
+                    nr_capture::sourceNrExportObserved(image.Get(),
+                                                       SUCCEEDED(nrExportResult) ? textureHandle : nullptr,
+                                                       false,
+                                                       0,
+                                                       nrExportResult,
+                                                       nrExportBegin,
+                                                       nr_capture::sourceClock());
+                    CHECK_HRESULT(nrExportResult, "dxgiResource->GetSharedHandle(&textureHandle)");
                 } else {
                     ComPtr<IUnknown> identity;
                     CHECK_HRCMD(image.As(&identity));
@@ -749,14 +1109,45 @@ namespace virtualdesktop_openxr {
                     }
                     // A successful NT export cannot be recreated, even when the subsequent import fails.
                     if (!ownedHandle) {
-                        CHECK_HRCMD(dxgiResource->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, ownedHandle.put()));
+                        const auto nrExportBegin = nr_capture::sourceClock();
+                        auto nrExportResult =
+                            m_deliveryTransport
+                                ? m_deliveryTransport->duplicateSharedHandle(image.Get(), ownedHandle.put())
+                                : S_FALSE;
+                        if (nrExportResult == S_FALSE)
+                            nrExportResult =
+                                dxgiResource->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, ownedHandle.put());
+                        nr_capture::sourceNrExportObserved(image.Get(),
+                                                           ownedHandle.get(),
+                                                           true,
+                                                           GENERIC_ALL,
+                                                           nrExportResult,
+                                                           nrExportBegin,
+                                                           nr_capture::sourceClock());
+                        CHECK_HRESULT(
+                            nrExportResult,
+                            "dxgiResource->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, ownedHandle.put())");
                     }
                     textureHandle = ownedHandle.get();
                 }
                 ComPtr<ID3D12Resource> d3d12Resource;
-                CHECK_HRCMD(m_dlssnrDevice->OpenSharedHandle(textureHandle,
-                                                             IID_PPV_ARGS(d3d12Resource.ReleaseAndGetAddressOf())));
-
+                const auto nrImportBegin = nr_capture::sourceClock();
+                const auto nrImportResult = m_dlssnrDevice->OpenSharedHandle(
+                    textureHandle, IID_PPV_ARGS(d3d12Resource.ReleaseAndGetAddressOf()));
+                if (SUCCEEDED(nrImportResult))
+                    nr_capture::sdkResourceCreated(d3d12Resource.Get());
+                nr_capture::sourceNrImportObserved(image.Get(),
+                                                   m_dlssnrDevice.Get(),
+                                                   d3d12Resource.Get(),
+                                                   nr_capture::sdkObservedResourceLifetime(d3d12Resource.Get()),
+                                                   textureHandle,
+                                                   (desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) != 0,
+                                                   nrImportResult,
+                                                   nrImportBegin,
+                                                   nr_capture::sourceClock());
+                CHECK_HRESULT(nrImportResult,
+                              "m_dlssnrDevice->OpenSharedHandle(textureHandle, "
+                              "IID_PPV_ARGS(d3d12Resource.ReleaseAndGetAddressOf()))");
                 candidate.push_back(std::move(d3d12Resource));
             }
             resolved.dlssnrImages = std::move(candidate);
@@ -797,18 +1188,68 @@ namespace virtualdesktop_openxr {
         // We'll use a fence to serialize pre-compositor output to DLSS-NR input.
         {
             wil::unique_handle fenceHandle;
-            CHECK_HRCMD(
-                m_ovrSubmissionCompletionFence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, fenceHandle.put()));
-            CHECK_HRCMD(device->OpenSharedHandle(fenceHandle.get(), IID_PPV_ARGS(inFence.ReleaseAndGetAddressOf())));
+            const auto nrInputExportBegin = nr_capture::sourceClock();
+            const auto nrInputExportResult =
+                m_ovrSubmissionCompletionFence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, fenceHandle.put());
+            nr_capture::sourceNrInputFenceExportObserved(context.get(),
+                                                         context->GetObservedLifetimeEpoch(),
+                                                         m_ovrSubmissionDevice.Get(),
+                                                         m_ovrSubmissionCompletionFence.Get(),
+                                                         fenceHandle.get(),
+                                                         nrInputExportResult,
+                                                         nrInputExportBegin,
+                                                         nr_capture::sourceClock());
+            CHECK_HRESULT(
+                nrInputExportResult,
+                "m_ovrSubmissionCompletionFence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, fenceHandle.put())");
+            const auto nrInputImportBegin = nr_capture::sourceClock();
+            const auto nrInputImportResult =
+                device->OpenSharedHandle(fenceHandle.get(), IID_PPV_ARGS(inFence.ReleaseAndGetAddressOf()));
+            nr_capture::sourceNrInputFenceImportObserved(context.get(),
+                                                         context->GetObservedLifetimeEpoch(),
+                                                         device.Get(),
+                                                         inFence.Get(),
+                                                         fenceHandle.get(),
+                                                         nrInputImportResult,
+                                                         nrInputImportBegin,
+                                                         nr_capture::sourceClock());
+            CHECK_HRESULT(
+                nrInputImportResult,
+                "device->OpenSharedHandle(fenceHandle.get(), IID_PPV_ARGS(inFence.ReleaseAndGetAddressOf()))");
         }
 
         // We'll use a fence to serialize DLSS-NR output to OVR input.
         {
             wil::unique_handle handle;
-            CHECK_HRCMD(
-                device->CreateSharedHandle(context->GetCompletionFence(), nullptr, GENERIC_ALL, nullptr, handle.put()));
-            CHECK_HRCMD(
-                m_ovrSubmissionDevice->OpenSharedFence(handle.get(), IID_PPV_ARGS(outFence.ReleaseAndGetAddressOf())));
+            auto* nrCompletionFence = context->GetCompletionFence();
+            const auto nrFenceExportBegin = nr_capture::sourceClock();
+            const auto nrFenceExportResult =
+                device->CreateSharedHandle(nrCompletionFence, nullptr, GENERIC_ALL, nullptr, handle.put());
+            nr_capture::sourceNrFenceExportObserved(context.get(),
+                                                    context->GetObservedLifetimeEpoch(),
+                                                    device.Get(),
+                                                    nrCompletionFence,
+                                                    handle.get(),
+                                                    nrFenceExportResult,
+                                                    nrFenceExportBegin,
+                                                    nr_capture::sourceClock());
+            CHECK_HRESULT(nrFenceExportResult,
+                          "device->CreateSharedHandle(context->GetCompletionFence(), nullptr, GENERIC_ALL, nullptr, "
+                          "handle.put())");
+            const auto nrFenceImportBegin = nr_capture::sourceClock();
+            const auto nrFenceImportResult =
+                m_ovrSubmissionDevice->OpenSharedFence(handle.get(), IID_PPV_ARGS(outFence.ReleaseAndGetAddressOf()));
+            nr_capture::sourceNrFenceImportObserved(context.get(),
+                                                    context->GetObservedLifetimeEpoch(),
+                                                    m_ovrSubmissionDevice.Get(),
+                                                    outFence.Get(),
+                                                    handle.get(),
+                                                    nrFenceImportResult,
+                                                    nrFenceImportBegin,
+                                                    nr_capture::sourceClock());
+            CHECK_HRESULT(nrFenceImportResult,
+                          "m_ovrSubmissionDevice->OpenSharedFence(handle.get(), "
+                          "IID_PPV_ARGS(outFence.ReleaseAndGetAddressOf()))");
         }
 
         NVSDK_NGX_FeatureCommonInfo commonInfo{};
@@ -833,8 +1274,10 @@ namespace virtualdesktop_openxr {
         CHECK_NGXCMD(NVSDK_NGX_D3D12_GetCapabilityParameters(&parameters));
         if (ngx::dlssnrModule) {
             CHECK_MSG(ngx::Init_Ext && ngx::Shutdown1, "DLSS-NR module load did not complete");
-            CHECK_NGXCMD(ngx::Init_Ext(
-                123456, virtualdesktop_openxr::programData.c_str(), device.Get(), NVSDK_NGX_Version_API, nullptr));
+            CHECK_NGXCMD(nr_capture::ObserveSdkInit(reinterpret_cast<uint64_t>(ngx::Init_Ext), device.Get(), [&] {
+                return ngx::Init_Ext(
+                    123456, virtualdesktop_openxr::programData.c_str(), device.Get(), NVSDK_NGX_Version_API, nullptr);
+            }));
             ngx::initializedDevice = device;
         }
         // Publish the complete context/fences/parameters before allowing NR.
@@ -843,6 +1286,7 @@ namespace virtualdesktop_openxr {
         m_dlssnrInFence = std::move(inFence);
         m_dlssnrOutFence = std::move(outFence);
         m_ngxParameters = parameters;
+        nr_capture::sdkTableCreated(m_ngxParameters);
         parameters = nullptr;
         m_dlssnrResourcesInitialized = true;
     }
@@ -851,7 +1295,16 @@ namespace virtualdesktop_openxr {
         m_dlssnrResourcesInitialized = false;
         for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
             if (m_dlssnrFeature[eye]) {
-                CHECK_NGXCMD(m_dlssnrFeatureRelease[eye](m_dlssnrFeature[eye]));
+                CHECK_NGXCMD(
+                    nr_capture::ObserveSdkCall(NR_RELEASE_FEATURE,
+                                               eye,
+                                               reinterpret_cast<uint64_t>(m_dlssnrFeatureRelease[eye]),
+                                               nullptr,
+                                               m_ngxParameters,
+                                               &m_dlssnrFeature[eye],
+                                               reinterpret_cast<uint64_t>(m_dlssnrFeatureEvaluate[eye]),
+                                               reinterpret_cast<uint64_t>(m_dlssnrFeatureRelease[eye]),
+                                               [&] { return m_dlssnrFeatureRelease[eye](m_dlssnrFeature[eye]); }));
                 m_dlssnrFeature[eye] = nullptr;
                 m_dlssnrFeatureRelease[eye] = nullptr;
                 m_dlssnrFeatureEvaluate[eye] = nullptr;
@@ -859,6 +1312,7 @@ namespace virtualdesktop_openxr {
         }
         if (m_ngxParameters) {
             CHECK_NGXCMD(NVSDK_NGX_D3D12_DestroyParameters(m_ngxParameters));
+            nr_capture::sdkTableDestroyed(m_ngxParameters);
             m_ngxParameters = nullptr;
         }
         // Shut down only our direct NR module. The public NGX SDK may serve the host's DLSS.
@@ -877,7 +1331,9 @@ namespace virtualdesktop_openxr {
         ngx::NVSDK_NGX_D3D12_EvaluateFeature = &::NVSDK_NGX_D3D12_EvaluateFeature;
         ngx::Init_Ext = nullptr;
         ngx::Shutdown1 = nullptr;
+        const auto nrReleasedModule = ngx::dlssnrModule.get();
         ngx::dlssnrModule.reset();
+        nr_capture::observeManualModuleOwnerRelease(nrReleasedModule);
     }
 
     void OpenXrRuntime::retainDlssnrRuntimeOnCleanupFailure() noexcept {

@@ -118,9 +118,10 @@ struct Fixture {
     Gpu gpu{false};
     HMODULE module{};
     VDXRFG_ApiV2 api{};
+    VDXRFG_ApiV3 api3{};
     void* context{};
     ComPtr<ID3D12Resource> input, poison;
-    std::array<std::array<ComPtr<ID3D12Resource>, 3>, 2> outputs;
+    std::array<std::array<ComPtr<ID3D12Resource>, 4>, 2> outputs;
     ComPtr<ID3D12CommandQueue> producer;
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> copy;
@@ -132,11 +133,20 @@ struct Fixture {
         : multiplier(multiplier), hostOwnsReal(hostOwnsReal) {
         module = LoadLibraryExA(path, nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
         check(module != nullptr, "load real frame-generation module");
-        auto get = reinterpret_cast<VDXRFG_GetApiV2Fn>(GetProcAddress(module, "VDXRFG_GetApiV2"));
-        check(get != nullptr, "V2 API export");
-        api.struct_size = sizeof(api);
-        api.api_version = VDXRFG_API_VERSION_2;
-        success(get(&api), "negotiate real module API");
+        if (multiplier == 4) {
+            auto get3 = reinterpret_cast<VDXRFG_GetApiV3Fn>(GetProcAddress(module, "VDXRFG_GetApiV3"));
+            check(get3 != nullptr, "V3 API export");
+            api3.struct_size = sizeof(api3);
+            api3.api_version = VDXRFG_API_VERSION_3;
+            success(get3(&api3), "negotiate four-frame module API");
+            check(api3.max_multiplier >= 4, "four-frame capability supported");
+        } else {
+            auto get = reinterpret_cast<VDXRFG_GetApiV2Fn>(GetProcAddress(module, "VDXRFG_GetApiV2"));
+            check(get != nullptr, "V2 API export");
+            api.struct_size = sizeof(api);
+            api.api_version = VDXRFG_API_VERSION_2;
+            success(get(&api), "negotiate real module API");
+        }
         input = gpu.texture();
         poison = gpu.texture();
         auto poisoned = scene(91);
@@ -158,14 +168,32 @@ struct Fixture {
         base.multiplier = multiplier;
         create.flags = (hostOwnsReal ? VDXRFG_CREATE_HOST_OWNS_REAL : 0u) |
                        (backend == "fidelityfx-full" ? VDXRFG_CREATE_FIDELITYFX_FULL : 0u);
-        check((api.supported_create_flags & create.flags) == create.flags, "requested capabilities supported");
+        const auto supported = multiplier == 4 ? api3.supported_create_flags : api.supported_create_flags;
+        check((supported & create.flags) == create.flags, "requested capabilities supported");
+        VDXRFG_CreateInfoV3 create3{};
         for (UINT bank = 0; bank < 2; ++bank)
-            for (UINT role = 0; role < 3; ++role)
-                if (role != 1 || multiplier == 3) {
+            for (UINT role = 0; role < 4; ++role)
+                if ((role != 1 || multiplier >= 3) && (role != 3 || multiplier == 4)) {
                     outputs[bank][role] = gpu.texture();
-                    base.outputs[bank][role] = outputs[bank][role].Get();
+                    if (role < 3)
+                        base.outputs[bank][role] = outputs[bank][role].Get();
+                    create3.outputs[bank][role] = outputs[bank][role].Get();
                 }
-        success(api.Create(&create, &context), "create synthesis context");
+        if (multiplier == 4) {
+            create3.struct_size = sizeof(create3);
+            create3.api_version = VDXRFG_API_VERSION_3;
+            create3.device = base.device;
+            create3.queue = base.queue;
+            create3.input = base.input;
+            create3.width = base.width;
+            create3.height = base.height;
+            create3.format = base.format;
+            create3.multiplier = multiplier;
+            create3.flags = create.flags;
+            success(api3.Create(&create3, &context), "create four-frame synthesis context");
+        } else {
+            success(api.Create(&create, &context), "create synthesis context");
+        }
         D3D12_COMMAND_QUEUE_DESC queue{};
         queue.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
         success(gpu.device->CreateCommandQueue(&queue, IID_PPV_ARGS(&producer)), "independent producer queue");
@@ -194,15 +222,16 @@ struct Fixture {
         success(copy->Close(), "close overwrite list");
     }
 
-    std::array<std::vector<uint8_t>, 4> run(bool overwrite) {
+    template <typename SubmitInfo, typename Api>
+    std::array<std::vector<uint8_t>, 5> run(const Api& selectedApi, bool overwrite) {
         const auto a = scene(0), b = scene(24), sentinel = scene(57);
         for (auto& bank : outputs)
             for (auto& output : bank)
                 if (output)
                     gpu.transfer(output.Get(), &sentinel);
-        VDXRFG_SubmitInfoV1 info{};
+        SubmitInfo info{};
         info.struct_size = sizeof(info);
-        info.api_version = VDXRFG_API_VERSION;
+        info.api_version = multiplier == 4 ? VDXRFG_API_VERSION_3 : VDXRFG_API_VERSION;
         info.input = input.Get();
         info.serial = 1;
         info.display_time_ns = 1000000000;
@@ -216,7 +245,7 @@ struct Fixture {
         }
         gpu.transfer(input.Get(), &a);
         VDXRFG_TicketV1 prime{};
-        success(api.Submit(context, &info, &prime), "prime capture");
+        success(selectedApi.Submit(context, &info, &prime), "prime capture");
         check(prime.prime && prime.role_mask == (hostOwnsReal ? 0u : 4u), "prime role ownership");
         gpu.wait(static_cast<ID3D12Fence*>(prime.output_ready_fence), prime.output_ready_value);
         gpu.transfer(input.Get(), &b);
@@ -231,7 +260,7 @@ struct Fixture {
             ConsumedGate probe(gpu, static_cast<ID3D12Fence*>(prime.input_consumed_fence));
             probe.begin();
             const auto start = GetTickCount64();
-            success(api.Submit(context, &info, &pair), "parked pair Submit");
+            success(selectedApi.Submit(context, &info, &pair), "parked pair Submit");
             const auto elapsed = GetTickCount64() - start;
             probe.stopObserving();
             success(probe.waitResult, "park synthesis after consumed signal");
@@ -248,29 +277,36 @@ struct Fixture {
                   "input was overwritten before synthesis could finish");
             probe.release();
         } else {
-            success(api.Submit(context, &info, &pair), "reference pair Submit");
+            success(selectedApi.Submit(context, &info, &pair), "reference pair Submit");
         }
         check(!pair.prime && pair.bank != prime.bank &&
-                  pair.role_mask == ((multiplier == 3 ? 3u : 1u) | (hostOwnsReal ? 0u : 4u)),
+                  pair.role_mask == ((multiplier == 4   ? 11u
+                                      : multiplier == 3 ? 3u
+                                                        : 1u) |
+                                     (hostOwnsReal ? 0u : 4u)),
               "pair owns the expected distinct output bank");
         gpu.wait(static_cast<ID3D12Fence*>(pair.output_ready_fence), pair.output_ready_value);
         if (overwrite)
             check(gpu.transfer(input.Get(), nullptr) == gpu.transfer(poison.Get(), nullptr),
                   "independent producer actually replaced every input pixel");
-        std::array<std::vector<uint8_t>, 4> pixels;
+        std::array<std::vector<uint8_t>, 5> pixels;
         pixels[0] = gpu.transfer(outputs[pair.bank][0].Get(), nullptr);
-        if (multiplier == 3)
+        if (multiplier >= 3)
             pixels[1] = gpu.transfer(outputs[pair.bank][1].Get(), nullptr);
         pixels[2] = gpu.transfer(outputs[pair.bank][2].Get(), nullptr);
         pixels[3] = gpu.transfer(outputs[prime.bank][2].Get(), nullptr);
+        if (multiplier == 4)
+            pixels[4] = gpu.transfer(outputs[pair.bank][3].Get(), nullptr);
         check(pixels[0] != a && pixels[0] != b, "S1 is not an endpoint repeat");
-        check(multiplier != 3 || (pixels[1] != pixels[0] && pixels[1] != a && pixels[1] != b),
+        check(multiplier < 3 || (pixels[1] != pixels[0] && pixels[1] != a && pixels[1] != b),
               "S2 is a distinct intermediate");
+        check(multiplier != 4 || (pixels[4] != pixels[0] && pixels[4] != pixels[1] && pixels[4] != a && pixels[4] != b),
+              "S3 is a distinct intermediate");
         check(pixels[2] == (hostOwnsReal ? sentinel : b), "B preserves exact pixels or host-owned sentinel");
         check(pixels[3] == (hostOwnsReal ? sentinel : a), "held prime survives capture and input reuse");
-        success(api.Retire(context, prime.token), "retire held prime");
-        success(api.Retire(context, pair.token), "retire pair");
-        success(api.Reset(context, 1), "reset drained context for identical replay");
+        success(selectedApi.Retire(context, prime.token), "retire held prime");
+        success(selectedApi.Retire(context, pair.token), "retire pair");
+        success(selectedApi.Reset(context, 1), "reset drained context for identical replay");
         return pixels;
     }
 };
@@ -282,15 +318,18 @@ int main(int argc, char** argv) {
         const std::string backend = argv[2], owner = argv[4];
         check(backend == "nvidia" || backend == "fidelityfx-full", "known backend");
         const auto multiplier = static_cast<uint32_t>(std::stoul(argv[3]));
-        check(multiplier == 2 || multiplier == 3, "2X or 3X required");
+        check(multiplier >= 2 && multiplier <= 4, "2X, 3X or 4X required");
         check(owner == "host" || owner == "module", "host or module real-frame ownership required");
         // On failure retain this fixture, its live context and loaded DLL until
         // process exit; never unload code or resources still owned by the GPU.
         auto* fixture = new Fixture(argv[1], backend, multiplier, owner == "host");
-        const auto reference = fixture->run(false);
-        const auto overwritten = fixture->run(true);
+        const auto reference = multiplier == 4 ? fixture->run<VDXRFG_SubmitInfoV3>(fixture->api3, false)
+                                               : fixture->run<VDXRFG_SubmitInfoV1>(fixture->api, false);
+        const auto overwritten = multiplier == 4 ? fixture->run<VDXRFG_SubmitInfoV3>(fixture->api3, true)
+                                                 : fixture->run<VDXRFG_SubmitInfoV1>(fixture->api, true);
         check(reference == overwritten, "all synthetic and real outputs match despite early input reuse");
-        success(fixture->api.Destroy(fixture->context), "destroy drained context");
+        success(multiplier == 4 ? fixture->api3.Destroy(fixture->context) : fixture->api.Destroy(fixture->context),
+                "destroy drained context");
         fixture->context = nullptr;
         FreeLibrary(fixture->module);
         delete fixture;

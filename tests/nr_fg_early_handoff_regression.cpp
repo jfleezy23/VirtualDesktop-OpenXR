@@ -403,7 +403,9 @@ int wmain(int argc, wchar_t** argv) {
         require(argc == 7, "backend, module, multiplier, refresh rate, optical-flow backend and scenario required");
         const auto multiplier = static_cast<unsigned>(std::stoul(argv[3]));
         const auto rate = static_cast<unsigned>(std::stoul(argv[4]));
-        require(multiplier >= 2 && multiplier <= 4 && (rate == 120 || rate == 144), "strict native matrix");
+        require(multiplier >= 2 && multiplier <= 4 &&
+                    (rate == 72 || rate == 80 || rate == 90 || rate == 96 || rate == 100 || rate == 120 || rate == 144),
+                "strict native matrix");
         const std::wstring flow = argv[5], scenario = argv[6];
         require(flow == L"nvidia" || flow == L"fidelityfx-full", "known flow backend");
         require(scenario == L"early-tail" || scenario == L"late-tail" || scenario == L"blocked-marker-control" ||

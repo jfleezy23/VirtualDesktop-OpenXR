@@ -1,7 +1,7 @@
 # Try VDXR NR and OFXR frame generation
 
-The [October 27 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.27.1)
-improves the first generated frame's handoff to Virtual Desktop. **OFXR 2×/3×/4×** and automatic per-game
+The [November 7 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.07.1)
+improves frame delivery while the next real frame prepares. **OFXR 2×/3×/4×** and automatic per-game
 NR/FG profiles are included; there is no new switch to enable the handoff improvement.
 NR processing resolution and coverage are independent, including **95% coverage / 80% processing** and
 **90% coverage / 85% processing**. FG offers Off, 2×, 3× and 4× and also works with NR off.
@@ -22,10 +22,10 @@ it does not provide Steam Frame or ALVR streaming. Frame Launcher's separate Ste
 
 ## Install once
 
-1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.10.27.1.zip` and
-   `VDXR-NR-FG-Controls-Windows-x64-2026.10.27.1.zip` from the
-   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.10.27.1).
-   Check them against `SHA256SUMS-2026.10.27.1.txt`.
+1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.11.07.1.zip` and
+   `VDXR-NR-FG-Controls-Windows-x64-2026.11.07.1.zip` from the
+   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.07.1).
+   Check them against `SHA256SUMS-2026.11.07.1.txt`.
 2. Follow the [complete side-by-side setup](SIDE-BY-SIDE-RUNTIME.md). It installs the matching host DLL, FG DLL
    and `CUSTOM-RUNTIME.json` under `%ProgramFiles%\VDXR-NR-FG\OpenXR`, then registers the managed path.
    Keep this release's host, FG module and metadata together: 4× requires the matching new host and module.
@@ -128,7 +128,7 @@ Rapid head turns, ghosting and exposure-change artifacts can remain. This releas
 game compatibility, artifact-free motion or identical perceived detail at every processing percentage.
 Moss was checked at 120 Hz with NVIDIA and NR enabled in 2×, 3× and 4×; stereo and controls worked and
 motion was reported smooth. The 4× startup capture was brief. These observations do not establish sustained
-FPS, reduced headset latency or universal compatibility. See the [release notes](releases/2026.10.27.1.md).
+FPS, reduced headset latency or universal compatibility. See the [release notes](releases/2026.11.07.1.md).
 
 ## Source and licenses
 

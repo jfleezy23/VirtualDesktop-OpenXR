@@ -580,11 +580,19 @@ namespace virtualdesktop_openxr {
 
     void OpenXrRuntime::cleanupVulkan() {
         if (m_vkDevice && m_vkDispatch.vkDeviceWaitIdle) {
-            m_vkDispatch.vkDeviceWaitIdle(m_vkDevice);
+            const auto result = m_vkDispatch.vkDeviceWaitIdle(m_vkDevice);
+            // Device loss permits disposal. Other failures do not prove that children are idle;
+            // preserve all ownership and dispatch state so cleanup can be retried.
+            if (result != VK_ERROR_DEVICE_LOST) {
+                CHECK_VKCMD(result);
+            }
         }
 
-        for (uint32_t i = 0; i < k_numGpuTimers; i++) {
-            m_gpuTimerApp[i].reset();
+        if (m_vkDevice) {
+            // Other graphics APIs share these slots and drain their own queues before releasing them.
+            for (uint32_t i = 0; i < k_numGpuTimers; i++) {
+                m_gpuTimerApp[i].reset();
+            }
         }
         if (m_vkDevice && m_vkTimelineSemaphore && m_vkDispatch.vkDestroySemaphore) {
             m_vkDispatch.vkDestroySemaphore(
@@ -595,6 +603,7 @@ namespace virtualdesktop_openxr {
             m_vkDispatch.vkDestroyFence(
                 m_vkDevice, m_vkFenceForFlush, m_vkAllocator ? &m_vkAllocator.value() : nullptr);
             m_vkFenceForFlush = VK_NULL_HANDLE;
+            m_vkFlushPending = false;
         }
         if (m_vkDevice && m_vkCmdBuffer && m_vkDispatch.vkResetCommandBuffer) {
             m_vkDispatch.vkResetCommandBuffer(m_vkCmdBuffer, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
@@ -855,10 +864,24 @@ namespace virtualdesktop_openxr {
     void OpenXrRuntime::flushVulkanCommandQueue() {
         if (m_vkDispatch.vkQueueSubmit) {
             TraceLoggingWrite(g_traceProvider, "FlushContext_Wait", TLArg("Vulkan", "Api"));
+            uint64_t timeout = 1'000'000'000;
+            if (m_vkFlushPending) {
+                // The old marker must complete before its fence can be reused. It does not cover
+                // application work queued since the timeout, so this call still needs a fresh marker.
+                const auto start = std::chrono::steady_clock::now();
+                CHECK_VKCMD(m_vkDispatch.vkWaitForFences(m_vkDevice, 1, &m_vkFenceForFlush, true, timeout));
+                m_vkFlushPending = false;
+                const auto elapsed = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
+                        .count());
+                timeout = elapsed < timeout ? timeout - elapsed : 0;
+            }
             CHECK_VKCMD(m_vkDispatch.vkResetFences(m_vkDevice, 1, &m_vkFenceForFlush));
             VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
             CHECK_VKCMD(m_vkDispatch.vkQueueSubmit(m_vkQueue, 1, &submitInfo, m_vkFenceForFlush));
-            CHECK_VKCMD(m_vkDispatch.vkWaitForFences(m_vkDevice, 1, &m_vkFenceForFlush, true, 1'000'000'000));
+            m_vkFlushPending = true;
+            CHECK_VKCMD(m_vkDispatch.vkWaitForFences(m_vkDevice, 1, &m_vkFenceForFlush, true, timeout));
+            m_vkFlushPending = false;
         }
     }
 

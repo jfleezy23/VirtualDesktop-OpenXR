@@ -149,7 +149,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(IntDir);$(SolutionDir)\RuntimeConfiguration;$(ProjectDir);..\external\OpenXR-SDK\include;..\external\OpenXR-SDK\src\common;..\external\OpenXR-MixedReality\Shared;..\external\OpenXR-MixedReality\Shared\XrUtility;..\external\OpenXR-MixedReality\Shared\SampleShared;..\external\LibOVR\include;..\external\LibOVR\include\Extras;..\external\LibOVR\Shim;..\external\Vulkan-SDK\include;..\external\OpenGL;..\external\fmt\include;..\external\openvr\samples\drivers\drivers\handskeletonsimulation\src;..\external\openvr\headers;..\external\openvr\samples\drivers\utils\vrmath;..\external\FidelityFX-FSR\ffx-fsr;..\external\FidelityFX-CAS\ffx-cas;..\external\cJSON;..\external\d3dx12;..\external\DLSS\include\</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;$(IntDir);$(SolutionDir)\RuntimeConfiguration;$(ProjectDir);..\external\OpenXR-SDK\include;..\external\OpenXR-SDK\src\common;..\external\OpenXR-MixedReality\Shared;..\external\OpenXR-MixedReality\Shared\XrUtility;..\external\OpenXR-MixedReality\Shared\SampleShared;..\external\LibOVR\include;..\external\LibOVR\include\Extras;..\external\LibOVR\Shim;..\external\Vulkan-SDK\include;..\external\OpenGL;..\external\fmt\include;..\external\openvr\samples\drivers\drivers\handskeletonsimulation\src;..\external\openvr\headers;..\external\openvr\samples\drivers\utils\vrmath;..\external\FidelityFX-FSR\ffx-fsr;..\external\FidelityFX-CAS\ffx-cas;..\external\cJSON;..\external\d3dx12;..\external\DLSS\include\</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
@@ -157,7 +157,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalDependencies>dxgi.lib;dxguid.lib;d3d11.lib;d3d12.lib;vulkan-1.lib;opengl32.lib;ntdll.lib;nvsdk_ngx_s_dbg.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>bcrypt.lib;dxgi.lib;dxguid.lib;d3d11.lib;d3d12.lib;vulkan-1.lib;opengl32.lib;ntdll.lib;nvsdk_ngx_s_dbg.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(OutDir);..\external\Vulkan-SDK\lib;..\external\DLSS\lib\Windows_x86_64\x64</AdditionalLibraryDirectories>
       <ModuleDefinitionFile>virtualdesktop-openxr.def</ModuleDefinitionFile>
     </Link>
@@ -217,7 +217,7 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(IntDir);$(SolutionDir)\RuntimeConfiguration;$(ProjectDir);..\external\OpenXR-SDK\include;..\external\OpenXR-SDK\src\common;..\external\OpenXR-MixedReality\Shared;..\external\OpenXR-MixedReality\Shared\XrUtility;..\external\OpenXR-MixedReality\Shared\SampleShared;..\external\LibOVR\include;..\external\LibOVR\include\Extras;..\external\LibOVR\Shim;..\external\Vulkan-SDK\include;..\external\OpenGL;..\external\fmt\include;..\external\openvr\samples\drivers\drivers\handskeletonsimulation\src;..\external\openvr\headers;..\external\openvr\samples\drivers\utils\vrmath;..\external\FidelityFX-FSR\ffx-fsr;..\external\FidelityFX-CAS\ffx-cas;..\external\cJSON;..\external\DLSS\include\</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;$(IntDir);$(SolutionDir)\RuntimeConfiguration;$(ProjectDir);..\external\OpenXR-SDK\include;..\external\OpenXR-SDK\src\common;..\external\OpenXR-MixedReality\Shared;..\external\OpenXR-MixedReality\Shared\XrUtility;..\external\OpenXR-MixedReality\Shared\SampleShared;..\external\LibOVR\include;..\external\LibOVR\include\Extras;..\external\LibOVR\Shim;..\external\Vulkan-SDK\include;..\external\OpenGL;..\external\fmt\include;..\external\openvr\samples\drivers\drivers\handskeletonsimulation\src;..\external\openvr\headers;..\external\openvr\samples\drivers\utils\vrmath;..\external\FidelityFX-FSR\ffx-fsr;..\external\FidelityFX-CAS\ffx-cas;..\external\cJSON;..\external\DLSS\include\</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
@@ -225,7 +225,7 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalDependencies>dxgi.lib;dxguid.lib;d3d11.lib;d3d12.lib;vulkan-1.lib;opengl32.lib;ntdll.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>bcrypt.lib;dxgi.lib;dxguid.lib;d3d11.lib;d3d12.lib;vulkan-1.lib;opengl32.lib;ntdll.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(OutDir);..\external\Vulkan-SDK\lib32</AdditionalLibraryDirectories>
       <ModuleDefinitionFile>virtualdesktop-openxr.def</ModuleDefinitionFile>
     </Link>
@@ -287,7 +287,7 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(IntDir);$(SolutionDir)\RuntimeConfiguration;$(ProjectDir);..\external\OpenXR-SDK\include;..\external\OpenXR-SDK\src\common;..\external\OpenXR-MixedReality\Shared;..\external\OpenXR-MixedReality\Shared\XrUtility;..\external\OpenXR-MixedReality\Shared\SampleShared;..\external\LibOVR\include;..\external\LibOVR\include\Extras;..\external\LibOVR\Shim;..\external\Vulkan-SDK\include;..\external\OpenGL;..\external\fmt\include;..\external\openvr\samples\drivers\drivers\handskeletonsimulation\src;..\external\openvr\headers;..\external\openvr\samples\drivers\utils\vrmath;..\external\FidelityFX-FSR\ffx-fsr;..\external\FidelityFX-CAS\ffx-cas;..\external\cJSON;..\external\d3dx12;..\external\DLSS\include\</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;$(IntDir);$(SolutionDir)\RuntimeConfiguration;$(ProjectDir);..\external\OpenXR-SDK\include;..\external\OpenXR-SDK\src\common;..\external\OpenXR-MixedReality\Shared;..\external\OpenXR-MixedReality\Shared\XrUtility;..\external\OpenXR-MixedReality\Shared\SampleShared;..\external\LibOVR\include;..\external\LibOVR\include\Extras;..\external\LibOVR\Shim;..\external\Vulkan-SDK\include;..\external\OpenGL;..\external\fmt\include;..\external\openvr\samples\drivers\drivers\handskeletonsimulation\src;..\external\openvr\headers;..\external\openvr\samples\drivers\utils\vrmath;..\external\FidelityFX-FSR\ffx-fsr;..\external\FidelityFX-CAS\ffx-cas;..\external\cJSON;..\external\d3dx12;..\external\DLSS\include\</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
@@ -297,7 +297,7 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalDependencies>dxgi.lib;dxguid.lib;d3d11.lib;d3d12.lib;vulkan-1.lib;opengl32.lib;ntdll.lib;nvsdk_ngx_s.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>bcrypt.lib;dxgi.lib;dxguid.lib;d3d11.lib;d3d12.lib;vulkan-1.lib;opengl32.lib;ntdll.lib;nvsdk_ngx_s.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(OutDir);..\external\Vulkan-SDK\lib;..\external\DLSS\lib\Windows_x86_64\x64</AdditionalLibraryDirectories>
       <ModuleDefinitionFile>virtualdesktop-openxr.def</ModuleDefinitionFile>
     </Link>
@@ -359,7 +359,7 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(IntDir);$(SolutionDir)\RuntimeConfiguration;$(ProjectDir);..\external\OpenXR-SDK\include;..\external\OpenXR-SDK\src\common;..\external\OpenXR-MixedReality\Shared;..\external\OpenXR-MixedReality\Shared\XrUtility;..\external\OpenXR-MixedReality\Shared\SampleShared;..\external\LibOVR\include;..\external\LibOVR\include\Extras;..\external\LibOVR\Shim;..\external\Vulkan-SDK\include;..\external\OpenGL;..\external\fmt\include;..\external\openvr\samples\drivers\drivers\handskeletonsimulation\src;..\external\openvr\headers;..\external\openvr\samples\drivers\utils\vrmath;..\external\FidelityFX-FSR\ffx-fsr;..\external\FidelityFX-CAS\ffx-cas;..\external\cJSON;..\external\d3dx12;..\external\DLSS\include\</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;$(IntDir);$(SolutionDir)\RuntimeConfiguration;$(ProjectDir);..\external\OpenXR-SDK\include;..\external\OpenXR-SDK\src\common;..\external\OpenXR-MixedReality\Shared;..\external\OpenXR-MixedReality\Shared\XrUtility;..\external\OpenXR-MixedReality\Shared\SampleShared;..\external\LibOVR\include;..\external\LibOVR\include\Extras;..\external\LibOVR\Shim;..\external\Vulkan-SDK\include;..\external\OpenGL;..\external\fmt\include;..\external\openvr\samples\drivers\drivers\handskeletonsimulation\src;..\external\openvr\headers;..\external\openvr\samples\drivers\utils\vrmath;..\external\FidelityFX-FSR\ffx-fsr;..\external\FidelityFX-CAS\ffx-cas;..\external\cJSON;..\external\d3dx12;..\external\DLSS\include\</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
@@ -369,7 +369,7 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalDependencies>dxgi.lib;dxguid.lib;d3d11.lib;d3d12.lib;vulkan-1.lib;opengl32.lib;ntdll.lib;nvsdk_ngx_s.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>bcrypt.lib;dxgi.lib;dxguid.lib;d3d11.lib;d3d12.lib;vulkan-1.lib;opengl32.lib;ntdll.lib;nvsdk_ngx_s.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(OutDir);..\external\Vulkan-SDK\lib;..\external\DLSS\lib\Windows_x86_64\x64</AdditionalLibraryDirectories>
       <ModuleDefinitionFile>virtualdesktop-openxr.def</ModuleDefinitionFile>
     </Link>
@@ -431,7 +431,7 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(IntDir);$(SolutionDir)\RuntimeConfiguration;$(ProjectDir);..\external\OpenXR-SDK\include;..\external\OpenXR-SDK\src\common;..\external\OpenXR-MixedReality\Shared;..\external\OpenXR-MixedReality\Shared\XrUtility;..\external\OpenXR-MixedReality\Shared\SampleShared;..\external\LibOVR\include;..\external\LibOVR\include\Extras;..\external\LibOVR\Shim;..\external\Vulkan-SDK\include;..\external\OpenGL;..\external\fmt\include;..\external\openvr\samples\drivers\drivers\handskeletonsimulation\src;..\external\openvr\headers;..\external\openvr\samples\drivers\utils\vrmath;..\external\FidelityFX-FSR\ffx-fsr;..\external\FidelityFX-CAS\ffx-cas;..\external\cJSON;..\external\DLSS\include\</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;$(IntDir);$(SolutionDir)\RuntimeConfiguration;$(ProjectDir);..\external\OpenXR-SDK\include;..\external\OpenXR-SDK\src\common;..\external\OpenXR-MixedReality\Shared;..\external\OpenXR-MixedReality\Shared\XrUtility;..\external\OpenXR-MixedReality\Shared\SampleShared;..\external\LibOVR\include;..\external\LibOVR\include\Extras;..\external\LibOVR\Shim;..\external\Vulkan-SDK\include;..\external\OpenGL;..\external\fmt\include;..\external\openvr\samples\drivers\drivers\handskeletonsimulation\src;..\external\openvr\headers;..\external\openvr\samples\drivers\utils\vrmath;..\external\FidelityFX-FSR\ffx-fsr;..\external\FidelityFX-CAS\ffx-cas;..\external\cJSON;..\external\DLSS\include\</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
@@ -441,7 +441,7 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalDependencies>dxgi.lib;dxguid.lib;d3d11.lib;d3d12.lib;vulkan-1.lib;opengl32.lib;ntdll.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>bcrypt.lib;dxgi.lib;dxguid.lib;d3d11.lib;d3d12.lib;vulkan-1.lib;opengl32.lib;ntdll.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(OutDir);..\external\Vulkan-SDK\lib32</AdditionalLibraryDirectories>
       <ModuleDefinitionFile>virtualdesktop-openxr.def</ModuleDefinitionFile>
     </Link>
@@ -503,7 +503,7 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(IntDir);$(SolutionDir)\RuntimeConfiguration;$(ProjectDir);..\external\OpenXR-SDK\include;..\external\OpenXR-SDK\src\common;..\external\OpenXR-MixedReality\Shared;..\external\OpenXR-MixedReality\Shared\XrUtility;..\external\OpenXR-MixedReality\Shared\SampleShared;..\external\LibOVR\include;..\external\LibOVR\include\Extras;..\external\LibOVR\Shim;..\external\Vulkan-SDK\include;..\external\OpenGL;..\external\fmt\include;..\external\openvr\samples\drivers\drivers\handskeletonsimulation\src;..\external\openvr\headers;..\external\openvr\samples\drivers\utils\vrmath;..\external\FidelityFX-FSR\ffx-fsr;..\external\FidelityFX-CAS\ffx-cas;..\external\cJSON;..\external\DLSS\include\</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;$(IntDir);$(SolutionDir)\RuntimeConfiguration;$(ProjectDir);..\external\OpenXR-SDK\include;..\external\OpenXR-SDK\src\common;..\external\OpenXR-MixedReality\Shared;..\external\OpenXR-MixedReality\Shared\XrUtility;..\external\OpenXR-MixedReality\Shared\SampleShared;..\external\LibOVR\include;..\external\LibOVR\include\Extras;..\external\LibOVR\Shim;..\external\Vulkan-SDK\include;..\external\OpenGL;..\external\fmt\include;..\external\openvr\samples\drivers\drivers\handskeletonsimulation\src;..\external\openvr\headers;..\external\openvr\samples\drivers\utils\vrmath;..\external\FidelityFX-FSR\ffx-fsr;..\external\FidelityFX-CAS\ffx-cas;..\external\cJSON;..\external\DLSS\include\</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
@@ -513,7 +513,7 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalDependencies>dxgi.lib;dxguid.lib;d3d11.lib;d3d12.lib;vulkan-1.lib;opengl32.lib;ntdll.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>bcrypt.lib;dxgi.lib;dxguid.lib;d3d11.lib;d3d12.lib;vulkan-1.lib;opengl32.lib;ntdll.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(OutDir);..\external\Vulkan-SDK\lib32</AdditionalLibraryDirectories>
       <ModuleDefinitionFile>virtualdesktop-openxr.def</ModuleDefinitionFile>
     </Link>
@@ -726,6 +726,170 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
       <ShaderType>Pixel</ShaderType>
     </FxCompile>
     <FxCompile Include="UpscalingCS.hlsl">
+      <ShaderType>Compute</ShaderType>
+    </FxCompile>
+  </ItemGroup>
+  <ItemGroup Label="CorrespondingSourceCheckpoint">
+    <ClCompile Include="PairCaptureNrEnginePostFx.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrEngineModules.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrEngineControls.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrEngineRoles.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrEngineTransfer.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrDrawPacket.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrEngineProjection.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrEnginePacket.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrModulePacket.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrEngine.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrPacketBuilder.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrSdkPacket.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrSnapshots.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrWarmLayouts.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrHostRuntime.cpp" />
+    <ClCompile Include="PairCaptureNrReturnGuard.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrModuleLease.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrModules.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrSources.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrResourceAliases.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrFenceAliases.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrWrites.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrPipelineFacts.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrPostFx.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrPrivate.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="..\nr-frame-generation\src\pair_capture_nr_validate.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <CompileAs>CompileAsC</CompileAs>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\nr-frame-generation\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrSdk.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PairCaptureNrOwner.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="delivery_transport.cpp" />
+    <ClCompile Include="runtime_delivery.cpp" />
+    <ClInclude Include="D3D12Utils.h" />
+    <ClInclude Include="delivery_transport.h" />
+    <ClInclude Include="sdk_gate_lease.h" />
+    <ClInclude Include="depth_projection.h" />
+    <ClInclude Include="frame_generation_layers.h" />
+    <ClInclude Include="game_profiles.h" />
+    <ClInclude Include="meta_body_tracking_calibration.h" />
+    <ClInclude Include="meta_body_tracking_fidelity.h" />
+    <ClInclude Include="meta_body_tracking_full_body.h" />
+    <ClInclude Include="NrOwnershipViews.h" />
+    <ClInclude Include="PairCaptureNrContracts.h" />
+    <ClInclude Include="PairCaptureNrDescriptions.h" />
+    <ClInclude Include="PairCaptureNrDrawPacket.h" />
+    <ClInclude Include="PairCaptureNrEngine.h" />
+    <ClInclude Include="PairCaptureNrEngineFacts.h" />
+    <ClInclude Include="PairCaptureNrEnginePacket.h" />
+    <ClInclude Include="PairCaptureNrMetadataBudget.h" />
+    <ClInclude Include="PairCaptureNrModulePacket.h" />
+    <ClInclude Include="PairCaptureNrModules.h" />
+    <ClInclude Include="PairCaptureNrOwner.h" />
+    <ClInclude Include="PairCaptureNrPacketBuilder.h" />
+    <ClInclude Include="PairCaptureNrPipelineFacts.h" />
+    <ClInclude Include="PairCaptureNrPostFx.h" />
+    <ClInclude Include="PairCaptureNrPrivate.h" />
+    <ClInclude Include="PairCaptureNrPrivateApi.h" />
+    <ClInclude Include="PairCaptureNrReturnGuard.h" />
+    <ClInclude Include="PairCaptureNrSdk.h" />
+    <ClInclude Include="PairCaptureNrSdkPacket.h" />
+    <ClInclude Include="PairCaptureNrSnapshotLayout.h" />
+    <ClInclude Include="PairCaptureNrSnapshots.h" />
+    <ClInclude Include="PairCaptureNrSourceFacts.h" />
+    <ClInclude Include="PairCaptureNrSources.h" />
+    <ClInclude Include="PairCaptureNrViewDescriptions.h" />
+    <ClInclude Include="PairCaptureNrWarmLayouts.h" />
+    <ClInclude Include="PairCaptureNrWarmSubmission.h" />
+    <ClInclude Include="PairCaptureNrWrites.h" />
+    <ClInclude Include="version.h" />
+    <ClInclude Include="..\nr-frame-generation\include\fg_depth_probe_plan.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\fg_depth_trace.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\output_lineage_core.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_core.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_nr_budget.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_nr_draw.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_nr_fg.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_nr_fg_journal.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_nr_fg_ledger.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_nr_host_reservation.h" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_nr_private.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_nr_receiver.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_nr_source_match.h" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_nr_state.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_nr_worker.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_private.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_read_state.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\vdxr_fg_depth_validation.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\xrfg_depth_guidance.hpp" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_nr_abi.h" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_nr_control.h" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_nr_postfx_abi.h" />
+    <ClInclude Include="..\nr-frame-generation\include\pair_capture_nr_postfx_validate.h" />
+    <FxCompile Include="FrameGenerationDepthCS.hlsl">
       <ShaderType>Compute</ShaderType>
     </FxCompile>
   </ItemGroup>

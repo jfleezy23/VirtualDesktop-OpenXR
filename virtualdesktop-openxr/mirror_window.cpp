@@ -79,12 +79,17 @@ namespace virtualdesktop_openxr {
                 DispatchMessage(&msg);
             }
 
-            // Free resources ASAP.
+            // Share the worker's P-context lease before touching SDK mirror
+            // resources; mirror close can run independently of producer End.
             {
+                std::unique_lock contextLease(m_fgContextMutex, std::defer_lock);
+                if (m_deliveryTransport)
+                    contextLease.lock();
                 std::unique_lock lock(m_mirrorWindowMutex);
                 m_mirrorWindowSwapchain.Reset();
                 m_mirrorTexture.Reset();
-                ovr_DestroyMirrorTexture(m_ovrSession, m_ovrMirrorSwapChain);
+                nativeRenderingCall([&] { ovr_DestroyMirrorTexture(m_ovrSession, m_ovrMirrorSwapChain); },
+                                    "DestroyMirror");
                 m_ovrMirrorSwapChain = nullptr;
                 m_mirrorWindowHwnd = nullptr;
             }
@@ -93,11 +98,12 @@ namespace virtualdesktop_openxr {
 
     void OpenXrRuntime::updateMirrorWindow(bool preferSRGB) {
         std::unique_lock lock(m_mirrorWindowMutex);
-
         if (!m_mirrorWindowReady || !IsWindowVisible(m_mirrorWindowHwnd)) {
             return;
         }
 
+        auto deliveryLease =
+            m_deliveryTransport ? m_deliveryTransport->sdkLease("Mirror") : DeliveryTransport::SdkLease{};
         RECT rect{};
         GetClientRect(m_mirrorWindowHwnd, &rect);
         AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, false);
@@ -120,7 +126,7 @@ namespace virtualdesktop_openxr {
         if (!m_mirrorWindowSwapchain || preferSRGB != isSRGB) {
             ComPtr<IDXGIFactory2> dxgiFactory;
             ComPtr<IDXGIDevice1> dxgiDevice;
-            CHECK_HRCMD(m_ovrSubmissionDevice->QueryInterface(IID_PPV_ARGS(dxgiDevice.ReleaseAndGetAddressOf())));
+            CHECK_HRCMD(presentationDevice()->QueryInterface(IID_PPV_ARGS(dxgiDevice.ReleaseAndGetAddressOf())));
 
             ComPtr<IDXGIAdapter> dxgiAdapter;
             CHECK_HRCMD(dxgiDevice->GetAdapter(&dxgiAdapter));
@@ -134,7 +140,7 @@ namespace virtualdesktop_openxr {
             swapchainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
             swapchainDesc.BufferCount = 2;
             swapchainDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-            CHECK_HRCMD(dxgiFactory->CreateSwapChainForHwnd(m_ovrSubmissionDevice.Get(),
+            CHECK_HRCMD(dxgiFactory->CreateSwapChainForHwnd(presentationDevice(),
                                                             m_mirrorWindowHwnd,
                                                             &swapchainDesc,
                                                             nullptr,
@@ -151,7 +157,8 @@ namespace virtualdesktop_openxr {
             // Recreate a new OVR swapchain with the correct size.
             if (m_ovrMirrorSwapChain) {
                 m_mirrorTexture.Reset();
-                ovr_DestroyMirrorTexture(m_ovrSession, m_ovrMirrorSwapChain);
+                nativeRenderingCall([&] { ovr_DestroyMirrorTexture(m_ovrSession, m_ovrMirrorSwapChain); },
+                                    "DestroyMirror");
             }
 
             ovrMirrorTextureDesc mirrorDesc{};
@@ -160,7 +167,7 @@ namespace virtualdesktop_openxr {
             mirrorDesc.Height = height;
             mirrorDesc.MirrorOptions = ovrMirrorOption_RightEyeOnly;
             CHECK_OVRCMD(ovr_CreateMirrorTextureWithOptionsDX(
-                m_ovrSession, m_ovrSubmissionDevice.Get(), &mirrorDesc, &m_ovrMirrorSwapChain));
+                m_ovrSession, presentationDevice(), &mirrorDesc, &m_ovrMirrorSwapChain));
             CHECK_OVRCMD(ovr_GetMirrorTextureBufferDX(
                 m_ovrSession, m_ovrMirrorSwapChain, IID_PPV_ARGS(m_mirrorTexture.ReleaseAndGetAddressOf())));
         }
@@ -171,7 +178,7 @@ namespace virtualdesktop_openxr {
         // Let those fail silently below so we do not crash the application.
         ComPtr<ID3D11Texture2D> frameBuffer;
         m_mirrorWindowSwapchain->GetBuffer(0, IID_PPV_ARGS(frameBuffer.ReleaseAndGetAddressOf()));
-        m_ovrSubmissionContext->CopyResource(frameBuffer.Get(), m_mirrorTexture.Get());
+        presentationContext()->CopyResource(frameBuffer.Get(), m_mirrorTexture.Get());
         m_mirrorWindowSwapchain->Present(0, 0);
         TraceLoggingWriteStop(presentMirrorWindow, "PresentMirrorWindow");
 

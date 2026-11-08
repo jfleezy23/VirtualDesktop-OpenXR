@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 #include "pch.h"
+#include "PairCaptureNrPrivate.h"
 
 #include "log.h"
 #include "runtime.h"
@@ -118,6 +119,7 @@ namespace virtualdesktop_openxr {
     }
 
     OpenXrRuntime::OpenXrRuntime() {
+        nr_capture::hostInstanceCreated(this);
         const auto runtimeVersion =
             xr::ToString(XR_MAKE_VERSION(RuntimeVersionMajor, RuntimeVersionMinor, RuntimeVersionPatch));
         TraceLoggingWrite(g_traceProvider, "VirtualDesktopOpenXR", TLArg(runtimeVersion.c_str(), "Version"));

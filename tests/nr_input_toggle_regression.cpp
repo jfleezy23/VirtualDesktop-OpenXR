@@ -18,6 +18,8 @@ namespace {
     DWORD requestedFrameGeneration{}, nrSharpenSetting{}, nrUpscalingSetting{100};
     std::optional<DWORD> globalFrameGenerationReadOverride;
     DWORD requestedFrameGenerationBackend{};
+    std::optional<DWORD> requestedFrameGenerationDepthMode;
+    std::optional<DWORD> asyncSubmissionDisabledOverride;
     bool preserveNrAppearance{};
     DWORD nrDepthSubmissionSetting{1};
     bool includeDepthInput = true;
@@ -28,6 +30,8 @@ namespace {
     bool expectDepth[2] = {true, true};
     bool readSubmittedColour = true;
     bool checkOffColourEdges = false;
+    bool allowQuadOnly = false;
+    unsigned quadOnlyEnds{};
     std::array<std::array<unsigned, 4>, 2> expectedOffColour{{{32, 64, 96, 255}, {32, 64, 96, 255}}};
     std::function<void(const ovrLayerEyeFov&)> observeProjection;
     std::function<void(long long)> observeNativeEnd;
@@ -80,6 +84,8 @@ namespace {
             value = globalFrameGenerationReadOverride.value_or(requestedFrameGeneration);
         else if (setting == L"FrameGenerationBackend")
             value = requestedFrameGenerationBackend;
+        else if (setting == L"FrameGenerationDepthMode" && requestedFrameGenerationDepthMode)
+            value = *requestedFrameGenerationDepthMode;
         else if (preserveNrAppearance && setting == L"DLSSNR_Style")
             value = 2;
         else if (preserveNrAppearance && setting == L"DLSSNR_Intensity")
@@ -91,7 +97,7 @@ namespace {
         else if (setting == L"sharpen")
             value = nrSharpenSetting;
         else if (setting == L"quirk_disable_async_submission")
-            value = requestedFrameGeneration ? 0 : 1;
+            value = asyncSubmissionDisabledOverride.value_or(requestedFrameGeneration ? 0 : 1);
         else if (setting == L"quirk_use_depth")
             value = nrDepthSubmissionSetting;
         else if (setting == L"quirk_allow_static_swapchains_reuse")
@@ -158,6 +164,11 @@ namespace {
         auto texture = getCommitted(session, layer.ColorTexture[eye]);
         D3D11_TEXTURE2D_DESC desc{};
         texture->GetDesc(&desc);
+        const auto viewport = layer.Viewport[eye];
+        require(viewport.Pos.x >= 0 && viewport.Pos.y >= 0 && viewport.Size.w > 0 && viewport.Size.h > 0 &&
+                    uint64_t(viewport.Pos.x) + viewport.Size.w <= desc.Width &&
+                    uint64_t(viewport.Pos.y) + viewport.Size.h <= desc.Height,
+                "submitted viewport must fit actual native image before readback");
         if (observeSubmittedColour)
             observeSubmittedColour(desc, eye);
         const bool bgra = desc.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS || desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
@@ -177,7 +188,8 @@ namespace {
         context->CopyResource(staging.Get(), texture.Get());
         D3D11_MAPPED_SUBRESOURCE mapped{};
         checkHr(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped));
-        const auto& viewport = layer.Viewport[eye];
+        auto unmap = MakeScopeGuard([&] { context->Unmap(staging.Get(), 0); });
+        require(mapped.pData && mapped.RowPitch >= desc.Width * 4, "readback mapping must contain complete RGBA rows");
         const auto* pixel = static_cast<const uint8_t*>(mapped.pData) +
                             (viewport.Pos.y + viewport.Size.h / 2) * mapped.RowPitch +
                             (viewport.Pos.x + viewport.Size.w / 2) * 4;
@@ -200,11 +212,11 @@ namespace {
                 edgesCorrect &= matchesExpected({edge[bgra ? 2 : 0], edge[1], edge[bgra ? 0 : 2], edge[3]});
             }
         }
-        context->Unmap(staging.Get(), 0);
         require(edgesCorrect, "NR-off cropped eye edges preserve the submitted subrectangle");
         std::cout << "native color eye=" << eye << " NR=" << enabled.load() << " rgba=" << actual[0] << ',' << actual[1]
                   << ',' << actual[2] << ',' << actual[3] << '\n';
-        require(actual[3] == 255, "Submitted color alpha is incorrect");
+        const auto expectedAlpha = enabled.load() ? 255u : expectedOffColour[eye][3];
+        require(actual[3] == expectedAlpha, "Submitted color alpha is incorrect");
         if (!enabled.load() || checkEnabledColourIdentity)
             require(matchesExpected(actual), "NR-off color pixels changed");
         checkHr(device->GetDeviceRemovedReason());
@@ -242,7 +254,16 @@ namespace {
                     }
                     found = true;
                 }
-                require(found, "No native color/depth projection was submitted");
+                if (!found && allowQuadOnly) {
+                    require(count == 1 && layers && layers[0] && layers[0]->Type == ovrLayerType_Quad,
+                            "quad-only fallback preserves its exact ordinary layer type/count");
+                    const auto& quad = *reinterpret_cast<const ovrLayerQuad*>(layers[0]);
+                    require(quad.ColorTexture && quad.Viewport.Size.w == 512 && quad.Viewport.Size.h == 512,
+                            "quad-only fallback has its complete native colour viewport");
+                    ++quadOnlyEnds;
+                } else {
+                    require(found, "No native color/depth projection was submitted");
+                }
                 ++captured;
             } catch (const std::exception& error) {
                 captureFailure = error.what();

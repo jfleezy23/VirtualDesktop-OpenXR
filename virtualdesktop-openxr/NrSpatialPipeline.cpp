@@ -1,4 +1,5 @@
 #include "NrSpatialPipeline.h"
+#include "PairCaptureNrSdk.h"
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <algorithm>
@@ -126,9 +127,13 @@ namespace virtualdesktop_openxr::nr_spatial {
             std::array<ComPtr<ID3D12Resource>, 5> owners;
             ComPtr<ID3D12DescriptorHeap> views, targets;
             uint64_t completion{};
+            uint64_t nrBatchObjectEpoch{}, nrDescriptorBindEpoch{};
+            nr_capture::PipelineDescriptorHandle nrDescriptorCreations{};
         };
         struct Generation {
             FrameInput geometry;
+            uint64_t nrPipelineGenerationEpoch{};
+            nr_capture::PipelineProgramHandle nrProgram{};
             ComPtr<ID3D12RootSignature> root;
             ComPtr<ID3D12PipelineState> downsample, resolve;
             std::array<Scratch, 2> scratch;
@@ -140,10 +145,14 @@ namespace virtualdesktop_openxr::nr_spatial {
         std::unique_ptr<Generation> generation;
         Batch* active{};
         UINT viewStride{};
+        inline static std::atomic<uint64_t> nextPipelineLifetime{1};
+        std::atomic<uint64_t> nextGeneration{1}, nextBatch{1}, nextBind{1};
+        uint64_t nrPipelineLifetimeEpoch{};
 
         explicit Impl(ID3D12Device* d, ID3D12Fence* f) : device(d), fence(f) {
             if (d)
                 viewStride = d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            vdxrfg::pair_capture::nr::TryNextObservedEpoch(nextPipelineLifetime, nrPipelineLifetimeEpoch);
         }
         void Validate(const FrameInput& input) {
             if (!device || !fence || !input.output || !IsSupportedColorFormat(input.outputFormat) ||
@@ -196,6 +205,7 @@ namespace virtualdesktop_openxr::nr_spatial {
             ComPtr<ID3D12Resource> result;
             Check(device->CreateCommittedResource(
                 &heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&result)));
+            nr_capture::sdkResourceCreated(result.Get());
             return result;
         }
         std::unique_ptr<Generation> CreateGeneration(const FrameInput& input) {
@@ -214,13 +224,16 @@ namespace virtualdesktop_openxr::nr_spatial {
             desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
             ComPtr<ID3DBlob> serialized, error;
             Check(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &error));
-            Check(device->CreateRootSignature(
-                0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&g->root)));
+            const auto observedRootBytes = serialized->GetBufferPointer();
+            const auto observedRootSize = serialized->GetBufferSize();
+            Check(device->CreateRootSignature(0, observedRootBytes, observedRootSize, IID_PPV_ARGS(&g->root)));
+            nr_capture::pipelineRootCreated(g->nrProgram, g->root.Get(), observedRootBytes, observedRootSize);
             if (!input.nativeAnswer) {
                 D3D12_COMPUTE_PIPELINE_STATE_DESC compute{};
                 compute.pRootSignature = g->root.Get();
                 compute.CS = {g_NrSpatialDownsampleCS, sizeof(g_NrSpatialDownsampleCS)};
                 Check(device->CreateComputePipelineState(&compute, IID_PPV_ARGS(&g->downsample)));
+                nr_capture::pipelineComputeCreated(g->nrProgram, g->downsample.Get(), compute.CS);
             }
             D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics{};
             graphics.pRootSignature = g->root.Get();
@@ -244,6 +257,7 @@ namespace virtualdesktop_openxr::nr_spatial {
             graphics.RTVFormats[0] = RawColorFormat(input.outputFormat);
             graphics.SampleDesc.Count = 1;
             Check(device->CreateGraphicsPipelineState(&graphics, IID_PPV_ARGS(&g->resolve)));
+            nr_capture::pipelineGraphicsCreated(g->nrProgram, g->resolve.Get(), graphics.VS, graphics.PS);
             if (input.nativeAnswer) {
                 // Preserve the existing vendor target's format family and dimensions,
                 // including typeless BGRA. Do not silently substitute RGBA storage.
@@ -257,6 +271,7 @@ namespace virtualdesktop_openxr::nr_spatial {
                                                       D3D12_RESOURCE_STATE_COMMON,
                                                       nullptr,
                                                       IID_PPV_ARGS(&g->nativeAnswer)));
+                nr_capture::sdkResourceCreated(g->nativeAnswer.Get());
                 return g;
             }
             for (UINT e = 0; e < 2; ++e) {
@@ -288,6 +303,7 @@ namespace virtualdesktop_openxr::nr_spatial {
                 auto handle = b->views->GetCPUDescriptorHandleForHeapStart();
                 handle.ptr += SIZE_T(e * 6 + 2) * viewStride;
                 const auto& scratch = g.scratch[e];
+                UINT observedSrv = 0;
                 for (auto* resource :
                      {scratch.proxy.Get(), input.nativeAnswer ? g.nativeAnswer.Get() : scratch.answer.Get()}) {
                     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
@@ -297,6 +313,14 @@ namespace virtualdesktop_openxr::nr_spatial {
                     srv.Texture2D.MipLevels = 1;
                     NR_SPATIAL_OBSERVE(Record(test_observer::Kind::Descriptor, resource));
                     device->CreateShaderResourceView(resource, &srv, handle);
+                    nr_capture::pipelineDescriptorCreated(b->nrDescriptorCreations,
+                                                          e * 6 + 2 + observedSrv,
+                                                          b->views.Get(),
+                                                          handle,
+                                                          viewStride,
+                                                          resource,
+                                                          srv);
+                    ++observedSrv;
                     handle.ptr += viewStride;
                 }
                 D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
@@ -304,12 +328,17 @@ namespace virtualdesktop_openxr::nr_spatial {
                 uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
                 NR_SPATIAL_OBSERVE(Record(test_observer::Kind::Descriptor, scratch.proxy.Get()));
                 device->CreateUnorderedAccessView(scratch.proxy.Get(), nullptr, &uav, handle);
+                nr_capture::pipelineDescriptorCreated(
+                    b->nrDescriptorCreations, e * 6 + 4, b->views.Get(), handle, viewStride, scratch.proxy.Get(), uav);
                 handle.ptr += viewStride;
                 uav.Format = DXGI_FORMAT_R32_FLOAT;
                 NR_SPATIAL_OBSERVE(Record(test_observer::Kind::Descriptor, scratch.depth.Get()));
                 device->CreateUnorderedAccessView(scratch.depth.Get(), nullptr, &uav, handle);
+                nr_capture::pipelineDescriptorCreated(
+                    b->nrDescriptorCreations, e * 6 + 5, b->views.Get(), handle, viewStride, scratch.depth.Get(), uav);
             }
             BindBatch(*b, input);
+            vdxrfg::pair_capture::nr::TryNextObservedEpoch(nextBatch, b->nrBatchObjectEpoch);
             return b;
         }
         // Only called for a new batch or one whose completion was positively
@@ -324,10 +353,14 @@ namespace virtualdesktop_openxr::nr_spatial {
             target.Format = RawColorFormat(input.outputFormat);
             target.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
             NR_SPATIAL_OBSERVE(Record(test_observer::Kind::Descriptor, input.output));
-            device->CreateRenderTargetView(input.output, &target, b->targets->GetCPUDescriptorHandleForHeapStart());
+            const auto observedTargetHandle = b->targets->GetCPUDescriptorHandleForHeapStart();
+            device->CreateRenderTargetView(input.output, &target, observedTargetHandle);
+            nr_capture::pipelineDescriptorCreated(
+                b->nrDescriptorCreations, 12, b->targets.Get(), observedTargetHandle, 0, input.output, target);
             for (UINT e = 0; e < 2; ++e) {
                 auto handle = b->views->GetCPUDescriptorHandleForHeapStart();
                 handle.ptr += SIZE_T(e * 6) * viewStride;
+                UINT observedInput = 0;
                 auto srv = [&](ID3D12Resource* r, DXGI_FORMAT format) {
                     D3D12_SHADER_RESOURCE_VIEW_DESC d{};
                     d.Format = format;
@@ -339,12 +372,16 @@ namespace virtualdesktop_openxr::nr_spatial {
                     d.Texture2DArray.ArraySize = 1;
                     NR_SPATIAL_OBSERVE(Record(test_observer::Kind::Descriptor, r));
                     device->CreateShaderResourceView(r, &d, handle);
+                    nr_capture::pipelineDescriptorCreated(
+                        b->nrDescriptorCreations, e * 6 + observedInput, b->views.Get(), handle, viewStride, r, d);
+                    ++observedInput;
                     handle.ptr += viewStride;
                 };
                 const auto& eye = input.eyes[e];
                 srv(eye.color, RawColorFormat(eye.colorFormat));
                 srv(eye.depth, eye.depth ? eye.depthFormat : DXGI_FORMAT_R32_FLOAT);
             }
+            vdxrfg::pair_capture::nr::TryNextObservedEpoch(nextBind, b->nrDescriptorBindEpoch);
         }
         Constants Parameters(UINT e) const {
             const auto& eye = active->input.eyes[e];
@@ -378,6 +415,71 @@ namespace virtualdesktop_openxr::nr_spatial {
     Pipeline::Pipeline(ID3D12Device* device, ID3D12Fence* fence) : impl_(std::make_unique<Impl>(device, fence)) {
     }
     Pipeline::~Pipeline() = default;
+    bool Pipeline::BorrowActiveOwnership(vdxrfg::pair_capture::nr::NrPipelineOwnership& out) const noexcept {
+        using namespace vdxrfg::pair_capture::nr;
+        out = {};
+        const auto& p = *impl_;
+        if (!p.active || !p.generation || !p.nrPipelineLifetimeEpoch || !p.generation->nrPipelineGenerationEpoch ||
+            !p.active->nrBatchObjectEpoch || !p.active->nrDescriptorBindEpoch)
+            return false;
+        NrPipelineOwnership view{};
+        view.device = p.device.Get();
+        view.fence = p.fence.Get();
+        for (size_t i = 0; i < 5; ++i)
+            view.inputs[i] = p.active->owners[i].Get();
+        view.views = p.active->views.Get();
+        view.targets = p.active->targets.Get();
+        view.root = p.generation->root.Get();
+        view.downsample = p.generation->downsample.Get();
+        view.resolve = p.generation->resolve.Get();
+        for (size_t i = 0; i < 2; ++i) {
+            view.scratch[i].proxy = p.generation->scratch[i].proxy.Get();
+            view.scratch[i].answer = p.generation->scratch[i].answer.Get();
+            view.scratch[i].depth = p.generation->scratch[i].depth.Get();
+        }
+        view.nativeAnswer = p.generation->nativeAnswer.Get();
+        if (!view.device || !view.fence || !view.inputs[0] || !view.inputs[2] || !view.inputs[4] || !view.views ||
+            !view.targets || !view.root || !view.resolve)
+            return false;
+        const void* pointers[]{view.device,
+                               view.fence,
+                               view.inputs[0],
+                               view.inputs[1],
+                               view.inputs[2],
+                               view.inputs[3],
+                               view.inputs[4],
+                               view.views,
+                               view.targets,
+                               view.root,
+                               view.downsample,
+                               view.resolve,
+                               view.scratch[0].proxy,
+                               view.scratch[0].answer,
+                               view.scratch[0].depth,
+                               view.scratch[1].proxy,
+                               view.scratch[1].answer,
+                               view.scratch[1].depth,
+                               view.nativeAnswer};
+        for (size_t i = 0; i < 19; ++i)
+            if (pointers[i])
+                view.pointerPresence |= uint32_t(1) << i;
+        view.nrPipelineLifetimeEpoch = p.nrPipelineLifetimeEpoch;
+        view.nrPipelineGenerationEpoch = p.generation->nrPipelineGenerationEpoch;
+        view.nrBatchObjectEpoch = p.active->nrBatchObjectEpoch;
+        view.nrDescriptorBindEpoch = p.active->nrDescriptorBindEpoch;
+        view.observedEpochs = NrPipelineOwnership::allEpochs;
+        out = view;
+        return true;
+    }
+    bool Pipeline::BorrowActivePrograms(nr_capture::PipelineProgramFacts& out) const noexcept {
+        out = {};
+        return impl_->active && impl_->generation &&
+               nr_capture::pipelineProgramCopy(impl_->generation->nrProgram, impl_->active->input.nativeAnswer, out);
+    }
+    bool Pipeline::BorrowActiveDescriptorCreations(nr_capture::PipelineDescriptorCreations& out) const noexcept {
+        out = {};
+        return impl_->active && nr_capture::pipelineDescriptorCopy(impl_->active->nrDescriptorCreations, out);
+    }
     bool Pipeline::Matches(const FrameInput& input) const {
         return impl_->generation && Geometry(impl_->generation->geometry, input);
     }
@@ -386,24 +488,32 @@ namespace virtualdesktop_openxr::nr_spatial {
         if (p.active)
             return DXGI_ERROR_WAS_STILL_DRAWING;
         try {
-            p.Validate(input);
+            if (!p.device || !p.fence)
+                return E_INVALIDARG;
             const uint64_t completed = p.fence->GetCompletedValue();
             if (completed == UINT64_MAX)
                 return DXGI_ERROR_DEVICE_REMOVED;
             if (p.generation && !Matches(input))
                 return E_INVALIDARG; // Caller drains and replaces generation.
+            if (p.generation) {
+                for (auto& batch : p.generation->batches) {
+                    if (batch->completion <= completed && Identity(batch->input, input)) {
+                        // Geometry and immutable resource descriptions were validated
+                        // when bound. Owners prevent identity reuse while cached.
+                        p.active = batch.get();
+                        return S_OK;
+                    }
+                }
+            }
+            p.Validate(input);
             if (!p.generation) {
                 auto g = p.CreateGeneration(input);
                 g->batches.push_back(p.CreateBatch(input, *g));
                 p.active = g->batches.back().get();
                 p.generation = std::move(g);
+                vdxrfg::pair_capture::nr::TryNextObservedEpoch(p.nextGeneration,
+                                                               p.generation->nrPipelineGenerationEpoch);
                 return S_OK;
-            }
-            for (auto& batch : p.generation->batches) {
-                if (batch->completion <= completed && Identity(batch->input, input)) {
-                    p.active = batch.get();
-                    return S_OK;
-                }
             }
             for (auto& batch : p.generation->batches) {
                 if (batch->completion <= completed) {
@@ -455,15 +565,35 @@ namespace virtualdesktop_openxr::nr_spatial {
             auto handle = p.active->views->GetGPUDescriptorHandleForHeapStart();
             handle.ptr += UINT64(e * 6) * p.viewStride;
             list->SetComputeRootDescriptorTable(1, handle);
+            nr_capture::PipelineDrawFacts nrDraw{};
+            if (nr_capture::pipelineObservationEnabled()) {
+                vdxrfg::pair_capture::nr::NrPipelineOwnership graph{};
+                if (BorrowActiveOwnership(graph))
+                    nr_capture::pipelineDrawTable(nrDraw,
+                                                  p.active->nrDescriptorCreations,
+                                                  p.generation->nrProgram,
+                                                  graph,
+                                                  list,
+                                                  1,
+                                                  e,
+                                                  handle.ptr,
+                                                  &constants,
+                                                  sizeof(constants));
+            }
             transitions.Flush();
             NR_SPATIAL_OBSERVE(Record(test_observer::Kind::Dispatch));
             list->Dispatch((s.extent.width + 7) / 8, (s.extent.height + 7) / 8, 1);
+            nr_capture::sdkResourceWrite(s.proxy.Get(), list, NR_DISPATCH);
+            if (s.depth)
+                nr_capture::sdkResourceWrite(s.depth.Get(), list, NR_DISPATCH);
+            nr_capture::pipelineDispatchRecorded(nrDraw, (s.extent.width + 7) / 8, (s.extent.height + 7) / 8, 1);
             transitions.Add(s.proxy.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
             if (s.depth)
                 transitions.Add(s.depth.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
         }
         p.NativeTransitions(transitions, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, false, true);
         transitions.Flush();
+        nr_capture::pipelinePhaseRestored(list, 1);
     }
     void Pipeline::RecordResolve(ID3D12GraphicsCommandList* list) {
         auto& p = *impl_;
@@ -501,6 +631,21 @@ namespace virtualdesktop_openxr::nr_spatial {
             auto handle = p.active->views->GetGPUDescriptorHandleForHeapStart();
             handle.ptr += UINT64(e * 6) * p.viewStride;
             list->SetGraphicsRootDescriptorTable(1, handle);
+            nr_capture::PipelineDrawFacts nrDraw{};
+            if (nr_capture::pipelineObservationEnabled()) {
+                vdxrfg::pair_capture::nr::NrPipelineOwnership graph{};
+                if (BorrowActiveOwnership(graph))
+                    nr_capture::pipelineDrawTable(nrDraw,
+                                                  p.active->nrDescriptorCreations,
+                                                  p.generation->nrProgram,
+                                                  graph,
+                                                  list,
+                                                  2,
+                                                  e,
+                                                  handle.ptr,
+                                                  &constants,
+                                                  sizeof(constants));
+            }
             const D3D12_VIEWPORT viewport{
                 float(constants.outputX), 0, float(constants.color.width), float(constants.color.height), 0, 1};
             const D3D12_RECT scissor{LONG(constants.outputX),
@@ -512,6 +657,8 @@ namespace virtualdesktop_openxr::nr_spatial {
             transitions.Flush();
             NR_SPATIAL_OBSERVE(Record(test_observer::Kind::Draw));
             list->DrawInstanced(3, 1, 0, 0);
+            nr_capture::sdkResourceWrite(p.active->input.output, list, NR_DRAW);
+            nr_capture::pipelineDrawRecorded(nrDraw, viewport, scissor, target.ptr, 3, 1, 0, 0);
             if (!p.active->input.nativeAnswer) {
                 transitions.Add(s.proxy.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
                 transitions.Add(
@@ -525,6 +672,7 @@ namespace virtualdesktop_openxr::nr_spatial {
         transitions.Add(p.active->input.output, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         p.NativeTransitions(transitions, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false, false);
         transitions.Flush();
+        nr_capture::pipelinePhaseRestored(list, 2);
     }
     void Pipeline::MarkSubmitted(uint64_t value) {
         // Zero and UINT64_MAX cannot be proven completion tokens: retain ownership.
@@ -535,6 +683,24 @@ namespace virtualdesktop_openxr::nr_spatial {
     }
     void Pipeline::DiscardRecording() {
         impl_->active = nullptr;
+    }
+    void Pipeline::RetireCompletedResource(ID3D12Resource* resource) {
+        auto& p = *impl_;
+        if (!resource || !p.generation)
+            return;
+        const auto completed = p.fence->GetCompletedValue();
+        if (completed == UINT64_MAX)
+            return;
+        auto& batches = p.generation->batches;
+        batches.erase(std::remove_if(batches.begin(),
+                                     batches.end(),
+                                     [&](const auto& batch) {
+                                         return batch.get() != p.active && batch->completion <= completed &&
+                                                std::any_of(batch->owners.begin(),
+                                                            batch->owners.end(),
+                                                            [&](const auto& owner) { return owner.Get() == resource; });
+                                     }),
+                      batches.end());
     }
     void Pipeline::Clear() {
         impl_->active = nullptr;

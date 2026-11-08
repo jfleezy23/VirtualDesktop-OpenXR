@@ -2,3 +2,6 @@ LIBRARY
 EXPORTS
 	xrNegotiateLoaderRuntimeInterface
 	getVersion
+	VDXR_PrivatePairNRSourceV1
+	VDXR_PrivatePairNRStatusV1
+	VDXR_PrivatePairNRReleaseV1
