@@ -266,3 +266,43 @@ smooth motion, stereo and controls. Captures contained 1,280 complete generated 
 at 2X, 1,189 at 3X and a short startup window of 79 at 4X. These are bounded observations,
 not sustained throughput or scanout qualification. Some native Begin/End delays remain.
 See the [current release notes](../docs/releases/2026.10.27.1.md).
+
+### Closed-cycle 4X recovery
+
+Build `nr_fg_closed_cycle_recovery_regression` and `nr_fg_recovery_copy_regression`
+with `build-fg-runtime-fixtures.py` against a matching successful runtime cohort.
+The builder reuses the public asynchronous-worker and interop helpers and links
+the isolated SDK loader. Supply the controlled backend directory and the actual
+FG module explicitly; no private source paths are required.
+
+```text
+nr_fg_closed_cycle_recovery_regression.exe <backend-directory> <module.dll> <refresh> <scenario>
+nr_fg_recovery_copy_regression.exe <backend-directory> <module.dll> <refresh> <scenario>
+```
+
+The first driver supports `normal`, `skip-s1`, `skip-s1-s2`, `skip-all`, and
+`after-s1-pending-s2`. Each runs three changing real GPU groups. A strict native
+ledger checks matching Wait/Begin/End IDs, omitted original slots, original role
+fractions, the next full group boundary, captured history, and bank retirement.
+`skip-all` also proves that B's actual consumer marker completes while synthesis
+remains held and that the ticket cannot retire early. `normal` rejects spurious
+timeline reanchoring at the final B. The midgroup case closes S1 before omitting
+S2 and retaining S3; it never supersedes an open Begin.
+
+The second driver supports `pending-s1`, `precompleted-late-s1`,
+`admission-normal`, and `admission-skip-s1`. It holds an actual consumer fence to
+distinguish a queued copy from a completed image, and checks shared-context
+admission at Wait, Begin, and End. Its SDK callbacks add no copy-completion waits.
+The already-ready late control completes its destination before publication.
+Both drivers also accept `--ledger-negative` without GPU/backend arguments to
+check rejection of stale IDs, unmatched phases, open-cycle supersession, and
+replay. These are fixture-sensitivity controls, not production GPU coverage.
+
+Run the recovery cases at 72, 80, 90, 96, 100, 120, and 144 Hz. Keep existing
+`nr_fg_worker_regression` controls alongside them: 3X `normal` and
+`query-wait-slot-late`, 4X `normal` (including the already-begun bootstrap), and
+4X `begin-pending-s1`, `begin-ready-s2`, and `begin-at-b-s1`. Recovery may skip
+only closed 4X cycles; the existing post-Begin fallback policy remains intact.
+All gates release and both GPU domains drain before resource owners unwind.
+These tests establish scheduler, pixel, and ownership behavior with a controlled
+SDK; they do not establish physical scanout or general pacing improvements.

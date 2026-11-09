@@ -866,6 +866,10 @@ namespace virtualdesktop_openxr {
                 if (!reservation.valid || reservation.nativeId != static_cast<uint64_t>(nativeId)) {
                     m_fgNeedReprime = m_fgTimelineReanchor = true;
                 }
+                const unsigned cycles =
+                    reservation.multiplier >= 1 && reservation.multiplier <= 4 ? reservation.multiplier : 1;
+                const bool recoverExpiredSlots = generated && cycles == 4 && !begun;
+                unsigned firstUsefulSlot{};
                 const auto awaitRole = [&](FrameGenerationRole role, int64_t target) {
                     const auto deadline = xrTimeToOvrTime(target);
                     const auto realDeadline = xrTimeToOvrTime(transaction.slots.targets[transaction.slots.count - 1]);
@@ -919,18 +923,16 @@ namespace virtualdesktop_openxr {
                         retainedMissNoted = true;
                     }
                 };
-                if (generated) {
+                if (generated && !recoverExpiredSlots) {
                     generated = awaitRole(FrameGenerationRole::synthetic1, transaction.slots.targets[0]);
                     if (!generated) {
                         noteFrameGenerationPresentationMiss();
                     }
                 }
-                const unsigned cycles =
-                    reservation.multiplier >= 1 && reservation.multiplier <= 4 ? reservation.multiplier : 1;
                 double leaseEnter = timingNow(traceGroup);
                 std::unique_lock contextLease(m_fgContextMutex);
                 double leaseAcquired = timingNow(traceGroup);
-                if (generated) {
+                if (generated && !recoverExpiredSlots) {
                     // Only S1 may be complete. Do not queue an unresolved tail
                     // dependency ahead of its native handoff or independent B.
                     const unsigned copies = m_frameGeneration->ready(transaction) ? cycles - 1 : 1;
@@ -944,7 +946,7 @@ namespace virtualdesktop_openxr {
                         return;
                     bool currentCopiesQueued = true;
                     if (generated)
-                        for (unsigned slot = 0; slot < cycles - 1; ++slot)
+                        for (unsigned slot = firstUsefulSlot; slot < cycles - 1; ++slot)
                             currentCopiesQueued &=
                                 preparedImages[static_cast<unsigned>(transaction.slots.roles[slot])] >= 0;
                     const bool ready = !hasGpuOutput || (!m_fgNeedReprime && currentCopiesQueued &&
@@ -963,7 +965,7 @@ namespace virtualdesktop_openxr {
                     // the existing full-output ownership predicate permits it.
                     openAdmission();
                 }
-                if (!begun) {
+                if (!begun && !recoverExpiredSlots) {
                     // Prepare subsequent groups before the SDK's timing wait.
                     // Waiting first leaves only its short render lead for
                     // cross-API destination copies and completion polling.
@@ -976,7 +978,64 @@ namespace virtualdesktop_openxr {
                 bool committedReal{};
                 ovrLayer_Union realLayer{};
                 for (unsigned slot = 0; slot < cycles && !stopping; ++slot) {
-                    if (generated && slot && slot < cycles - 1 &&
+                    if (recoverExpiredSlots && generated && !begun && slot < cycles - 1) {
+                        while (slot < cycles - 1) {
+                            // A slightly late ready image is still useful until
+                            // the next original slot. Never bunch up obsolete
+                            // images or relabel S3 with S1's target/fraction.
+                            const auto now = ovrTimeToXrTime(ovr_GetTimeInSeconds());
+                            while (slot < cycles - 1 && now >= transaction.slots.targets[slot + 1]) {
+                                ++slot;
+                                noteRetainedPresentationMiss();
+                            }
+                            firstUsefulSlot = slot;
+                            if (slot == cycles - 1)
+                                break;
+                            const auto role = transaction.slots.roles[slot];
+                            if (preparedImages[static_cast<unsigned>(role)] < 0) {
+                                if (contextLease.owns_lock())
+                                    contextLease.unlock();
+                                if (!awaitRole(role, transaction.slots.targets[slot])) {
+                                    ++slot;
+                                    firstUsefulSlot = slot;
+                                    noteRetainedPresentationMiss();
+                                    continue;
+                                }
+                                leaseEnter = timingNow(traceGroup);
+                                contextLease.lock();
+                                leaseAcquired = timingNow(traceGroup);
+                                const unsigned copies = m_frameGeneration->ready(transaction) ? cycles - 1 : slot + 1;
+                                for (unsigned tail = slot; tail < copies; ++tail)
+                                    if (preparedImages[static_cast<unsigned>(transaction.slots.roles[tail])] < 0)
+                                        prepareRole(transaction.slots.roles[tail]);
+                                // Acquiring the producer context or preparing
+                                // copies can consume a slot. Reselect before
+                                // beginning any native cycle, never afterwards.
+                                continue;
+                            }
+                            // A queued destination copy is not a ready image.
+                            // If its own deadline has passed, try the next role
+                            // before opening a native cycle. Add no copy wait.
+                            if (now >= transaction.slots.targets[slot] &&
+                                !m_frameGeneration->copyReady(transaction, role)) {
+                                ++slot;
+                                firstUsefulSlot = slot;
+                                noteRetainedPresentationMiss();
+                                continue;
+                            }
+                            break;
+                        }
+                        if (slot == cycles - 1) {
+                            generated = false;
+                            noteRetainedPresentationMiss();
+                        }
+                        nativeId = static_cast<long long>(reservation.nativeId + slot);
+                        if (m_deliveryTransport)
+                            openAdmission();
+                        if (contextLease.owns_lock())
+                            contextLease.unlock();
+                    }
+                    if (!recoverExpiredSlots && generated && slot && slot < cycles - 1 &&
                         preparedImages[static_cast<unsigned>(transaction.slots.roles[slot])] < 0) {
                         // Prepare the tail as soon as it exists, before the
                         // next native timing wait. Admission stays closed until
@@ -1122,7 +1181,7 @@ namespace virtualdesktop_openxr {
                     scale.HmdToEyePose[0] = m_cachedEyeInfo[0].HmdToEyePose;
                     scale.HmdToEyePose[1] = m_cachedEyeInfo[1].HmdToEyePose;
                     scale.HmdSpaceToWorldScaleInMeters = 1.f;
-                    if (!slot) {
+                    if (!slot || recoverExpiredSlots) {
                         openAdmission();
                     }
                     const auto endEnter = timingNow(timing.enabled);

@@ -124,6 +124,8 @@ for source in args.sources:
         extra_objects.append(helper_object)
         helper_commands += 'cl.exe @"' + str(helper_response) + '"\nif errorlevel 1 exit /b %errorlevel%\n'
 
+    if name in {'nr_fg_closed_cycle_recovery_regression', 'nr_fg_recovery_copy_regression'}:
+        compile_helper('recovery-methods', 'tests/recovery_method_addresses.cpp')
     if shader_fixture:
         compile_helper('spatial-observer', 'virtualdesktop-openxr/NrSpatialPipeline.cpp')
     if name == 'nr_fg_early_dispatch_regression':
@@ -135,7 +137,8 @@ for source in args.sources:
     if name == 'fg_delivery_dependencies_regression':
         compile_helper('delivery-queue-slots', 'tests/delivery_queue_slots.cpp')
     # Only isolated SDK fixtures replace system.obj. Native probes retain the real SDK loader.
-    private_system = name in {'controlled_runtime_delivery_probe', 'nr_fg_prebegin_overlap_regression',
+    private_system = name in {'nr_fg_closed_cycle_recovery_regression', 'nr_fg_recovery_copy_regression',
+                             'controlled_runtime_delivery_probe', 'nr_fg_prebegin_overlap_regression',
                              'nr_fg_prebegin_fast_begin_regression', 'nr_fg_prebegin_failure_regression',
                              'nr_fg_prebegin_cancel_regression', 'nr_fg_copy_ready_poison_regression',
                              'nr_fg_pending_current_copy_regression', 'fg_delivery_isolation_regression',
