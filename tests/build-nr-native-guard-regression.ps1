@@ -1,4 +1,5 @@
-param([switch]$Hardware, [string]$OutputDirectory='', [string]$VCToolsDirectory='',
+param([switch]$Hardware, [switch]$CompileOnly, [string]$RuntimeCohort='',
+      [string]$OutputDirectory='', [string]$VCToolsDirectory='',
       [ValidateSet('None','NoNativeGuard','EncodedNativeGuard','NoNegativeShared')][string]$ShaderControl='None')
 $ErrorActionPreference='Stop'
 $repo=Split-Path -Parent $PSScriptRoot
@@ -57,7 +58,7 @@ if ($ShaderControl -ne 'None') {
     # Mutate only copied native residual protection; keep exact-black/crop returns.
     $shaderSource=Join-Path $OutputDirectory "control-$ShaderControl"
     New-Item -ItemType Directory -Force -Path $shaderSource | Out-Null
-    foreach ($name in @('NrSpatialCommon.hlsli','NrSpatialDownsampleCS.hlsl','NrSpatialResolvePS.hlsl',
+    foreach ($name in @('NrSpatialCommon.hlsli','PerceptualTransfer.hlsli','NrSpatialDownsampleCS.hlsl','NrSpatialResolvePS.hlsl',
                         'NrNativeResolvePS.hlsl','FullScreenQuadVS.hlsl')) {
         Copy-Item -LiteralPath (Join-Path $source $name) -Destination $shaderSource
     }
@@ -79,8 +80,17 @@ foreach($shader in @(@('NrSpatialDownsampleCS','cs_5_0'),@('NrSpatialResolvePS',
     & $fxc /nologo /Ges /WX /T $shader[1] /E main /Vn "g_$($shader[0])" /Fh "$OutputDirectory\$($shader[0]).h" "$shaderSource\$($shader[0]).hlsl"
     if($LASTEXITCODE) { throw "Shader compilation failed: $($shader[0])" }
 }
-& cl.exe /nologo /std:c++17 /EHsc /W4 /WX /MT /fp:precise /DNOMINMAX /DNR_SPATIAL_TEST_OBSERVER "/I$OutputDirectory" "$PSScriptRoot\nr_native_guard_regression.cpp" "$source\NrSpatialPipeline.cpp" "/Fe:$OutputDirectory\nr_native_guard_regression.exe" "/Fo:$OutputDirectory\\" /link d3d12.lib dxgi.lib d3dcompiler.lib
+$installation=$vc
+1..4 | ForEach-Object { $installation=Split-Path -Parent $installation }
+$buildArguments=@()
+if (!$RuntimeCohort) {
+    $RuntimeCohort=Join-Path $OutputDirectory ('runtime-cohort-'+[guid]::NewGuid().ToString('N'))
+    $buildArguments+='--build-runtime'
+}
+& python "$PSScriptRoot/build-fg-runtime-fixtures.py" $RuntimeCohort nr_native_guard_regression `
+    --installation $installation --output-directory $OutputDirectory --shader-directory $OutputDirectory @buildArguments
 if($LASTEXITCODE) { throw "GPU fixture compilation failed: $LASTEXITCODE" }
+if($CompileOnly) { Write-Output "PASS: native fixture compiled; GPU not run: $OutputDirectory"; exit 0 }
 if($Hardware) { & "$OutputDirectory\nr_native_guard_regression.exe" --hardware }
 else { & "$OutputDirectory\nr_native_guard_regression.exe" }
 if($LASTEXITCODE) { throw "GPU regression failed: $LASTEXITCODE" }

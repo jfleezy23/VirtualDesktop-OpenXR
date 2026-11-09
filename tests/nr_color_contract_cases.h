@@ -1,6 +1,8 @@
 #pragma once
 
-// Test model requests independently of the shadow-protection implementation.
+// Native100 retains its original per-channel request contract. Spatial output
+// intentionally transfers edits in Oklab, so use its independent reference;
+// a channel unchanged by the model need not remain unchanged after transfer.
 // Uniform tiles keep each inspected pixel and its actual downsampled guides in
 // the same color patch, so a zero channel request cannot come from a neighbor.
 void colorChannelContract(Gpu& gpu, bool nativeAnswer) {
@@ -110,6 +112,35 @@ void colorChannelContract(Gpu& gpu, bool nativeAnswer) {
                 for (UINT c = 0; c < 3; ++c) {
                     const int actual = result[offset(e * size + x, y, width, c, nativeAnswer && bgra)];
                     const int before = sample.source[c], requested = sample.answer[c];
+                    if (!nativeAnswer) {
+                        Color3 n{}, a{};
+                        for (UINT k = 0; k < 3; ++k) {
+                            n[k] = decode(sample.source[k] / 255.0, IsSrgb(format));
+                            a[k] = decode(sample.answer[k] / 255.0, IsSrgb(format));
+                        }
+                        const auto edit = referenceSpatialEdit(n, n, a);
+                        const int expected =
+                            sample.source == sample.answer ? before : quantize(encode(n[c] + edit[c], IsSrgb(format)));
+                        if (std::abs(actual - expected) > 1) {
+                            std::fprintf(stderr,
+                                         "SPATIAL_COLOR format=%u eye=%u sample=%zu channel=%u expected=%d actual=%d\n",
+                                         unsigned(format),
+                                         e,
+                                         i,
+                                         c,
+                                         expected,
+                                         actual);
+                            check(false, "spatial color atlas matches perceptual transfer/toe");
+                        }
+                        if (sample.source == sample.answer)
+                            check(actual == before, "identity model answer remains byte exact");
+                        if (std::max({sample.source[0], sample.source[1], sample.source[2]}) >= 22)
+                            check(std::abs(actual - requested) <= 1,
+                                  "native equals guide maps to model answer above the toe");
+                        nonzeroRequests += actual != before;
+                        ++inspected;
+                        continue;
+                    }
                     if (actual < std::min(before, requested) || actual > std::max(before, requested)) {
                         std::fprintf(stderr,
                                      "COLOR_CONTRACT native=%u format=%u eye=%u sample=%zu channel=%u source=%d "

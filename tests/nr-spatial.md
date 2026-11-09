@@ -28,7 +28,23 @@ From the repository root:
 
 An explicit compiler selection, when needed, is the directory ending in `VC\Tools\MSVC\14.51.36231`, supplied through `-VCToolsDirectory` on either runner. The standalone default output is `bin/nr-spatial-standalone`; distinct output directories make comparisons easier to retain.
 
+The spatial and native shader runners link the real capture/journaling implementation from a matched runtime cohort. Only `NrSpatialPipeline.obj` is replaced with a fresh operation-observer build using the selected shader headers. Supply `-RuntimeCohort <directory>` for a successful cohort containing `result.json`, `build-source.json` and `obj/`; the source and artifact receipts must still match. Without it, the runner builds a fresh ReleaseBundle cohort below its output directory. `-CompileOnly` stops after linking, before any GPU work. `-PolicyOnly` remains a lightweight CPU-only path with no runtime build. For example, after building the cohort in the linked-fixture section below:
+
+```powershell
+.\tests\build-nr-spatial-regression.ps1 -CompileOnly `
+    -RuntimeCohort bin/nr-spatial-host-01 -OutputDirectory bin/nr-spatial-compile-01
+```
+
 The policy test covers percentage bounds, rounding/alignment, small or ineffective reductions, and format eligibility. The shader test uses an independent scalar oracle for area filtering, storage encoding, signed edits, and reconstruction. It exercises RGBA/BGRA, UNORM/sRGB, unequal/offset eyes, depth, array-slice-zero imports, changed inputs, descriptor reuse, delayed completion, and state round trips. Synthetic identity edits are not vendor qualification.
+
+Reduced-processing color expectations use an independent double-precision Oklab reference for the bounded perceptual transfer, with at most one stored code of rounding error. Constant RGB edits are no longer expected to remain constant across differing native/guide colors; the convex bound applies to the transferred and shadow-protected per-tap RGB edits. Separate witnesses check matched-guide answers, nonzero mismatched-guide edits, bounded perceptual lightness/chroma, dark-guide support, and unsupported black guides. Exact identity, black, alpha and outside-crop checks remain unchanged, as do resource-lifetime and operation-count checks.
+
+Native 100% retains its original per-channel color contract and runs independently:
+
+```powershell
+.\tests\build-nr-native-guard-regression.ps1 -Hardware `
+    -OutputDirectory bin/nr-native-guard-hardware-01
+```
 
 Standalone negative controls compile changed shader copies under their output directory. `-ShaderControl ZeroResidual` and `-ShaderControl EncodedArea` must fail the relevant oracle comparisons. They do not modify production shaders.
 

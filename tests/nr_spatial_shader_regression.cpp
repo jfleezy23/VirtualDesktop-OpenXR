@@ -218,6 +218,56 @@ uint8_t quantize(double v) {
 size_t offset(UINT x, UINT y, UINT w, UINT c, bool bgra = false) {
     return (size_t(y) * w + x) * 4 + (bgra && c < 3 ? 2 - c : c);
 }
+
+using Color3 = std::array<double, 3>;
+// Independent double-precision Oklab reference from the published transforms:
+// https://bottosson.github.io/posts/oklab/ . Do not call shader/production helpers.
+Color3 referenceLab(const Color3& rgb) {
+    const double l = std::cbrt(.4122214708 * rgb[0] + .5363325363 * rgb[1] + .0514459929 * rgb[2]);
+    const double m = std::cbrt(.2119034982 * rgb[0] + .6806995451 * rgb[1] + .1073969566 * rgb[2]);
+    const double s = std::cbrt(.0883024619 * rgb[0] + .2817188376 * rgb[1] + .6299787005 * rgb[2]);
+    return {.2104542553 * l + .7936177850 * m - .0040720468 * s,
+            1.9779984951 * l - 2.4285922050 * m + .4505937099 * s,
+            .0259040371 * l + .7827717662 * m - .8086757660 * s};
+}
+Color3 referenceRgb(const Color3& lab) {
+    const auto cube = [](double v) { return v * v * v; };
+    const double l = cube(lab[0] + .3963377774 * lab[1] + .2158037573 * lab[2]);
+    const double m = cube(lab[0] - .1055613458 * lab[1] - .0638541728 * lab[2]);
+    const double s = cube(lab[0] - .0894841775 * lab[1] - 1.2914855480 * lab[2]);
+    return {4.0767416621 * l - 3.3077115913 * m + .2309699292 * s,
+            -1.2684380046 * l + 2.6097574011 * m - .3413193965 * s,
+            -.0041960863 * l - .7034186147 * m + 1.7076147010 * s};
+}
+Color3 referenceTransfer(const Color3& native, const Color3& guide, const Color3& answer) {
+    const auto n = referenceLab(native), g = referenceLab(guide), a = referenceLab(answer);
+    const double denominator = std::max(n[0], g[0]) + .0001;
+    const double lightnessEdit = n[0] * (a[0] - g[0]) / denominator;
+    const double chromaFraction = std::min(n[0], g[0]) / denominator;
+    const auto transferred = referenceRgb(
+        {n[0] + lightnessEdit, n[1] + chromaFraction * (a[1] - g[1]), n[2] + chromaFraction * (a[2] - g[2])});
+    return {transferred[0] - native[0], transferred[1] - native[1], transferred[2] - native[2]};
+}
+Color3 referenceProtection(const Color3& native, const Color3& guide, Color3 residual) {
+    const double level =
+        std::min(*std::max_element(native.begin(), native.end()), *std::max_element(guide.begin(), guide.end()));
+    if (level < 1.0 / 128) {
+        const auto toe = [level](double end) {
+            const double z = std::clamp(level / end, 0.0, 1.0);
+            return z * z * (3 - 2 * z);
+        };
+        const auto bounds = std::minmax_element(residual.begin(), residual.end());
+        const double gray = *bounds.first > 0 ? *bounds.first : *bounds.second < 0 ? *bounds.second : 0;
+        for (auto& d : residual)
+            d = toe(1.0 / 1024) * gray + toe(1.0 / 128) * (d - gray);
+    }
+    return residual;
+}
+Color3 referenceSpatialEdit(const Color3& native, const Color3& guide, const Color3& answer) {
+    if (guide == answer || native == Color3{})
+        return {};
+    return referenceProtection(native, guide, referenceTransfer(native, guide, answer));
+}
 Bytes areaOracle(const Bytes& native, UINT rowWidth, Rect rect, Extent work, bool srgb, bool bgra) {
     Bytes p(size_t(work.width) * work.height * 4);
     for (UINT y = 0; y < work.height; ++y)
@@ -271,7 +321,8 @@ Bytes resolveOracle(const Bytes& native,
             const double taper = t * t * (3 - 2 * t);
             const int ix = int(std::floor(qx)), iy = int(std::floor(qy));
             const double fx = qx - ix, fy = qy - iy;
-            double n[3], edit[3]{}, total = 0;
+            Color3 n{}, edit{};
+            double total = 0;
             bool zero = true;
             for (UINT c = 0; c < 3; ++c)
                 n[c] = decode(native[offset(rect.x + x, rect.y + y, rowWidth, c, sourceBgra)] / 255.0, srgb);
@@ -279,28 +330,16 @@ Bytes resolveOracle(const Bytes& native,
                 for (int i = 0; i < 2; ++i) {
                     const UINT sx = UINT(std::clamp(ix + i, 0, int(work.width) - 1)),
                                sy = UINT(std::clamp(iy + j, 0, int(work.height) - 1));
-                    double delta[3], distance = 0, guideLevel = 0;
+                    Color3 guide{}, answer{};
+                    double distance = 0;
                     for (UINT c = 0; c < 3; ++c) {
                         const auto index = offset(sx, sy, work.width, c);
-                        const double guide = decode(p[index] / 255.0, srgb);
-                        guideLevel = std::max(guideLevel, guide);
-                        delta[c] = decode(a[index] / 255.0, srgb) - guide;
+                        guide[c] = decode(p[index] / 255.0, srgb);
+                        answer[c] = decode(a[index] / 255.0, srgb);
                         zero = zero && a[index] == p[index];
-                        distance += (guide - n[c]) * (guide - n[c]) / 3;
+                        distance += (guide[c] - n[c]) * (guide[c] - n[c]) / 3;
                     }
-                    // Independent double-precision policy; original guide normalization is fixed.
-                    const double level = std::min(std::max({n[0], n[1], n[2]}), guideLevel);
-                    if (level < 1.0 / 128) {
-                        const auto toe = [level](double end) {
-                            const double z = std::clamp(level / end, 0.0, 1.0);
-                            return z * z * (3 - 2 * z);
-                        };
-                        const double least = std::min({delta[0], delta[1], delta[2]});
-                        const double greatest = std::max({delta[0], delta[1], delta[2]});
-                        const double gray = least > 0 ? least : greatest < 0 ? greatest : 0;
-                        for (auto& d : delta)
-                            d = toe(1.0 / 1024) * gray + toe(1.0 / 128) * (d - gray);
-                    }
+                    const auto delta = referenceSpatialEdit(n, guide, answer);
                     const double weight = (i ? fx : 1 - fx) * (j ? fy : 1 - fy) / (1 + 1024 * distance);
                     for (UINT c = 0; c < 3; ++c)
                         edit[c] += weight * delta[c];
@@ -822,6 +861,7 @@ void residualInvariants(Gpu& gpu) {
     for (UINT e = 0; e < 2; ++e)
         frame.eyes[e] = {source.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, {e * 128, 0, 128, 128}};
     Pipeline pipeline(gpu.device.Get(), gpu.fence.Get());
+    size_t changed = 0, differsFromRgbEdit = 0;
     for (UINT mode = 0; mode < 2; ++mode) {
         hr(pipeline.Prepare(frame), "invariant prepare");
         auto commands = gpu.commands();
@@ -848,33 +888,197 @@ void residualInvariants(Gpu& gpu) {
         pipeline.MarkSubmitted(value);
         gpu.wait(value);
         const Bytes result = gpu.transfer(target.Get());
-        for (UINT e = 0; e < 2; ++e)
+        for (UINT e = 0; e < 2; ++e) {
+            const auto expected =
+                resolveOracle(native, w, {e * 128, 0, 128, 128}, {64, 64}, proxies[e], answers[e], false, false, false);
+            Bytes eyePixels(128 * 128 * 4);
+            for (UINT y = 0; y < 128; ++y)
+                std::memcpy(eyePixels.data() + y * 128 * 4, result.data() + (size_t(y) * w + e * 128) * 4, 128 * 4);
+            compare(eyePixels, expected, 1, "nonuniform native/guide perceptual transfer");
             for (UINT y = 0; y < 128; ++y)
                 for (UINT x = 0; x < 128; ++x)
                     for (UINT c = 0; c < 3; ++c) {
                         const auto i = offset(x + e * 128, y, w, c);
                         const int actual = int(result[i]) - int(native[i]);
+                        changed += actual != 0;
                         if (mode == 0)
-                            check(std::abs(actual - constant[c]) <= 1,
-                                  "constant signed residual is preserved across native edges");
-                        else {
+                            differsFromRgbEdit += std::abs(actual - constant[c]) > 1;
+                        {
                             const int sx = int(std::floor((x + .5) / 2 - .5)), sy = int(std::floor((y + .5) / 2 - .5));
-                            int minimum = 255, maximum = -255;
+                            double minimum = 1e9, maximum = -1e9;
                             for (int j = 0; j < 2; ++j)
                                 for (int k = 0; k < 2; ++k) {
                                     const auto q =
-                                        offset(UINT(std::clamp(sx + k, 0, 63)), UINT(std::clamp(sy + j, 0, 63)), 64, c);
-                                    const int delta = int(answers[e][q]) - int(proxies[e][q]);
+                                        offset(UINT(std::clamp(sx + k, 0, 63)), UINT(std::clamp(sy + j, 0, 63)), 64, 0);
+                                    Color3 n{}, guide{}, answer{};
+                                    for (UINT channel = 0; channel < 3; ++channel) {
+                                        n[channel] = native[i - c + channel] / 255.0;
+                                        guide[channel] = proxies[e][q + channel] / 255.0;
+                                        answer[channel] = answers[e][q + channel] / 255.0;
+                                    }
+                                    const double delta = referenceSpatialEdit(n, guide, answer)[c];
                                     minimum = std::min(minimum, delta);
                                     maximum = std::max(maximum, delta);
                                 }
-                            check(actual >= minimum - 1 && actual <= maximum + 1,
-                                  "positive guided residual stays within local convex bounds");
+                            // Positive spatial weights still form a convex blend of
+                            // transferred/protected RGB edits, not answer-guide RGB.
+                            check(int(result[i]) >= int(quantize(native[i] / 255.0 + minimum)) - 1 &&
+                                      int(result[i]) <= int(quantize(native[i] / 255.0 + maximum)) + 1,
+                                  "guided edit stays within transformed local tap bounds");
                         }
                     }
+        }
     }
+    check(changed > 1024, "perceptual reconstruction must retain nonzero model edits");
+    check(differsFromRgbEdit > 128, "nonuniform witness must distinguish perceptual transfer from RGB addition");
     gpu.noErrors();
-    std::puts("PASS analytic constant signed edits and local convex residual bounds");
+    std::puts("PASS independent perceptual edits and transformed local convex bounds");
+}
+
+void perceptualTransferContract(Gpu& gpu) {
+    struct Sample {
+        std::array<uint8_t, 3> native, guide, answer;
+    };
+    // Deliberately mismatched guides catch the old RGB-addition path, inverted
+    // lightness ratios, missing chroma bounds, and lost dark-guide protection.
+    const std::array<Sample, 10> samples{{
+        {{128, 96, 64}, {128, 96, 64}, {150, 80, 96}},
+        {{224, 180, 140}, {48, 36, 28}, {64, 44, 24}},
+        {{48, 40, 32}, {180, 140, 100}, {200, 125, 115}},
+        {{180, 160, 144}, {4, 3, 2}, {48, 24, 16}},
+        {{192, 160, 128}, {0, 0, 0}, {24, 48, 8}},
+        {{0, 0, 0}, {64, 48, 32}, {96, 64, 48}},
+        {{80, 100, 140}, {120, 80, 40}, {120, 80, 40}},
+        {{180, 180, 180}, {48, 48, 48}, {64, 64, 64}},
+        {{4, 3, 2}, {180, 160, 144}, {200, 140, 160}},
+        {{240, 64, 32}, {140, 80, 40}, {155, 100, 35}},
+    }};
+    constexpr UINT eyeSize = 128, width = eyeSize * 2, tile = 32, columns = 4;
+    size_t changes = 0, bounded = 0, mismatched = 0, supportedDarkGuideChanges = 0;
+    for (auto format : {DXGI_FORMAT_R8G8B8A8_UNORM,
+                        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        DXGI_FORMAT_B8G8R8A8_UNORM_SRGB}) {
+        const bool srgb = IsSrgb(format), bgra = RawColorFormat(format) == DXGI_FORMAT_B8G8R8A8_UNORM;
+        auto source = gpu.texture(width, eyeSize, bgra ? DXGI_FORMAT_B8G8R8A8_TYPELESS : DXGI_FORMAT_R8G8B8A8_TYPELESS);
+        auto target =
+            gpu.texture(width, eyeSize, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        Bytes pixels(size_t(width) * eyeSize * 4);
+        for (UINT e = 0; e < 2; ++e)
+            for (UINT y = 0; y < eyeSize; ++y)
+                for (UINT x = 0; x < eyeSize; ++x) {
+                    const size_t index = size_t(y / tile) * columns + x / tile;
+                    const auto sample = samples[index < samples.size() ? index : 0];
+                    for (UINT c = 0; c < 4; ++c)
+                        pixels[offset(e * eyeSize + x, y, width, c, bgra)] =
+                            c == 3 ? uint8_t((x + 3 * y + 71 * e) % 256) : sample.native[c];
+                }
+        gpu.transfer(source.Get(), &pixels);
+        FrameInput frame{};
+        frame.output = target.Get();
+        frame.outputFormat = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+        frame.outputEyeStride = eyeSize;
+        frame.processingPercent = 80;
+        for (UINT e = 0; e < 2; ++e)
+            frame.eyes[e] = {source.Get(), format, {e * eyeSize, 0, eyeSize, eyeSize}};
+        Pipeline pipeline(gpu.device.Get(), gpu.fence.Get());
+        hr(pipeline.Prepare(frame), "perceptual mismatch prepare");
+        auto commands = gpu.commands();
+        pipeline.RecordInputs(commands.list.Get());
+        gpu.wait(gpu.submit(commands));
+        for (UINT e = 0; e < 2; ++e) {
+            const auto eye = pipeline.GetWorkingEye(e);
+            Bytes guide(size_t(eye.extent.width) * eye.extent.height * 4), answer(guide.size());
+            for (UINT y = 0; y < eye.extent.height; ++y)
+                for (UINT x = 0; x < eye.extent.width; ++x) {
+                    const UINT nx = UINT((x + .5) * eyeSize / eye.extent.width);
+                    const UINT ny = UINT((y + .5) * eyeSize / eye.extent.height);
+                    const size_t index = size_t(ny / tile) * columns + nx / tile;
+                    const auto sample = samples[index < samples.size() ? index : 0];
+                    for (UINT c = 0; c < 4; ++c) {
+                        guide[offset(x, y, eye.extent.width, c)] = c == 3 ? 255 : sample.guide[c];
+                        answer[offset(x, y, eye.extent.width, c)] = c == 3 ? 255 : sample.answer[c];
+                    }
+                }
+            gpu.transfer(eye.proxy, &guide);
+            gpu.transfer(eye.answer, &answer);
+        }
+        commands = gpu.commands();
+        pipeline.RecordResolve(commands.list.Get());
+        const auto serial = gpu.submit(commands);
+        pipeline.MarkSubmitted(serial);
+        gpu.wait(serial);
+        const auto result = gpu.transfer(target.Get());
+        for (UINT e = 0; e < 2; ++e)
+            for (size_t i = 0; i < samples.size(); ++i) {
+                const auto& sample = samples[i];
+                const UINT x = UINT(i % columns) * tile + tile / 2;
+                const UINT y = UINT(i / columns) * tile + tile / 2;
+                Color3 n{}, g{}, a{}, actual{}, expected{};
+                for (UINT c = 0; c < 3; ++c) {
+                    n[c] = decode(sample.native[c] / 255.0, srgb);
+                    g[c] = decode(sample.guide[c] / 255.0, srgb);
+                    a[c] = decode(sample.answer[c] / 255.0, srgb);
+                }
+                const auto edit = referenceSpatialEdit(n, g, a);
+                bool inGamut = true;
+                for (UINT c = 0; c < 3; ++c) {
+                    expected[c] = n[c] + edit[c];
+                    check(std::isfinite(expected[c]), "perceptual reference must remain finite");
+                    const int byte = result[offset(e * eyeSize + x, y, width, c)];
+                    check(std::abs(byte - int(quantize(encode(expected[c], srgb)))) <= 1,
+                          "mismatched-guide output matches independent perceptual reference");
+                    actual[c] = decode(byte / 255.0, srgb);
+                    changes += byte != sample.native[c];
+                    if (i == 1)
+                        supportedDarkGuideChanges += byte != sample.native[c];
+                    inGamut = inGamut && expected[c] >= 0 && expected[c] <= 1;
+                    if (sample.native == sample.guide && *std::max_element(n.begin(), n.end()) >= 1.0 / 128)
+                        check(std::abs(byte - int(sample.answer[c])) <= 1, "matched guide maps to model answer");
+                    if (sample.guide == sample.answer || sample.native == std::array<uint8_t, 3>{} ||
+                        sample.guide == std::array<uint8_t, 3>{})
+                        check(byte == sample.native[c], "identity/black/unsupported guide remains exact");
+                }
+                check(result[offset(e * eyeSize + x, y, width, 3)] == pixels[offset(e * eyeSize + x, y, width, 3)],
+                      "perceptual mismatch native alpha exact");
+                if (sample.native != sample.guide && sample.guide != sample.answer)
+                    ++mismatched;
+                // Protection changes the edit below the toe; storage clipping also
+                // changes Oklab. Check the perceptual bound only before those cases.
+                if (!inGamut ||
+                    std::min(*std::max_element(n.begin(), n.end()), *std::max_element(g.begin(), g.end())) < 1.0 / 128)
+                    continue;
+                const auto nl = referenceLab(n), gl = referenceLab(g), al = referenceLab(a);
+                const auto observed = referenceLab(actual), intended = referenceLab(expected);
+                double lightTolerance = 0, chromaTolerance = 0;
+                // Quantization allowance is bounded by the independent one-code
+                // RGB neighborhood, rather than a loose global perceptual epsilon.
+                for (int r = -1; r <= 1; ++r)
+                    for (int green = -1; green <= 1; ++green)
+                        for (int b = -1; b <= 1; ++b) {
+                            Color3 neighbor{};
+                            const int offsets[3]{r, green, b};
+                            for (UINT c = 0; c < 3; ++c)
+                                neighbor[c] = decode(
+                                    std::clamp(int(quantize(encode(expected[c], srgb))) + offsets[c], 0, 255) / 255.0,
+                                    srgb);
+                            const auto lab = referenceLab(neighbor);
+                            lightTolerance = std::max(lightTolerance, std::abs(lab[0] - intended[0]));
+                            chromaTolerance =
+                                std::max(chromaTolerance, std::hypot(lab[1] - intended[1], lab[2] - intended[2]));
+                        }
+                check(std::abs(observed[0] - nl[0]) <= std::abs(al[0] - gl[0]) + lightTolerance + 1e-6,
+                      "transferred lightness edit cannot exceed model lightness edit");
+                check(std::hypot(observed[1] - nl[1], observed[2] - nl[2]) <=
+                          std::hypot(al[1] - gl[1], al[2] - gl[2]) + chromaTolerance + 1e-6,
+                      "transferred chroma edit cannot exceed model chroma edit");
+                ++bounded;
+            }
+    }
+    check(changes > 32 && mismatched >= 32 && bounded >= 16 && supportedDarkGuideChanges > 8,
+          "perceptual witnesses must exercise nonzero edits, mismatched guides and bounded transfers");
+    gpu.noErrors();
+    std::puts("PASS perceptual matched/mismatched guides, bounded lightness/chroma and dark-guide support");
 }
 
 #if defined(NR_SPATIAL_TEST_OBSERVER)
@@ -1115,8 +1319,10 @@ void shadowToeContract(Gpu& gpu) {
                             check(std::abs(int(result[i + c]) - int(code + 2)) <= 1,
                                   "neutral NR structure survives outside narrow black toe");
                     if (mode == 1 && code >= 22)
-                        check(result[i] == code && result[i + 1] == code + 8 && result[i + 2] == code,
-                              "midtone NR color edit remains fully active");
+                        check(std::abs(int(result[i]) - int(code)) <= 1 &&
+                                  std::abs(int(result[i + 1]) - int(code + 8)) <= 1 &&
+                                  std::abs(int(result[i + 2]) - int(code)) <= 1,
+                              "midtone matched-guide edit remains active within one storage code");
                 }
                 if (mode == 1) {
                     const int spread = int(result[1]) - int(result[0]);
@@ -1194,6 +1400,7 @@ int main(int argc, char** argv) {
     try {
         Gpu gpu(argc > 1 && std::strcmp(argv[1], "--hardware") == 0);
         colorChannelContract(gpu, false);
+        perceptualTransferContract(gpu);
         blackShadowContract(gpu);
         shadowToeContract(gpu);
         for (const auto combined : {std::array<UINT, 2>{95, 80}, {90, 80}, {90, 85}})

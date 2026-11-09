@@ -686,6 +686,7 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
   <ItemGroup>
     <None Include="Common.hlsli" />
     <None Include="NrSpatialCommon.hlsli" />
+    <None Include="PerceptualTransfer.hlsli" />
     <ClInclude Include="NrSpatialPipeline.h" />
     <ClInclude Include="NrSpatialPolicy.h" />
     <None Include="framework\dispatch_generator.py" />
