@@ -1,8 +1,8 @@
 # Try VDXR NR and OFXR frame generation
 
-The [November 7 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.07.1)
-improves frame delivery while the next real frame prepares. **OFXR 2×/3×/4×** and automatic per-game
-NR/FG profiles are included; there is no new switch to enable the handoff improvement.
+The [November 8 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.08.1)
+adds bounded perceptual color transfer to reduced-processing NR. **OFXR 2×/3×/4×**, frame-delivery recovery
+and automatic per-game NR/FG profiles remain included. Use the existing controls; there is no new color toggle.
 NR processing resolution and coverage are independent, including **95% coverage / 80% processing** and
 **90% coverage / 85% processing**. FG offers Off, 2×, 3× and 4× and also works with NR off.
 
@@ -22,13 +22,13 @@ it does not provide Steam Frame or ALVR streaming. Frame Launcher's separate Ste
 
 ## Install once
 
-1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.11.07.1.zip` and
-   `VDXR-NR-FG-Controls-Windows-x64-2026.11.07.1.zip` from the
-   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.07.1).
-   Check them against `SHA256SUMS-2026.11.07.1.txt`.
+1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.11.08.1.zip` and
+   `VDXR-NR-FG-Controls-Windows-x64-2026.11.08.1.zip` from the
+   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.08.1).
+   Check them against `SHA256SUMS-2026.11.08.1.txt`.
 2. Follow the [complete side-by-side setup](SIDE-BY-SIDE-RUNTIME.md). It installs the matching host DLL, FG DLL
    and `CUSTOM-RUNTIME.json` under `%ProgramFiles%\VDXR-NR-FG\OpenXR`, then registers the managed path.
-   Keep this release's host, FG module and metadata together: 4× requires the matching new host and module.
+   Keep this release's host, FG module and metadata together; older hosts or modules may not support 4×.
    Leave Streamer's official files in place. Restore them first if an older installation replaced them.
 3. Extract the **entire** Controls ZIP. Run **VDXR-NR-FG-Controls.exe**, keeping `_internal` beside it.
    Accept the administrator prompt to save settings. This community app is unsigned; opening it preserves
@@ -40,12 +40,16 @@ app can live in its own extracted folder. Existing NR, appearance and FG setting
 
 ## First comparison
 
+If you already have a working setup, keep it. Upgrading preserves NR, FG, coverage and appearance settings;
+the new color transfer applies automatically while NR is enabled and processing is below 100%.
+
 1. Turn Virtual Desktop's **SSW Off**, and disable any separate external FG layer.
 2. Choose **Globals** for defaults, or select the actual game EXE with **Add game EXE…** for a game profile.
    Enable NR, set **NR coverage (%) to 100** and **NR processing resolution (%) to 80**.
    Keep your face, hair, tone and detail choices as they are. NR may also remain off for FG-only use.
 3. Select **OFXR 4×** and **NVIDIA (default)**. Globals save automatically; in game scope, click
-   **Save game profile**. Close and relaunch the game after changing FG mode, backend or runtime.
+   **Save game profile**. Close and relaunch the game after changing FG mode, backend,
+   requested reconstruction mode or runtime.
 4. Check that both eyes align, controllers work, and faces, hair, dark scenes and head motion look acceptable.
    Compare processing **100%** against **80%** in the same scene, with game resolution and other settings held fixed.
 
@@ -54,15 +58,19 @@ app can live in its own extracted folder. Existing NR, appearance and FG setting
 *Actual app with example settings, not installation defaults.*
 
 Globals save automatically; game-profile edits remain drafts until **Save game profile**. Saved NR enable,
-processing, coverage and appearance changes can apply during play. FG mode and backend are captured at session
-start and require a game restart. Fresh settings start with NR off, processing **100%**, coverage **100%**, FG off
+processing, coverage and appearance changes can apply during play. FG mode, backend and requested reconstruction
+mode are captured at session start and require a game restart. The reconstruction selector records a request,
+not proof that depth processing is active; see the [mode guide](DEPTH-MODES.md). Fresh settings start with NR off,
+processing **100%**, coverage **100%**, FG off
 and NVIDIA selected. Installation does not enable the comparison settings for you.
 
 Processing resolution (**50–100%**) scales NR's working width and height within the selected centered coverage
 rectangle. Effective coverage is **10–100%** per eye; the slider's lower requests clamp to the 10% runtime minimum.
 Both percentages describe linear dimensions. Reduced processing reconstructs NR within that rectangle and blends
 its crop edge smoothly; outside coverage, the original image and alpha remain. At 100% coverage there is no crop
-edge. Game pixel density and final output dimensions do not change. Processing **100%** uses the native NR path;
+edge. The bounded color transfer is part of this existing reconstruction step; it adds no model evaluation, copy
+or rendering pass. Game pixel density and final output dimensions do not change.
+Processing **100%** uses the unchanged native NR path;
 zero NR strength preserves the original RGB. Your appearance settings remain separate. See the
 [Controls guide](NR-FG-CONTROLS.md) for the transition and mixed-setting details.
 
@@ -70,8 +78,9 @@ zero NR strength preserves the original RGB. Your appearance settings remain sep
 
 Use the executable that actually runs the game, rather than its launcher or a shortcut. Adding or selecting an EXE
 writes nothing. A new profile inherits effective settings from Globals; edit them and click **Save game profile**.
-Save stores all ten displayed values: NR enable, style, strength, local tone, structure detail, skin detail, processing
-resolution, coverage, FG mode and optical-flow backend. Later global changes do not alter that saved setup.
+Save stores all eleven displayed values: NR enable, style, strength, local tone, structure detail, skin detail,
+processing resolution, coverage, FG mode, optical-flow backend and requested reconstruction mode.
+Later global changes do not alter that saved setup.
 You can also save without edits to lock a working global setup for one game.
 
 **Reset game profile** removes the overrides and immediately restores global inheritance. Unsaved game edits remain
@@ -126,14 +135,14 @@ not automatically converted by selecting VDXR. Routing a game successfully does 
 
 Rapid head turns, ghosting and exposure-change artifacts can remain. This release does not establish universal
 game compatibility, artifact-free motion or identical perceived detail at every processing percentage.
-Moss was checked at 120 Hz with NVIDIA and NR enabled in 2×, 3× and 4×; stereo and controls worked and
-motion was reported smooth. The 4× startup capture was brief. These observations do not establish sustained
-FPS, reduced headset latency or universal compatibility. See the [release notes](releases/2026.11.07.1.md).
+The color update is an appearance change, with no claimed FPS gain or reduced headset latency.
+See the [release notes](releases/2026.11.08.1.md) for scope.
 
 ## Source and licenses
 
 The host retains its MIT license. The optional synthesis module includes OFXR code under LGPL-3.0, with AMD
 FidelityFX and NVIDIA interface notices retained. Matching corresponding source and rebuild instructions accompany
 the release; see the [module notice](../nr-frame-generation/NOTICE.md). Thanks to
-[janblade's F5 project](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass) for the spatial reconstruction
-inspiration. This is an independent spatial implementation, not F5's full temporal pipeline or copied F5 GPL source.
+[janblade's F5 project](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass) for the spatial and perceptual-transfer
+inspiration, and [Björn Ottosson](https://bottosson.github.io/posts/oklab/) for the published Oklab transforms.
+The runtime implementation is independently written; no F5 GPL implementation was copied.
