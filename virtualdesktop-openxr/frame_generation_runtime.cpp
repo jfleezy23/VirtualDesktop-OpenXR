@@ -1058,14 +1058,14 @@ namespace virtualdesktop_openxr {
                     if (!begun && !beginNative()) {
                         break;
                     }
-                    // B was queued first, then the synthetic roles in order.
-                    // The last prepared role's completion covers every current
-                    // image. Those images and this ticket remain worker-owned
-                    // until retirement, independently of the next producer.
-                    const auto lastCopyRole =
-                        generated && cycles > 1 ? transaction.slots.roles[cycles - 2] : FrameGenerationRole::real;
+                    // Only the selected image must be complete for this handoff.
+                    // Waiting for a later copy can strand a ready image behind
+                    // the admitted producer's unrelated context lease. All
+                    // images and the highest consumer fence remain owned until
+                    // retirement, independently of this per-image readiness.
+                    const auto currentCopyRole = generated ? transaction.slots.roles[slot] : FrameGenerationRole::real;
                     const bool independentPresentation = hasGpuOutput && m_deliveryTransport && admissionOpened &&
-                                                         m_frameGeneration->copyReady(transaction, lastCopyRole);
+                                                         m_frameGeneration->copyReady(transaction, currentCopyRole);
                     if (independentPresentation) {
                         if (contextLease.owns_lock()) {
                             contextLease.unlock();

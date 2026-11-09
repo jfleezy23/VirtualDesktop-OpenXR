@@ -311,6 +311,9 @@ int main(int argc, char** argv) {
                 std::_Exit(3);
             }
             if (session && destroy) {
+#ifdef VDXR_LAST_COPY_GATE_REGRESSION
+                Regression::lastCopyReportWorkerError();
+#endif
                 try {
                     checkXr(destroy(session), "stop native worker before detaching observer");
                 } catch (...) {

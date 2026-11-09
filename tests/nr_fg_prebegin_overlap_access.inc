@@ -25,6 +25,24 @@ inline static PrebeginState prebegin;
 inline static decltype(&ovr_GetTimeInSeconds) prebeginOriginalTime{};
 inline static VDXRFG_GetApiV4Fn prebeginOriginalApi{};
 inline static decltype(VDXRFG_ApiV4::Submit) prebeginOriginalSubmit{};
+#ifdef VDXR_LAST_COPY_GATE_REGRESSION
+inline static std::unique_ptr<LastCopyGate> lastCopyGate;
+static void lastCopyReportWorkerError() {
+    // A failed setup must release its GPU dependency before session shutdown
+    // joins/drains the real worker. Never unwind a GPU-live held graph.
+    if (lastCopyGate)
+        lastCopyGate->release();
+    auto& value = runtime();
+    std::lock_guard lock(value.m_asyncSubmissionMutex);
+    if (value.m_asyncSubmissionError) {
+        try {
+            std::rethrow_exception(value.m_asyncSubmissionError);
+        } catch (const std::exception& error) {
+            std::cerr << "LAST_COPY_WORKER_ERROR " << error.what() << '\n';
+        }
+    }
+}
+#endif
 
 static double OVR_CDECL prebeginTime() {
     std::lock_guard lock(prebegin.mutex);
@@ -69,6 +87,19 @@ static HRESULT WINAPI prebeginSubmit(void* context, const VDXRFG_SubmitInfoV3* i
             prebegin.allReady = true;
             prebegin.token = ticket->token;
             prebegin.bank = ticket->bank;
+#ifdef VDXR_LAST_COPY_GATE_REGRESSION
+            auto& value = runtime();
+#ifdef VDXR_LAST_COPY_PENDING_CURRENT
+            constexpr bool currentPending = true;
+#else
+            constexpr bool currentPending = false;
+#endif
+            lastCopyGate = std::make_unique<LastCopyGate>(value.m_fgDevice.Get(),
+                                                          value.presentationDevice(),
+                                                          value.presentationContext(),
+                                                          requestedFrameGeneration,
+                                                          currentPending);
+#endif
         } catch (...) {
             std::lock_guard lock(prebegin.mutex);
             prebegin.failure = std::current_exception();
@@ -84,11 +115,34 @@ static HRESULT WINAPI prebeginSubmit(void* context, const VDXRFG_SubmitInfoV3* i
             prebegin.changed.notify_all();
             require(prebegin.changed.wait_for(lock, 5s, [] { return prebegin.beginReleasedWhileProducerHeld; }),
                     "fast Begin returns while the actual future Submit still owns its producer lease");
+#ifdef VDXR_LAST_COPY_GATE_REGRESSION
+            lock.unlock();
+            const auto snapshot = WaitForSingleObject(lastCopyGate->snapshotEvent.get(), 1000);
+            lastCopyGate->observe = false;
+            // Release ONLY the real GPU dependency. The producer's actual
+            // Submit stack still owns m_fgContextMutex throughout this test.
+            lastCopyGate->release();
+            lastCopyGate->firstMarkerComplete = lastCopyGate->waitMarker(1, 300);
+            lock.lock();
+            if (lastCopyGate->firstMarkerComplete)
+                prebeginThaw();
+            std::cout << "LAST_COPY_WITNESS multiplier=" << requestedFrameGeneration
+                      << " pending_current_control=" << lastCopyGate->pendingCurrent
+                      << " actual_pending_snapshot=" << (snapshot == WAIT_OBJECT_0 && lastCopyGate->witnessed)
+                      << " S1_ready=" << lastCopyGate->currentReady << " tail_gate_inserted=" << lastCopyGate->inserted
+                      << " End_GPU_complete_while_producer_held=" << lastCopyGate->firstMarkerComplete << '\n';
+#endif
             // This is a bounded harness hold of the producer's existing lease,
             // not a wait added to production. Every current SDK End must
             // finish before this next producer's existing lease is released.
             prebegin.changed.wait_for(
                 lock, 250ms, [] { return prebegin.endsReturnedWhileProducerHeld == requestedFrameGeneration; });
+#ifdef VDXR_LAST_COPY_GATE_REGRESSION
+            lock.unlock();
+            lastCopyGate->allMarkersComplete = lastCopyGate->waitMarker(requestedFrameGeneration, 100);
+            lock.lock();
+            prebeginThaw();
+#endif
             prebegin.producerHeld = false;
             prebegin.changed.notify_all();
         } catch (...) {
@@ -131,6 +185,9 @@ struct PrebeginFixture {
         checkHr(HRESULT_FROM_WIN32(DetourTransactionCommit()));
     }
     ~PrebeginFixture() {
+#ifdef VDXR_LAST_COPY_GATE_REGRESSION
+        lastCopyGate.reset();
+#endif
         if (DetourTransactionBegin() || DetourUpdateThread(GetCurrentThread()) ||
             DetourDetach(reinterpret_cast<PVOID*>(&prebeginOriginalApi), prebeginGetApi) ||
             DetourDetach(reinterpret_cast<PVOID*>(&prebeginOriginalTime), prebeginTime) || DetourTransactionCommit())
@@ -232,8 +289,18 @@ static void prebeginBeforeBegin(long long id) {
                     "current owned role has an actual SDK presentation image");
             prebegin.chains[role] = output.ovrSwapchain;
             prebegin.images[role] = image;
+#ifndef VDXR_LAST_COPY_GATE_REGRESSION
             prebegin.pixels[role] = prebeginPixels(role, image);
+#endif
         }
+#ifdef VDXR_LAST_COPY_GATE_REGRESSION
+        require(lastCopyGate && lastCopyGate->firstValue && lastCopyGate->tailValue,
+                "selected current group queued its real B and all synthetic consumer Signals");
+        // Flush commands, but never append a readback behind the held tail.
+        value.presentationContext()->Flush();
+        const auto completed = lastCopyGate->consumer.load()->GetCompletedValue();
+        lastCopyGate->pendingAtBegin = completed != UINT64_MAX && completed < lastCopyGate->tailValue.load();
+#endif
         prebegin.beginHeld = true;
         prebegin.changed.notify_all();
         // A bound releases the real SDK path so the RED run reports the
@@ -245,7 +312,9 @@ static void prebeginBeforeBegin(long long id) {
 #endif
         prebegin.beginHeld = false;
         prebegin.released = true;
+#ifndef VDXR_LAST_COPY_GATE_REGRESSION
         prebeginThaw();
+#endif
         prebegin.changed.notify_all();
     } catch (...) {
         prebegin.failure = std::current_exception();
@@ -261,6 +330,9 @@ static void prebeginAfterBegin(long long id) {
     std::lock_guard lock(prebegin.mutex);
     if (prebegin.armed && id == prebegin.native) {
         prebegin.beginReleasedWhileProducerHeld = prebegin.producerHeld;
+#ifdef VDXR_LAST_COPY_GATE_REGRESSION
+        lastCopyGate->observe = true;
+#endif
         prebegin.changed.notify_all();
     }
 #else
@@ -277,6 +349,9 @@ static void prebeginAfterNativeEnd(long long id, ovrResult result) {
         const auto slot = static_cast<unsigned>(id - prebegin.native);
         require(slot == prebegin.returnedEnds, "current SDK End returns once in exact native slot order");
         ++prebegin.returnedEnds;
+#ifdef VDXR_LAST_COPY_GATE_REGRESSION
+        lastCopyGate->mark(slot + 1);
+#endif
         if (!slot)
             prebegin.firstEndWhileProducerHeld = prebegin.producerHeld;
         if (prebegin.producerHeld)
@@ -313,6 +388,27 @@ static void prebeginAfterEnd(unsigned frame) {
     if (prebegin.failure)
         std::rethrow_exception(prebegin.failure);
 #ifdef VDXR_PREBEGIN_FAST_REGRESSION
+#ifdef VDXR_LAST_COPY_GATE_REGRESSION
+    require(lastCopyGate && lastCopyGate->witnessed && prebegin.producerHoldObserved &&
+                prebegin.beginReleasedWhileProducerHeld && !prebegin.expired,
+            "last-copy fixture reaches actual worker copy readiness while future Submit owns producer lease");
+    require((requestedFrameGeneration == 2 && !lastCopyGate->pendingCurrent) ||
+                (lastCopyGate->inserted && lastCopyGate->pendingAtBegin),
+            "real pending tail-copy GPU gate exists before native Begin");
+    require(lastCopyGate->currentReady != lastCopyGate->pendingCurrent,
+            "actual current-role readiness matches the positive or pending-current control");
+    if (lastCopyGate->pendingCurrent) {
+        require(!lastCopyGate->firstMarkerComplete && !prebegin.firstEndWhileProducerHeld,
+                "pending CURRENT copy must not bypass the existing producer lease/settlement path");
+        prebegin.published = true;
+        std::cout << "LAST_COPY_PENDING_CURRENT_CONTROL guarded=1\n";
+        return;
+    }
+    require(lastCopyGate->firstMarkerComplete,
+            "ready current S1 must complete actual End GPU work after tail release while future producer remains held");
+    require(lastCopyGate->allMarkersComplete,
+            "every current End GPU marker completes before releasing the future producer lease");
+#endif
     std::cout << "PREBEGIN_FAST_BEGIN producer_submit_held=" << prebegin.producerHoldObserved
               << " Begin_returned_while_producer_held=" << prebegin.beginReleasedWhileProducerHeld
               << " first_End_while_producer_held=" << prebegin.firstEndWhileProducerHeld
@@ -394,8 +490,12 @@ static void prebeginObserveEnd(long long id, const ovrLayerHeader* const* layers
             "pre-Begin current group retains original S1/S2/S3/B chain order");
     const auto bank = role == 2 ? prebegin.bank : 0u;
     const auto image = runtime().m_fgPresentationBanks[bank][role].lastCommittedIndex;
+#ifdef VDXR_LAST_COPY_GATE_REGRESSION
+    require(image == prebegin.images[role], "current End retains its original owned presentation image");
+#else
     require(image == prebegin.images[role] && prebeginPixels(role, image) == prebegin.pixels[role],
             "every forwarded current End contains its original physically copied role pixels");
+#endif
     ++prebegin.observedEnds;
 }
 static void prebeginVerify() {

@@ -747,6 +747,10 @@ namespace {
     };
 } // namespace
 
+#ifdef VDXR_LAST_COPY_GATE_REGRESSION
+#include "nr_fg_last_copy_gate.h"
+#endif
+
 namespace virtualdesktop_openxr {
     struct RuntimeFrameGenerationRegression {
 #ifdef VDXR_PREBEGIN_OVERLAP_REGRESSION
