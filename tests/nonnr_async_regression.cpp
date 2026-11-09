@@ -48,6 +48,7 @@ namespace {
         unsigned recenterClears{};
         std::function<void(const ovrLayerHeader* const*, unsigned)> observeLayers;
         std::function<void(long long)> observeWait;
+        std::function<ovrResult(char, long long)> observePhase;
 
         template <typename Predicate>
         bool waitFor(Predicate predicate, std::chrono::milliseconds timeout = 2000ms) {
@@ -182,6 +183,11 @@ namespace {
 
     ovrResult OVR_CDECL interceptedWait(ovrSession, long long frameId) {
         auto& state = *backendState;
+        if (state.observePhase) {
+            const auto checked = state.observePhase('W', frameId);
+            if (OVR_FAILURE(checked))
+                return checked;
+        }
         if (state.observeWait) {
             state.observeWait(frameId);
         }
@@ -206,6 +212,11 @@ namespace {
 
     ovrResult OVR_CDECL interceptedBegin(ovrSession, long long frameId) {
         auto& state = *backendState;
+        if (state.observePhase) {
+            const auto checked = state.observePhase('B', frameId);
+            if (OVR_FAILURE(checked))
+                return checked;
+        }
         std::lock_guard lock(state.mutex);
         ++state.beginCalls;
         state.begunIds.push_back(frameId);
@@ -222,6 +233,11 @@ namespace {
                                        const ovrLayerHeader* const* layers,
                                        unsigned layerCount) {
         auto& state = *backendState;
+        if (state.observePhase) {
+            const auto checked = state.observePhase('E', frameId);
+            if (OVR_FAILURE(checked))
+                return checked;
+        }
         std::unique_lock lock(state.mutex);
         ++state.enteredEnd;
         // Synchronous measurements end at the runtime/backend boundary, excluding this spy's allocations.

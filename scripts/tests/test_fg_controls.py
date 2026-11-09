@@ -29,6 +29,7 @@ class Key:
 
 class Registry:
     HKEY_LOCAL_MACHINE = 1
+    HKEY_CURRENT_USER = 2
     KEY_READ = 2
     KEY_SET_VALUE = 4
     KEY_WOW64_64KEY = 256
@@ -58,7 +59,9 @@ class Registry:
         if self.denied:
             raise PermissionError("fixture permission denial")
         self.access.append(("write", access))
-        self.keys.setdefault(path, {})
+        components = path.split("\\")
+        for end in range(1, len(components) + 1):
+            self.keys.setdefault("\\".join(components[:end]), {})
         return Key(path)
 
     def QueryValueEx(self, key, name):
@@ -78,6 +81,23 @@ class Registry:
         self.writes.append((name, None, None))
         self.write_paths.append((key.path, name, None, None))
         del self.keys[key.path][name]
+
+    def QueryInfoKey(self, key):
+        children = {path[len(key.path) + 1:].split("\\")[0]
+                    for path in self.keys if path.startswith(key.path + "\\")}
+        return len(children), len(self.keys[key.path]), 0
+
+    def EnumKey(self, key, index):
+        children = sorted({path[len(key.path) + 1:].split("\\")[0]
+                           for path in self.keys if path.startswith(key.path + "\\")})
+        return children[index]
+
+    def DeleteKeyEx(self, hive, path, access=256):
+        if path not in self.keys:
+            raise FileNotFoundError(path)
+        if any(child.startswith(path + "\\") for child in self.keys):
+            raise OSError("Fixture key has children")
+        del self.keys[path]
 
 
 class FrameGenerationControlsTests(unittest.TestCase):

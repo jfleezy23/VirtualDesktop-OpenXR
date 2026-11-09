@@ -34,6 +34,30 @@ def snapshot():
     return result
 
 
+def exercise_depth_mode_selector(app, control, root, read, current_snapshot, check):
+    """Drive the real readonly selector; keep the independent settings intact."""
+    choices = (("Standard", 0), ("Depth assist", 1), ("Depth reconstruction (experimental)", 2))
+    selector = control(ttk.Combobox, "textvariable", app.frame_generation_depth_mode)
+    check(str(selector.cget("state")) == "readonly", "depth-mode: selector readonly")
+    check(tuple(selector.cget("values")) == tuple(label for label, _ in choices),
+          "depth-mode: selector has exactly three modes")
+
+    def without_depth(state):
+        return {path: ([row for row in values if row[0] != gui.FRAME_GENERATION_DEPTH_MODE_NAME]
+                       if path == gui.REGISTRY_PATH and values is not None else values)
+                for path, values in state.items()}
+
+    independent = without_depth(current_snapshot())
+    for label, value in choices:
+        selector.set(label)
+        selector.event_generate("<<ComboboxSelected>>")
+        root.update()
+        check(read(gui.FRAME_GENERATION_DEPTH_MODE_NAME) == (value, winreg.REG_DWORD),
+              f"depth-mode: global DWORD {value}")
+        check(without_depth(current_snapshot()) == independent,
+              "depth-mode: global selection preserves other settings")
+
+
 def run(result_path):
     result = {"passed": False, "frozen": bool(getattr(sys, "frozen", False)),
               "elevated": gui.is_elevated(), "checks": []}
@@ -99,6 +123,9 @@ def run(result_path):
         check(snapshot() == before, "normal startup is read-only")
         check(app.variables[-1].get() == 100 and not app.enabled.get(), "fresh defaults: NR off, coverage 100")
         check(app.processing_resolution.get() == 100, "fresh processing resolution is native 100")
+        check(app.frame_generation_depth_mode.get() == "Depth assist"
+              and app.profile_store.load()[1][gui.FRAME_GENERATION_DEPTH_MODE_NAME] == "default",
+              "depth-mode: unset request inherits default depth assist")
         runtime = gui.runtime_selection
         runtime_path = runtime.RUNTIME_REGISTRY_PATH
         check(app.runtime_selection.get() == runtime.STOCK_LABEL, "missing redirect displays Stock VDXR")
@@ -175,6 +202,7 @@ def run(result_path):
         backend_selector.set("NVIDIA (default)")
         backend_selector.event_generate("<<ComboboxSelected>>")
         root.update()
+        exercise_depth_mode_selector(app, control, root, read, snapshot, check)
         app.processing_resolution_slider.set(100)
         wait_for_callbacks()
         check(str(app.slider_widgets[-1].cget("state")) == "normal",
@@ -194,6 +222,9 @@ def run(result_path):
         app = gui.VDXRRegistryApp(root)
         check(app.variables[-1].get() == 90 and app.enabled.get(), "restart preserves saved combined 90/85 pair")
         check(app.processing_resolution.get() == 85, "restart restores processing resolution")
+        check(app.frame_generation_depth_mode.get() == "Depth reconstruction (experimental)"
+              and read(gui.FRAME_GENERATION_DEPTH_MODE_NAME) == (2, winreg.REG_DWORD),
+              "depth-mode: global request survives restart")
         control(ttk.Button, "text", "Reset NR settings").invoke()
         check([read(name)[0] for name in gui.VALUE_NAMES] == list(gui.VALUE_DEFAULTS), "reset persists every NR default immediately")
         check(read(gui.ENABLE_VALUE_NAME)[0] == 0, "reset disables NR")
@@ -201,8 +232,16 @@ def run(result_path):
               and app.processing_resolution.get() == 100, "reset restores native processing resolution")
         check(read(gui.FRAME_GENERATION_VALUE_NAME)[0] == 4 and read(gui.FRAME_GENERATION_BACKEND_NAME)[0] == 0,
               "NR reset preserves MFG and NVIDIA selections")
+        check(read(gui.FRAME_GENERATION_DEPTH_MODE_NAME) == (2, winreg.REG_DWORD),
+              "depth-mode: NR reset preserves request")
         check(snapshot()[runtime_path] == runtime_before_nr and app.runtime_selection.get() == runtime.CUSTOM_LABEL,
               "NR and FG changes and NR reset preserve runtime selection")
+        depth_selector = control(ttk.Combobox, "textvariable", app.frame_generation_depth_mode)
+        depth_selector.set("Standard")
+        depth_selector.event_generate("<<ComboboxSelected>>")
+        root.update()
+        check(read(gui.FRAME_GENERATION_DEPTH_MODE_NAME) == (0, winreg.REG_DWORD),
+              "depth-mode: profile inheritance baseline DWORD 0")
         globals_before_profile = snapshot()
         executable = r"C:\ProfileFixtures\One\fixture.exe"
         app.load_scope(executable)
@@ -212,16 +251,22 @@ def run(result_path):
         app.save_profile_button.invoke()
         saved, sources = app.profile_store.load(executable)
         check(saved == global_values and set(sources.values()) == {"profile"},
-              "unchanged Save locks all ten displayed NR and FG fields")
-        app.profile_store.save(None, {"DLSSNR_Intensity": 63, gui.FRAME_GENERATION_VALUE_NAME: 2})
+              "unchanged Save locks all displayed NR and FG fields")
+        app.profile_store.save(None, {"DLSSNR_Intensity": 63, gui.FRAME_GENERATION_VALUE_NAME: 2,
+                                      gui.FRAME_GENERATION_DEPTH_MODE_NAME: 1})
         check(app.profile_store.load(executable)[0] == global_values,
               "locked game setup survives global appearance and FG changes")
         app.reset_defaults()
         inherited, sources = app.profile_store.load(executable)
         check(inherited["DLSSNR_Intensity"] == 63 and inherited[gui.FRAME_GENERATION_VALUE_NAME] == 2
               and set(sources.values()) == {"global"}, "Reset returns game to current globals")
+        check(inherited[gui.FRAME_GENERATION_DEPTH_MODE_NAME] == 1
+              and sources[gui.FRAME_GENERATION_DEPTH_MODE_NAME] == "global"
+              and app.frame_generation_depth_mode.get() == "Depth assist",
+              "depth-mode: reset inherits changed global DWORD 1")
         app.profile_store.save(None, {"DLSSNR_Intensity": global_values["DLSSNR_Intensity"],
-                                      gui.FRAME_GENERATION_VALUE_NAME: global_values[gui.FRAME_GENERATION_VALUE_NAME]})
+                                      gui.FRAME_GENERATION_VALUE_NAME: global_values[gui.FRAME_GENERATION_VALUE_NAME],
+                                      gui.FRAME_GENERATION_DEPTH_MODE_NAME: global_values[gui.FRAME_GENERATION_DEPTH_MODE_NAME]})
         app.load_scope(executable)
         app.enabled.set(True)
         app.on_enabled_changed()
@@ -229,6 +274,13 @@ def run(result_path):
         app.processing_resolution.set(80)
         app.frame_generation.set("OFXR 2×")
         app.on_frame_generation_changed()
+        depth_selector.set("Depth reconstruction (experimental)")
+        depth_selector.event_generate("<<ComboboxSelected>>")
+        root.update()
+        check(app.profile_store.load(executable)[0][gui.FRAME_GENERATION_DEPTH_MODE_NAME] == 0
+              and app.frame_generation_depth_mode.get() == "Depth reconstruction (experimental)"
+              and snapshot() == globals_before_profile,
+              "depth-mode: game request 2 is draft until Save")
         check(snapshot() == globals_before_profile and app.profile_store.list_profiles() == [],
               "game profile edits are drafts; globals unchanged")
         check(app.save_profile(), "explicit game profile Save")
@@ -239,9 +291,23 @@ def run(result_path):
               "complete game NR and FG round-trip")
         check(set(sources.values()) == {"profile"} and snapshot() == globals_before_profile,
               "game Save locks every displayed field without global writes")
+        check(saved[gui.FRAME_GENERATION_DEPTH_MODE_NAME] == 2
+              and sources[gui.FRAME_GENERATION_DEPTH_MODE_NAME] == "profile",
+              "depth-mode: saved game DWORD 2")
+        app.load_scope(None)
+        app.load_scope(executable)
+        check(app.frame_generation_depth_mode.get() == "Depth reconstruction (experimental)"
+              and app.profile_store.load(executable)[0][gui.FRAME_GENERATION_DEPTH_MODE_NAME] == 2,
+              "depth-mode: saved game request survives reload")
         app.reset_defaults()
         check(app.profile_store.list_profiles() == [] and snapshot() == globals_before_profile,
               "Reset game profile removes overrides and retains globals")
+        inherited, sources = app.profile_store.load(executable)
+        check(inherited[gui.FRAME_GENERATION_DEPTH_MODE_NAME] == 0
+              and sources[gui.FRAME_GENERATION_DEPTH_MODE_NAME] == "global"
+              and app.frame_generation_depth_mode.get() == "Standard",
+              "depth-mode: game reset inherits global DWORD 0")
+        check(snapshot() == globals_before_profile, "depth-mode: game operations preserve globals")
         app.load_scope(None)
         app.on_close()
         root = None
@@ -274,6 +340,19 @@ def run(result_path):
                   f"startup warns without overwriting coverage: {type(coverage).__name__}")
             app.on_close()
             root = None
+        set_value(gui.FRAME_GENERATION_DEPTH_MODE_NAME, "malformed", winreg.REG_SZ)
+        depth_malformed_before = snapshot()
+        root = tk.Tk()
+        root.withdraw()
+        app = gui.VDXRRegistryApp(root)
+        check(app.frame_generation_depth_mode.get() == "Depth assist"
+              and gui.FRAME_GENERATION_DEPTH_MODE_NAME in app.status.get()
+              and "invalid" in app.status.get().lower() and snapshot() == depth_malformed_before,
+              "depth-mode: malformed startup warns without writes")
+        app.on_close()
+        root = None
+        check(snapshot() == depth_malformed_before, "depth-mode: malformed close preserves stored request")
+        set_value(gui.FRAME_GENERATION_DEPTH_MODE_NAME, 2)
         for name in ("DLSSNR_Intensity", gui.ENABLE_VALUE_NAME, gui.FRAME_GENERATION_VALUE_NAME,
                      gui.FRAME_GENERATION_BACKEND_NAME, gui.PROCESSING_RESOLUTION_VALUE_NAME):
             set_value(name, "malformed", winreg.REG_SZ)

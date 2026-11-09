@@ -1,4 +1,5 @@
 #include "NrSpatialCommon.hlsli"
+#include "PerceptualTransfer.hlsli"
 
 float4 main(float4 position : SV_POSITION) : SV_TARGET {
     uint2 pixel = uint2(position.xy) - uint2(outputX, 0);
@@ -8,11 +9,12 @@ float4 main(float4 position : SV_POSITION) : SV_TARGET {
     if (all(raw.rgb == 0))
         return raw;
     float3 nativeLinear = Decode(raw.rgb);
+    float3 nativeLab = LinearToPerceptual(nativeLinear);
     float2 localPoint = float2(pixel - processingRect.xy) + 0.5;
     float2 q = localPoint * float2(workExtent) / float2(processingRect.zw) - 0.5;
     int2 base = int2(floor(q));
     float2 fraction = frac(q);
-    float3 edit = 0, bilinearEdit = 0;
+    float3 edit = 0;
     float normalization = 0;
     bool zero = true;
     [unroll] for (int y = 0; y < 2; ++y) {
@@ -21,21 +23,22 @@ float4 main(float4 position : SV_POSITION) : SV_TARGET {
             float3 guideRaw = storedProxy.Load(int3(p, 0)).rgb;
             float3 answerRaw = answer.Load(int3(p, 0)).rgb;
             float3 guide = Decode(guideRaw);
-            float3 residual = Decode(answerRaw) - guide;
+            bool unchanged = all(guideRaw == answerRaw);
+            float3 residual = 0;
+            if (!unchanged)
+                residual = TransferPerceptualEdit(nativeLinear, nativeLab, guide, Decode(answerRaw));
             residual = ProtectNrResidual(nativeLinear, guide, residual);
-            zero = zero && all(guideRaw == answerRaw);
+            zero = zero && unchanged;
             float weight = (x ? fraction.x : 1 - fraction.x) * (y ? fraction.y : 1 - fraction.y);
             float3 distance = guide - nativeLinear;
             float guided = weight * (1.0 / 1024.0) / (1.0 / 1024.0 + dot(distance, distance) / 3.0);
             edit += guided * residual;
             normalization += guided;
-            bilinearEdit += weight * residual;
         }
     }
-    // Raw early return avoids any sRGB round trip for an unchanged edit.
     if (zero)
         return raw;
-    float3 residual = normalization > 0 && isfinite(normalization) ? edit / normalization : bilinearEdit;
+    float3 residual = edit / normalization;
     float strength = 1;
     if (transitionWidth) {
         float2 edge = min(localPoint, float2(processingRect.zw) - localPoint);

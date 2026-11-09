@@ -29,6 +29,8 @@ FRAME_GENERATION_VALUE_NAME = "FrameGenerationMode"
 FRAME_GENERATION_MODES = {"Off": 0, "OFXR 2×": 2, "OFXR 3×": 3, "OFXR 4×": 4}
 FRAME_GENERATION_BACKEND_NAME = "FrameGenerationBackend"
 FRAME_GENERATION_BACKENDS = {"NVIDIA (default)": 0, "FidelityFX (full resolution)": 1}
+FRAME_GENERATION_DEPTH_MODE_NAME = "FrameGenerationDepthMode"
+FRAME_GENERATION_DEPTH_MODES = {"Standard": 0, "Depth assist": 1, "Depth reconstruction (experimental)": 2}
 
 COLORS = {
     "background": "#101217", "panel": "#1A1D25", "border": "#2B303C",
@@ -193,6 +195,29 @@ def write_frame_generation_backend(value):
         winreg.SetValueEx(key, FRAME_GENERATION_BACKEND_NAME, 0, winreg.REG_DWORD, value)
     if read_frame_generation_backend() != value:
         raise OSError("Frame-generation backend readback did not match the selection")
+
+
+def read_frame_generation_depth_mode():
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, 0,
+            winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
+        ) as key:
+            value, kind = winreg.QueryValueEx(key, FRAME_GENERATION_DEPTH_MODE_NAME)
+    except FileNotFoundError:
+        return game_profiles.DEFAULTS[FRAME_GENERATION_DEPTH_MODE_NAME]
+    return game_profiles.validate(FRAME_GENERATION_DEPTH_MODE_NAME, value, kind)
+
+
+def write_frame_generation_depth_mode(value):
+    game_profiles.validate(FRAME_GENERATION_DEPTH_MODE_NAME, value)
+    with winreg.CreateKeyEx(
+        winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, 0,
+        winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY,
+    ) as key:
+        winreg.SetValueEx(key, FRAME_GENERATION_DEPTH_MODE_NAME, 0, winreg.REG_DWORD, value)
+    if read_frame_generation_depth_mode() != value:
+        raise OSError("Frame-generation depth request readback did not match the selection")
 
 
 def read_frame_generation_mode():
@@ -471,7 +496,7 @@ class VDXRRegistryApp:
         fg.columnconfigure(0, weight=1)
         fg.columnconfigure(1, weight=1)
         ttk.Label(fg, text="Frame generation", style="Section.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(fg, text="Restart game to apply", style="Restart.TLabel").grid(row=0, column=1, sticky="e")
+        ttk.Label(fg, text="Applies next game launch", style="Restart.TLabel").grid(row=0, column=1, sticky="e")
         ttk.Label(fg, text="Mode", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=(14, 6))
         ttk.Label(fg, text="Optical-flow backend", style="Card.TLabel").grid(row=1, column=1, sticky="w", pady=(14, 6))
         try:
@@ -502,12 +527,35 @@ class VDXRRegistryApp:
         )
         backend_selector.grid(row=2, column=1, sticky="ew")
         backend_selector.bind("<<ComboboxSelected>>", self.on_frame_generation_backend_changed)
+        ttk.Label(fg, text="Requested reconstruction mode", style="Card.TLabel").grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(14, 6)
+        )
+        try:
+            depth_mode = read_frame_generation_depth_mode()
+        except (ValueError, OSError) as error:
+            depth_mode = game_profiles.DEFAULTS[FRAME_GENERATION_DEPTH_MODE_NAME]
+            errors.append(f"{error} Depth assist shown; stored request unchanged.")
+        self.saved_frame_generation_depth_mode = next(
+            label for label, value in FRAME_GENERATION_DEPTH_MODES.items() if value == depth_mode
+        )
+        self.frame_generation_depth_mode = tk.StringVar(value=self.saved_frame_generation_depth_mode)
+        self.depth_mode_selector = ttk.Combobox(
+            fg, textvariable=self.frame_generation_depth_mode, values=tuple(FRAME_GENERATION_DEPTH_MODES),
+            state="readonly", width=37, style="Dark.TCombobox",
+        )
+        self.depth_mode_selector.grid(row=4, column=0, columnspan=2, sticky="ew")
+        self.depth_mode_selector.bind("<<ComboboxSelected>>", self.on_frame_generation_depth_mode_changed)
+        self.depth_mode_feedback = tk.StringVar()
+        self.update_depth_mode_feedback()
+        ttk.Label(fg, textvariable=self.depth_mode_feedback, style="Hint.TLabel", wraplength=592).grid(
+            row=5, column=0, columnspan=2, sticky="w", pady=(8, 0)
+        )
         ttk.Label(fg, text="NR + MFG requires coverage at least 90%. Turn SSW off in Virtual Desktop.",
                   style="Hint.TLabel", wraplength=592).grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=(12, 4)
+            row=6, column=0, columnspan=2, sticky="w", pady=(12, 4)
         )
         ttk.Label(fg, text="Selections are saved requests, not active runtime status.", style="Hint.TLabel").grid(
-            row=4, column=0, columnspan=2, sticky="w"
+            row=7, column=0, columnspan=2, sticky="w"
         )
         self.reset_button = ttk.Button(
             frame, text="Reset NR settings", command=self.reset_defaults, style="Soft.TButton",
@@ -598,10 +646,15 @@ class VDXRRegistryApp:
                 except (OSError, ValueError) as error:
                     mode, backend = 0, 0
                     errors.append(str(error))
+                try:
+                    depth_mode = read_frame_generation_depth_mode()
+                except (OSError, ValueError) as error:
+                    depth_mode = game_profiles.DEFAULTS[FRAME_GENERATION_DEPTH_MODE_NAME]
+                    errors.append(f"{error} Depth assist shown; stored request unchanged.")
                 self.scope_feedback.set("Globals · changes save immediately. Game profiles apply automatically at launch.")
             else:
                 try:
-                    values, sources = self.profile_store.load(executable)
+                    values, sources = self.profile_store.load(executable, errors=errors)
                 except (OSError, ValueError) as error:
                     values, sources = game_profiles.DEFAULTS.copy(), {}
                     self.profile_valid = False
@@ -611,9 +664,11 @@ class VDXRRegistryApp:
                 self.saved_processing_resolution = values[PROCESSING_RESOLUTION_VALUE_NAME]
                 self.processing_resolution_verified = self.profile_valid
                 mode, backend = values[FRAME_GENERATION_VALUE_NAME], values[FRAME_GENERATION_BACKEND_NAME]
+                depth_mode = values[FRAME_GENERATION_DEPTH_MODE_NAME]
                 overrides = sum(source == "profile" for source in sources.values())
+                inherited = sum(source in ("global", "default") for source in sources.values())
                 self.scope_feedback.set(
-                    f"{executable}\n{overrides} game overrides · {len(sources) - overrides} inherited "
+                    f"{executable}\n{overrides} game overrides · {inherited} inherited "
                     "from globals/defaults. New games inherit globals; Save locks current setup; Reset returns to globals."
                     if self.profile_valid else
                     f"{executable}\nProfile rejected · controls show safe display defaults. Reset overrides to recover.")
@@ -623,8 +678,13 @@ class VDXRRegistryApp:
             self.processing_resolution.set(self.saved_processing_resolution)
             self.saved_frame_generation = next(label for label, value in FRAME_GENERATION_MODES.items() if value == mode)
             self.saved_frame_generation_backend = next(label for label, value in FRAME_GENERATION_BACKENDS.items() if value == backend)
+            self.saved_frame_generation_depth_mode = next(
+                label for label, value in FRAME_GENERATION_DEPTH_MODES.items() if value == depth_mode
+            )
             self.frame_generation.set(self.saved_frame_generation)
             self.frame_generation_backend.set(self.saved_frame_generation_backend)
+            self.frame_generation_depth_mode.set(self.saved_frame_generation_depth_mode)
+            self.update_depth_mode_feedback()
             self.save_profile_button.configure(state="normal" if executable is not None and self.profile_valid else "disabled")
             self.set_slider_state()
             self.status.set("; ".join(errors) or ("Showing effective game settings · missing values inherit globals/defaults."
@@ -652,7 +712,8 @@ class VDXRRegistryApp:
         values.update({ENABLE_VALUE_NAME: int(self.enabled.get()),
                        PROCESSING_RESOLUTION_VALUE_NAME: self.processing_resolution.get(),
                        FRAME_GENERATION_VALUE_NAME: FRAME_GENERATION_MODES[self.frame_generation.get()],
-                       FRAME_GENERATION_BACKEND_NAME: FRAME_GENERATION_BACKENDS[self.frame_generation_backend.get()]})
+                       FRAME_GENERATION_BACKEND_NAME: FRAME_GENERATION_BACKENDS[self.frame_generation_backend.get()],
+                       FRAME_GENERATION_DEPTH_MODE_NAME: FRAME_GENERATION_DEPTH_MODES.get(self.frame_generation_depth_mode.get())})
         try:
             # Save locks the complete displayed setup, including inherited values.
             self.profile_store.save(self.profile_executable, values)
@@ -684,6 +745,7 @@ class VDXRRegistryApp:
 
     def on_frame_generation_backend_changed(self, _event=None):
         if self.stage_profile_change():
+            self.update_depth_mode_feedback()
             return
         selection = self.frame_generation_backend.get()
         try:
@@ -697,6 +759,37 @@ class VDXRRegistryApp:
         else:
             self.saved_frame_generation_backend = selection
             self.status.set(f"Saved {selection}; restart the game.")
+        self.update_depth_mode_feedback()
+
+    def update_depth_mode_feedback(self):
+        mode = self.frame_generation_depth_mode.get()
+        if mode == "Standard":
+            message = "Standard · color-only frame generation."
+        elif self.frame_generation_backend.get() != "NVIDIA (default)":
+            message = "Requires usable depth · NVIDIA only. Selected backend unsupported; falls back to standard FG."
+        elif mode == "Depth assist":
+            message = "Requires usable depth. Missing usable depth uses standard FG."
+        else:
+            message = "Requires usable depth and a compatible runtime · NVIDIA only. Otherwise uses standard FG."
+        self.depth_mode_feedback.set(message)
+
+    def on_frame_generation_depth_mode_changed(self, _event=None):
+        if self.stage_profile_change():
+            self.update_depth_mode_feedback()
+            return
+        selection = self.frame_generation_depth_mode.get()
+        try:
+            write_frame_generation_depth_mode(FRAME_GENERATION_DEPTH_MODES[selection])
+        except PermissionError:
+            self.frame_generation_depth_mode.set(self.saved_frame_generation_depth_mode)
+            self.status.set("Administrator access is required to save the reconstruction request.")
+        except (OSError, ValueError, KeyError) as error:
+            self.frame_generation_depth_mode.set(self.saved_frame_generation_depth_mode)
+            self.status.set(f"Frame-generation depth request error: {error}")
+        else:
+            self.saved_frame_generation_depth_mode = selection
+            self.status.set(f"Requested {selection} saved · applies next game launch.")
+        self.update_depth_mode_feedback()
 
     def on_frame_generation_changed(self, _event=None):
         if self.stage_profile_change():

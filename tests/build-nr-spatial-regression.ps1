@@ -1,4 +1,5 @@
-param([switch]$PolicyOnly, [switch]$Hardware, [string]$OutputDirectory='', [string]$VCToolsDirectory='',
+param([switch]$PolicyOnly, [switch]$Hardware, [switch]$CompileOnly, [string]$RuntimeCohort='',
+      [string]$OutputDirectory='', [string]$VCToolsDirectory='',
       [ValidateSet('None','ZeroResidual','EncodedArea','NoTransition','CropDepthAsFullEye','NoShadow','NoChromaToe','SourceOnly','NoNegativeShared')][string]$ShaderControl='None')
 $ErrorActionPreference='Stop'
 $repo=Split-Path -Parent $PSScriptRoot
@@ -62,12 +63,12 @@ if($ShaderControl -ne 'None') {
     # Negative controls compile changed copies, never alter the production files.
     $shaderSource=Join-Path $OutputDirectory "control-$ShaderControl"
     New-Item -ItemType Directory -Force -Path $shaderSource | Out-Null
-    foreach($name in @('NrSpatialCommon.hlsli','NrSpatialDownsampleCS.hlsl','NrSpatialResolvePS.hlsl','NrNativeResolvePS.hlsl','FullScreenQuadVS.hlsl')) {
+    foreach($name in @('NrSpatialCommon.hlsli','PerceptualTransfer.hlsli','NrSpatialDownsampleCS.hlsl','NrSpatialResolvePS.hlsl','NrNativeResolvePS.hlsl','FullScreenQuadVS.hlsl')) {
         Copy-Item -LiteralPath (Join-Path $source $name) -Destination $shaderSource
     }
     if($ShaderControl -eq 'ZeroResidual') {
         $path=Join-Path $shaderSource 'NrSpatialResolvePS.hlsl'
-        $text=[IO.File]::ReadAllText($path).Replace('float3 residual = Decode(answerRaw) - guide;', 'float3 residual = float3(0, 0, 0);')
+        $text=[IO.File]::ReadAllText($path).Replace('residual = TransferPerceptualEdit(nativeLinear, nativeLab, guide, Decode(answerRaw));', 'residual = float3(0, 0, 0);')
     } elseif($ShaderControl -eq 'EncodedArea') {
         $path=Join-Path $shaderSource 'NrSpatialDownsampleCS.hlsl'
         $text=[IO.File]::ReadAllText($path).Replace('float4(Decode(n.rgb), n.a)', 'n').Replace('float4(Encode(mean.rgb), mean.a)', 'mean')
@@ -97,8 +98,19 @@ foreach($shader in @(@('NrSpatialDownsampleCS','cs_5_0'),@('NrSpatialResolvePS',
     & $fxc /nologo /Ges /WX /T $shader[1] /E main /Vn "g_$($shader[0])" /Fh "$OutputDirectory\$($shader[0]).h" "$shaderSource\$($shader[0]).hlsl"
     if($LASTEXITCODE) { throw "Shader compilation failed: $($shader[0])" }
 }
-& cl.exe /nologo /std:c++17 /EHsc /W4 /WX /MT /fp:precise /DNOMINMAX /DNR_SPATIAL_TEST_OBSERVER "/I$OutputDirectory" "$PSScriptRoot\nr_spatial_shader_regression.cpp" "$source\NrSpatialPipeline.cpp" "/Fe:$OutputDirectory\nr_spatial_shader_regression.exe" "/Fo:$OutputDirectory\\" /link d3d12.lib dxgi.lib d3dcompiler.lib
+$installation=$vc
+1..4 | ForEach-Object { $installation=Split-Path -Parent $installation }
+$buildArguments=@()
+if (!$RuntimeCohort) {
+    $RuntimeCohort=Join-Path $OutputDirectory ('runtime-cohort-'+[guid]::NewGuid().ToString('N'))
+    $buildArguments+='--build-runtime'
+}
+# Keep real capture/journaling targets from the matched runtime. Only the
+# pipeline object is replaced, to observe operations and select these shaders.
+& python "$PSScriptRoot/build-fg-runtime-fixtures.py" $RuntimeCohort nr_spatial_shader_regression `
+    --installation $installation --output-directory $OutputDirectory --shader-directory $OutputDirectory @buildArguments
 if($LASTEXITCODE) { throw "GPU fixture compilation failed: $LASTEXITCODE" }
+if($CompileOnly) { Write-Output "PASS: spatial fixture compiled; GPU not run: $OutputDirectory"; exit 0 }
 if($Hardware) { & "$OutputDirectory\nr_spatial_shader_regression.exe" --hardware }
 else { & "$OutputDirectory\nr_spatial_shader_regression.exe" }
 if($LASTEXITCODE) { throw "GPU regression failed: $LASTEXITCODE" }

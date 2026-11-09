@@ -10,9 +10,9 @@ selector chooses stock or custom VDXR for the next VR launch.
 *The screenshots show the actual app with example settings. The appearance sliders are
 examples, not a preset applied by installation.*
 
-The 2026.11.07.1 release includes this same Controls executable with refreshed guides. The earlier-handoff
-improvement is in the runtime and FG module; install the matching runtime package. Your saved global and game
-profiles remain in place.
+The 2026.11.08.1 runtime adds bounded perceptual color transfer for NR processing below 100%.
+It uses the existing Controls layout and settings, with no new toggle. Install the matching runtime package;
+your saved global values, appearance choices and game profiles remain in place.
 
 ## Get started
 
@@ -97,7 +97,7 @@ are reported and skipped without hiding other valid game profiles.
 Profiles live below the existing 64-bit OpenXR registry key at `Profiles/<path identity>`;
 their `ExecutablePath` metadata guards against hash collisions. An older runtime that does
 not support profiles continues to use globals, so install the matching host before relying
-on per-game settings. OFXR 4× also requires the matching new FG module.
+on per-game settings. OFXR 4× requires a matching 4×-capable host and FG module.
 
 ## Controls and when they apply
 
@@ -149,6 +149,13 @@ processing and automatic transition. Coverage 100% with processing 100% retains 
 native path. Zero NR strength preserves the original RGB. Compare faces,
 hair, dark areas and movement before settling on a pair.
 
+With the November 8 runtime, reduced processing transfers NR's lightness and color edits through a
+perceptual color space, with bounded transfer where guide and native colors differ. It runs in the
+existing reconstruction step without another model evaluation, copy or rendering pass. Enable NR and
+use your existing processing setting below 100%, such as 80% or 85%, to use it. Keep your preferred
+coverage, FG and appearance choices; no reset or new profile is needed. Native 100% processing and
+the existing edge weights are unchanged. This is an appearance update, with no claimed FPS gain.
+
 **NR + FG requires coverage of at least 90%** for eligibility. Select OFXR 2×, 3× or 4× while
 comparing 95/80, 90/80 or 90/85. FG consumes complete native stereo output; the saved selection does
 not guarantee that every submission is eligible or that generated frames meet the deadline.
@@ -156,6 +163,23 @@ not guarantee that every submission is eligible or that generated frames meet th
 **Reset NR settings** disables NR and saves its defaults, including 100% processing resolution and 100% coverage.
 It replaces the saved NR appearance choices but preserves the FG mode and backend.
 Installing or upgrading the controls app does not reset your hair/face settings.
+
+## Requested reconstruction mode
+
+The **Requested reconstruction mode** selector saves an independent request:
+
+- **Standard** uses color-only frame generation.
+- **Depth assist** requests depth assistance on the NVIDIA backend.
+- **Depth reconstruction (experimental)** requests reconstruction when the runtime and usable depth support it.
+
+An absent request defaults to Depth assist; existing explicit Standard,
+Depth assist or reconstruction preferences remain unchanged. Unsupported backends
+or unusable depth fall back to standard FG. The selector reports the saved request,
+not the active runtime path. Apply changes on the next game launch.
+
+Globals save immediately. Game choices remain drafts until **Save game profile**;
+Reset restores inheritance without resetting other NR or FG preferences.
+See the [reconstruction mode guide](DEPTH-MODES.md) for support and fallback details.
 
 ## Switch between stock and custom VDXR
 
@@ -222,7 +246,7 @@ From a full source checkout on Windows x64 with Python 3.13 and Tcl/Tk:
 
 Building Controls needs the pinned Python requirements below. The full regression
 command also compiles sampler shaders and requires Windows SDK **10.0.26100.0**
-(including FXC); see the [FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.07.1/tests/frame-generation.md).
+(including FXC); see the [FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.08.1/tests/frame-generation.md).
 
 ```powershell
 python -m venv bin/controls-build-env

@@ -83,6 +83,8 @@ class ControlsPackageTests(unittest.TestCase):
             runtime_guide = b"# Runtime selection\nUse the Runtime selector for the next game launch.\n"
             (snapshot / "docs/SIDE-BY-SIDE-RUNTIME.md").write_bytes(runtime_guide)
             game_guide = b"# Game routing\nKeep a working original launch route.\n"
+            depth_guide = b"# Reconstruction modes\nRequested mode applies next game session.\n"
+            (snapshot / "docs/DEPTH-MODES.md").write_bytes(depth_guide)
             (snapshot / "docs/GAME-COMPATIBILITY.md").write_bytes(game_guide)
             images = {"controls-overview.png": b"overview\r\nbytes", "controls-fg-only.png": b"backend\r\nbytes",
                       "controls-game-profile.png": b"profile\r\nbytes"}
@@ -94,6 +96,9 @@ class ControlsPackageTests(unittest.TestCase):
             self.assertEqual((bundle / "SIDE-BY-SIDE-RUNTIME.md").read_bytes(), runtime_guide)
             self.assertIn("docs/SIDE-BY-SIDE-RUNTIME.md", module.SOURCE_FILES)
             self.assertEqual((bundle / "GAME-COMPATIBILITY.md").read_bytes(), game_guide)
+            self.assertTrue((bundle / "DEPTH-MODES.md").is_file(), "Missing offline reconstruction mode guide")
+            self.assertEqual((bundle / "DEPTH-MODES.md").read_bytes(), depth_guide)
+            self.assertIn("docs/DEPTH-MODES.md", module.SOURCE_FILES)
             self.assertIn("docs/GAME-COMPATIBILITY.md", module.SOURCE_FILES)
             for name, data in images.items():
                 self.assertEqual((bundle / "images" / name).read_bytes(), data)
