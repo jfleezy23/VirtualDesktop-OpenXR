@@ -14,7 +14,7 @@ DEFAULTS = {
     "DLSSNR_LocalToneStrength": 20, "DLSSNR_LocalStructureStrength": 70,
     "DLSSNR_SkinStructureStrength": 50, "FoveationSize": 100,
     "DLSSNR_ProcessingResolution": 100, "FrameGenerationMode": 0,
-    "FrameGenerationBackend": 0,
+    "FrameGenerationBackend": 0, "FrameGenerationDepthMode": 1,
 }
 
 
@@ -60,7 +60,7 @@ def validate(name, value, kind=winreg.REG_DWORD):
         raise ValueError(f"Invalid {name}: an integer DWORD is required.")
     allowed = ((0, 2, 3, 4) if name == "FrameGenerationMode" else
                (0, 1) if name in ("DLSSNR_Enabled", "FrameGenerationBackend") else
-               range(3) if name == "DLSSNR_Style" else
+               range(3) if name in ("DLSSNR_Style", "FrameGenerationDepthMode") else
                range(50, 101) if name == "DLSSNR_ProcessingResolution" else range(101))
     if value not in allowed:
         raise ValueError(f"Invalid {name}: value is outside its supported range.")
@@ -97,7 +97,7 @@ class ProfileStore:
         if stored != (normalize_executable(executable), winreg.REG_SZ):
             raise ValueError("Profile executable identity is missing or mismatched; profile rejected.")
 
-    def load(self, executable=None):
+    def load(self, executable=None, errors=None):
         self._check_identity(executable)
         values, sources = {}, {}
         for name, default in DEFAULTS.items():
@@ -105,7 +105,15 @@ class ProfileStore:
             source = "profile" if executable is not None else "global"
             if stored is None and executable is not None:
                 stored, source = self._read(self.base, name), "global"
-            values[name] = default if stored is None else validate(name, *stored)
+            try:
+                values[name] = default if stored is None else validate(name, *stored)
+            except ValueError as error:
+                # A malformed FG depth request must not reset otherwise valid NR.
+                # Strict callers still reject it; Controls may display a warning.
+                if name != "FrameGenerationDepthMode" or errors is None:
+                    raise
+                values[name], source = default, "invalid"
+                errors.append(f"{error} Depth assist shown; stored request unchanged.")
             sources[name] = "default" if stored is None else source
         return values, sources
 

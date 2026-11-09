@@ -21,13 +21,16 @@ DOC_IMAGES = ("docs/images/controls-overview.png", "docs/images/controls-fg-only
               "docs/images/controls-game-profile.png")
 SOURCE_FILES = (
     "vdxr_registry_gui.py", "vdxr_runtime_selection.py", "vdxr_game_profiles.py",
+    "virtualdesktop-openxr/game_profiles.h",
     "scripts/controls_entry.py", "scripts/controls_self_test.py",
     "scripts/build-controls.py", "scripts/controls-build-requirements.txt",
     "scripts/tests/test_fg_controls.py", "scripts/tests/test_runtime_selection.py", "scripts/tests/test_controls_package.py",
     "scripts/tests/test_nr_spatial_controls.py",
     "scripts/tests/test_game_profiles.py",
+    "scripts/tests/test_depth_controls.py", "scripts/tests/test_controls_candidate_package.py",
+    "scripts/tests/test_controls_self_test_depth.py",
     "scripts/licenses/Tcl-8.6.15.txt", "docs/NR-FG-CONTROLS.md", "docs/SIDE-BY-SIDE-RUNTIME.md",
-    "docs/GAME-COMPATIBILITY.md", "LICENSE",
+    "docs/GAME-COMPATIBILITY.md", "LICENSE", "docs/DEPTH-MODES.md",
     "scripts/licenses/OpenSSL-3.0.16.txt", "scripts/licenses/zlib-1.3.1.txt",
 ) + DOC_IMAGES
 
@@ -75,6 +78,7 @@ def copy_documentation(snapshot, bundle):
     shutil.copyfile(snapshot / "docs/NR-FG-CONTROLS.md", bundle / "README.md")
     shutil.copyfile(snapshot / "docs/SIDE-BY-SIDE-RUNTIME.md", bundle / "SIDE-BY-SIDE-RUNTIME.md")
     shutil.copyfile(snapshot / "docs/GAME-COMPATIBILITY.md", bundle / "GAME-COMPATIBILITY.md")
+    shutil.copyfile(snapshot / "docs/DEPTH-MODES.md", bundle / "DEPTH-MODES.md")
     images = bundle / "images"
     images.mkdir()
     for name in DOC_IMAGES:
@@ -97,6 +101,8 @@ def build(output):
         if sha(destination) != digest:
             raise ValueError(f"Source changed while capturing snapshot: {name}")
     build_env = os.environ.copy()
+    build_env["PYINSTALLER_CONFIG_DIR"] = str(output / "pyinstaller-cache")
+    build_env["PYTHONDONTWRITEBYTECODE"] = "1"
     for name in ("PYTHONPATH", "PYTHONHOME", "TCL_LIBRARY", "TK_LIBRARY"):
         build_env.pop(name, None)
     # Prevent unrelated tools on PATH from supplying DLL dependencies.
