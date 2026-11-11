@@ -31,11 +31,11 @@ that unprivileged programs can modify.
 
 ## Install from the release
 
-The [**2026.11.08.1 release**](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.08.1) supplies the guarded runtime and
+The [**2026.11.10.1 release**](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.10.1) supplies the guarded runtime and
 `CUSTOM-RUNTIME.json` together. Older runtime packages without this metadata are
 not the switcher package. Download the dated runtime ZIP and dated Controls ZIP
-from that release, and verify them against `SHA256SUMS-2026.11.08.1.txt` before continuing.
-Use `VDXR-NR-FG-Windows-x64-2026.11.08.1.zip` and
+from that release, and verify them against `SHA256SUMS-2026.11.10.1.txt` before continuing.
+Use `VDXR-NR-FG-Windows-x64-2026.11.10.1.zip` and
 `VDXR-NR-FG-Controls-Windows-x64-2026.11.08.1.zip` together.
 
 1. Close VR games. Keep Virtual Desktop Streamer's **official** runtime installed.

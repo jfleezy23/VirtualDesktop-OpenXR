@@ -1,8 +1,9 @@
 # Try VDXR NR and OFXR frame generation
 
-The [November 8 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.08.1)
-adds bounded perceptual color transfer to reduced-processing NR. **OFXR 2×/3×/4×**, frame-delivery recovery
-and automatic per-game NR/FG profiles remain included. Use the existing controls; there is no new color toggle.
+The [November 10 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.10.1)
+improves motion distribution during **4× recovery** while retaining bounded perceptual NR color transfer.
+**OFXR 2×/3×/4×**, frame-delivery recovery and automatic per-game NR/FG profiles remain included.
+Use the existing controls; the recovery update has no new toggle. Controls 2026.11.08.1 remains the matching app.
 NR processing resolution and coverage are independent, including **95% coverage / 80% processing** and
 **90% coverage / 85% processing**. FG offers Off, 2×, 3× and 4× and also works with NR off.
 
@@ -22,10 +23,10 @@ it does not provide Steam Frame or ALVR streaming. Frame Launcher's separate Ste
 
 ## Install once
 
-1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.11.08.1.zip` and
+1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.11.10.1.zip` and
    `VDXR-NR-FG-Controls-Windows-x64-2026.11.08.1.zip` from the
-   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.08.1).
-   Check them against `SHA256SUMS-2026.11.08.1.txt`.
+   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.10.1).
+   Check them against `SHA256SUMS-2026.11.10.1.txt`.
 2. Follow the [complete side-by-side setup](SIDE-BY-SIDE-RUNTIME.md). It installs the matching host DLL, FG DLL
    and `CUSTOM-RUNTIME.json` under `%ProgramFiles%\VDXR-NR-FG\OpenXR`, then registers the managed path.
    Keep this release's host, FG module and metadata together; older hosts or modules may not support 4×.

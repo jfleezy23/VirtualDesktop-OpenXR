@@ -246,7 +246,7 @@ From a full source checkout on Windows x64 with Python 3.13 and Tcl/Tk:
 
 Building Controls needs the pinned Python requirements below. The full regression
 command also compiles sampler shaders and requires Windows SDK **10.0.26100.0**
-(including FXC); see the [FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.08.1/tests/frame-generation.md).
+(including FXC); see the [FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.10.1/tests/frame-generation.md).
 
 ```powershell
 python -m venv bin/controls-build-env
