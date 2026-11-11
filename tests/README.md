@@ -62,6 +62,12 @@ Run fixtures in separate bounded child processes. Require successful completion,
 
 ## Upstream contract regressions
 
+`nr_fg_4x_phase_regression` is a CPU-only companion to the presenter test. It checks evenly spaced 4X content samples
+for stretched source intervals while native deadlines and role order remain unchanged, plus 2X/3X controls, integer
+rounding, endpoint/fraction agreement, admission guards and overflow boundaries. Build it with
+`build-fg-runtime-fixtures.py <fresh-runtime-cohort> nr_fg_4x_phase_regression`, or run the FG CMake test `fg_4x_phase`.
+This checks the sample-time contract; it does not measure headset pacing or prove GPU output quality.
+
 `nr_fg_early_dispatch_regression` checks the actual `xrEndFrame` ordering with software D3D11/D3D12 devices.
 It covers 96 cases across 2X/3X/4X, NR enabled/disabled, error/cancellation, and excluded API/device paths.
 While producer admission is closed, only an eligible D3D11 application's context may flush; submission operations,

@@ -23,7 +23,20 @@ namespace virtualdesktop_openxr {
         std::array<int64_t, 4> targets{};
         std::array<float, 3> fractions{};
         uint32_t count{1};
+        // Optional synthesis sample times; native presentation/deadline targets stay above.
+        std::array<int64_t, 3> synthesisTimes{};
+        int64_t synthesisTime(unsigned slot) const noexcept {
+            if (slot >= targets.size())
+                return 0;
+            return slot + 1 < count && slot < synthesisTimes.size() && synthesisTimes[slot] > 0 ? synthesisTimes[slot]
+                                                                                                : targets[slot];
+        }
     };
+
+    // Apply only after the cadence planner admits a complete group.
+    bool applyUniformStretchedFourSamples(FrameGenerationSlotPlan& plan,
+                                          int64_t previousTime,
+                                          int64_t currentTime) noexcept;
 
     class FrameGenerationCadence {
       public:

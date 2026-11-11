@@ -171,6 +171,8 @@ jobs:
             $compilerDirectory = [IO.DirectoryInfo](Split-Path (Get-Command cl.exe -ErrorAction Stop).Source)
             & tests/build-game-profiles-regression.ps1 -OutputDirectory 'bin/community/game-profiles' -VCToolsDirectory $compilerDirectory.Parent.Parent.Parent.FullName
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & tests/vr_input_build.cmd -SourceDirectory $source -RuntimeObjectDirectory $objects -TestSource 'nr_fg_4x_phase_regression.cpp' -Toolset $env:VDXR_TOOLSET
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           foreach ($fixture in @('vr_input_regression.cpp', 'vr_input_watcher_regression.cpp', 'nonnr_input_regression.cpp', 'nonnr_gpu_timer_regression.cpp', 'nonnr_async_regression.cpp', 'nonnr_copy_preprocess_regression.cpp', 'nonnr_gl_regression.cpp')) {
             & tests/vr_input_build.cmd -SourceDirectory $source -RuntimeObjectDirectory $objects -TestSource $fixture -Toolset $env:VDXR_TOOLSET
@@ -224,6 +226,9 @@ jobs:
           }
           Invoke-Regression 'bin/vr-input-tests/vr_input_regression.exe' @() 'input'
           Invoke-Regression 'bin/vr-input-tests/vr_input_watcher_regression.exe' @() 'watcher'
+          if ($env:VDXR_TOOLSET -eq 'v145') {
+            Invoke-Regression 'bin/vr-input-tests/nr_fg_4x_phase_regression.exe' @() '4x-phase'
+          }
           Invoke-Regression 'bin/vr-input-tests/nonnr_gpu_timer_regression.exe' @('contract') 'nonnr-gpu-timer'
           Invoke-Regression 'bin/vr-input-tests/nonnr_gl_regression.exe' @('initial-wgl') 'nonnr-gl-initial-wgl'
           Invoke-Regression 'bin/vr-input-tests/nonnr_gl_regression.exe' @('double-fault') 'nonnr-gl-double-fault'

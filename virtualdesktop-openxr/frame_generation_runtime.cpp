@@ -353,6 +353,9 @@ namespace virtualdesktop_openxr {
         }
         input.slots = m_frameGenerationCadence.plan(
             m_fgBegunReservation, m_fgPreviousCapturedTime, m_fgPreviousCapturedTime != 0);
+        // Distribute stretched 4x content steps without moving
+        // native presentation targets, pose predictions, or readiness deadlines.
+        applyUniformStretchedFourSamples(input.slots, m_fgPreviousCapturedTime, input.time);
         const bool collectDepthDiagnostics = IsTraceEnabled();
         FrameGeneration::CaptureDiagnostics depthDiagnostics{};
         const auto result = m_frameGeneration->capture(
@@ -1215,6 +1218,11 @@ namespace virtualdesktop_openxr {
                                           TLArg(requestedRole, "RequestedRole"),
                                           TLArg(fraction, "Fraction"),
                                           TLArg(target, "ReservedPhotonTarget"),
+                                          TLArg(!hasGpuOutput ? 0
+                                                : selectedRole == FrameGenerationRole::real
+                                                    ? reservation.currentTarget
+                                                    : transaction.slots.synthesisTime(slot),
+                                                "SynthesisSampleTime"),
                                           TLArg(reservation.period, "NativePeriod"),
                                           TLArg(timing.waitEnter, "WaitEnter"),
                                           TLArg(timing.waitReturn, "WaitReturn"),
