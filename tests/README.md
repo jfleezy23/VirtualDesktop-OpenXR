@@ -68,6 +68,18 @@ rounding, endpoint/fraction agreement, admission guards and overflow boundaries.
 `build-fg-runtime-fixtures.py <fresh-runtime-cohort> nr_fg_4x_phase_regression`, or run the FG CMake test `fg_4x_phase`.
 This checks the sample-time contract; it does not measure headset pacing or prove GPU output quality.
 
+`nr_fg_4x_capture_regression` is the manual GPU wiring companion. Build it against the same fresh runtime cohort,
+then run with `<assets> <new-state-directory> 4 nr-off colour d3d11` (repeat with `nr-on`). A test-only prediction
+step creates a stretched source pair through public `xrEndFrame`; the observer requires the real module to receive
+and accept all three quarter-step timestamps, matching fractions and the original B endpoint, plus nominal controls.
+It does not hand-prepare the corrected plan or claim to measure headset scanout.
+
+`nr_fg_last_copy_gate_regression` and `nr_fg_current_copy_gate_regression` are manual GPU tests, not headless CI
+checks. Build them with `build-fg-runtime-fixtures.py` against a fresh runtime cohort. Using isolated test assets,
+run each executable with `<assets> <new-state-directory> 4 nr-off colour d3d11`. They distinguish a ready selected
+image from a pending selected image while later GPU work is gated. Fence completion is observed after releasing
+the GPU gate with the producer lease still held; these tests do not establish headset display timing.
+
 `nr_fg_early_dispatch_regression` checks the actual `xrEndFrame` ordering with software D3D11/D3D12 devices.
 It covers 96 cases across 2X/3X/4X, NR enabled/disabled, error/cancellation, and excluded API/device paths.
 While producer admission is closed, only an eligible D3D11 application's context may flush; submission operations,

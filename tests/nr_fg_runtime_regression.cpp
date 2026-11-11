@@ -679,8 +679,15 @@ namespace {
     unsigned nativeRate = 120;
     bool predictionJitter{};
     uint64_t nextWaitId{};
+#ifdef VDXR_4X_CAPTURE_REGRESSION
+    std::atomic<long long> phaseStretchFirstId{std::numeric_limits<long long>::max()};
+#endif
     double OVR_CDECL stablePrediction(ovrSession, long long id) {
-        return clockBase.load() + id / static_cast<double>(nativeRate) + (predictionJitter ? id * .000005 : 0.);
+        return clockBase.load() + id / static_cast<double>(nativeRate) + (predictionJitter ? id * .000005 : 0.)
+#ifdef VDXR_4X_CAPTURE_REGRESSION
+               + (id >= phaseStretchFirstId.load() ? .012 : 0.)
+#endif
+            ;
     }
     ovrHmdDesc OVR_CDECL display120(ovrSession session) {
         auto info = originalDisplay(session);

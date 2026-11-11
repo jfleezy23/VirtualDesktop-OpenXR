@@ -62,10 +62,34 @@ static void prebeginThaw() {
         prebegin.clockFrozen = false;
     }
 }
+#ifdef VDXR_4X_CAPTURE_REGRESSION
+#include "nr_fg_4x_capture_access.inc"
+#endif
 static HRESULT WINAPI prebeginSubmit(void* context, const VDXRFG_SubmitInfoV3* info, VDXRFG_TicketV1* ticket) noexcept {
+#ifdef VDXR_4X_CAPTURE_REGRESSION
+    bool phaseWasStretched{};
+    try {
+        phaseWasStretched = phaseCheckRequest(info);
+    } catch (const std::exception& error) {
+        std::cerr << "PHASE_CAPTURE_ERROR " << error.what() << '\n';
+        std::lock_guard lock(prebegin.mutex);
+        prebegin.failure = std::current_exception();
+        return E_FAIL;
+    }
+#endif
     const auto result = prebeginOriginalSubmit(context, info, ticket);
     if (FAILED(result) || !info || !ticket || !ticket->token)
         return result;
+#ifdef VDXR_4X_CAPTURE_REGRESSION
+    try {
+        phaseAccepted(info, ticket, phaseWasStretched);
+    } catch (const std::exception& error) {
+        std::cerr << "PHASE_CAPTURE_ERROR " << error.what() << '\n';
+        std::lock_guard lock(prebegin.mutex);
+        // Preserve the successful return and live ticket so production cleanup still owns every GPU resource.
+        prebegin.failure = std::current_exception();
+    }
+#endif
     bool selected{};
     {
         std::lock_guard lock(prebegin.mutex);
@@ -204,8 +228,12 @@ static std::vector<uint8_t> prebeginPixels(unsigned role, int image) {
     return viewportPixels(texture, {{0, 0}, {static_cast<int>(desc.Width), static_cast<int>(desc.Height)}});
 }
 static void prebeginBeforeFrame(unsigned frame) {
-    if (frame == 4)
+    if (frame == 4) {
         drain();
+#ifdef VDXR_4X_CAPTURE_REGRESSION
+        phaseStretchFirstId = static_cast<long long>(runtime().m_fgNextReservedNativeId);
+#endif
+    }
     if (frame != 5)
         return;
     std::unique_lock lock(prebegin.mutex);
@@ -508,4 +536,8 @@ static void prebeginVerify() {
             "held Begin overlap retains pixels, completes every native role, and serializes all SDK render phases");
     std::cout << "PREBEGIN_VERIFIED current_ends=" << prebegin.observedEnds
               << " max_sdk_render_calls=" << prebegin.maxRenderCalls << '\n';
+#ifdef VDXR_4X_CAPTURE_REGRESSION
+    require(phaseStretched && phaseNominal, "real module accepted both stretched-quarter and nominal public captures");
+    std::cout << "PHASE_CAPTURE_VERIFIED stretched=" << phaseStretched << " nominal=" << phaseNominal << '\n';
+#endif
 }
