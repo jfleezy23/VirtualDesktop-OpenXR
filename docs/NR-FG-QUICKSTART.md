@@ -42,7 +42,7 @@ app can live in its own extracted folder. Existing NR, appearance and FG setting
 ## First comparison
 
 If you already have a working setup, keep it. Upgrading preserves NR, FG, coverage and appearance settings;
-the new color transfer applies automatically while NR is enabled and processing is below 100%.
+bounded color transfer applies automatically while NR is enabled and processing is below 100%.
 
 1. Turn Virtual Desktop's **SSW Off**, and disable any separate external FG layer.
 2. Choose **Globals** for defaults, or select the actual game EXE with **Add game EXE…** for a game profile.
@@ -137,7 +137,7 @@ not automatically converted by selecting VDXR. Routing a game successfully does 
 Rapid head turns, ghosting and exposure-change artifacts can remain. This release does not establish universal
 game compatibility, artifact-free motion or identical perceived detail at every processing percentage.
 The color update is an appearance change, with no claimed FPS gain or reduced headset latency.
-See the [release notes](releases/2026.11.08.1.md) for scope.
+See the [release notes](releases/2026.11.10.1.md) for scope.
 
 ## Source and licenses
 

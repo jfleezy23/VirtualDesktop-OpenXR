@@ -32,8 +32,9 @@ preferred NR, FG, coverage and appearance settings. **Native 100% processing is 
 
 **4× frame recovery** keeps later useful generated images when an earlier slot misses its deadline,
 with real frames available as fallback. The release also retains the earlier delivery improvements for
-**2×/3×/4×**, NR on or off: the next real frame can prepare during native waiting, and completed images
-can present without waiting for its producer lock. See the [pacing notes](docs/frame-delivery-pacing.md).
+**2×/3×/4×**, NR on or off: the next real frame can prepare during native waiting, and a completed image's
+CPU handoff can proceed without reacquiring that producer lock. See the
+[pacing notes](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.10.1/docs/frame-delivery-pacing.md).
 
 **Earlier frame handoff** lets the first generated stereo image reach Virtual Desktop while later images
 finish on supported synthesis paths. Install this release's matching host, FG module and metadata together;
