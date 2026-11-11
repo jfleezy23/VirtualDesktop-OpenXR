@@ -66,6 +66,38 @@ namespace virtualdesktop_openxr {
         return candidate;
     }
 
+    bool applyUniformStretchedFourSamples(FrameGenerationSlotPlan& plan,
+                                          int64_t previousTime,
+                                          int64_t currentTime) noexcept {
+        const std::array<FrameGenerationRole, 4> roles{FrameGenerationRole::synthetic1,
+                                                       FrameGenerationRole::synthetic2,
+                                                       FrameGenerationRole::synthetic3,
+                                                       FrameGenerationRole::real};
+        if (plan.count != 4 || plan.roles != roles || previousTime <= 0 || currentTime <= previousTime ||
+            plan.targets[3] != currentTime || plan.targets[0] <= 0 || plan.targets[1] <= plan.targets[0])
+            return false;
+        const int64_t period = plan.targets[1] - plan.targets[0];
+        if (period > 1000000000 || plan.targets[2] <= plan.targets[1] || plan.targets[2] - plan.targets[1] != period ||
+            plan.targets[3] <= plan.targets[2] || plan.targets[3] - plan.targets[2] != period)
+            return false;
+        const int64_t interval = currentTime - previousTime;
+        if (interval <= 4 * period)
+            return false;
+        auto candidate = plan;
+        const int64_t quotient = interval / 4;
+        const int64_t remainder = interval % 4;
+        for (int64_t k = 1; k < 4; ++k) {
+            const int64_t offset = k * quotient + (k * remainder) / 4;
+            candidate.synthesisTimes[static_cast<unsigned>(k - 1)] = previousTime + offset;
+            candidate.fractions[static_cast<unsigned>(k - 1)] =
+                static_cast<float>(static_cast<double>(offset) / static_cast<double>(interval));
+        }
+        if (candidate.synthesisTimes == plan.synthesisTimes && candidate.fractions == plan.fractions)
+            return false;
+        plan = candidate;
+        return true;
+    }
+
     bool FrameGenerationCadence::onTime(const FrameGenerationSlotPlan& plan, int64_t now) const noexcept {
         return plan.count && now >= 0 && now <= plan.targets[0];
     }

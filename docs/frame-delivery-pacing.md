@@ -2,7 +2,7 @@
 
 The experimental runtime lets the next real frame prepare while Virtual Desktop
 waits to begin presenting the current frame group. A completed generated image
-does not need to reacquire the next frame's producer-context lock before delivery.
+does not need to reacquire the next frame's producer-context lock before its CPU handoff.
 This applies to 2×, 3× and 4×, with NR enabled or disabled.
 
 The native SDK's Wait/Begin/End ordering is preserved. GPU completion, bank ownership
@@ -17,6 +17,42 @@ mixing intermediate headers or object files. See the
 Licensed NR components must be supplied separately; none are included here.
 
 ## Local evidence
+
+### November 10: distribute recovery motion across 4× images
+
+When a real-frame pair spans longer than four native display intervals, the runtime
+now places its three synthetic samples at one-quarter, one-half and three-quarters
+of that source interval. The real endpoint stays at the end. Previously, most of
+the extra motion could land in the first synthetic image even when delivery was
+evenly spaced. The sampling change preserves native deadlines, pose metadata and image ownership.
+
+The release also qualifies independent CPU handoff using the selected image's
+completion fence, rather than a later synthetic destination's fence. GPU completion
+and retirement remain protected. This does not establish that the headset displays
+S1 before later GPU work finishes.
+
+The sampling adjustment affects admitted stretched 4× groups only. That adjustment
+does not alter nominal cadence, 2×/3×, NR processing or appearance settings. It adds no image copy,
+GPU pass or sleep. The runtime keeps split Wait/Begin/End submission; the separate
+combined-Submit experiment was not selected for this release.
+
+In a Quest 3 / RTX 4090 Aircar comparison at 120 Hz and 3776×4032 per eye, a separate
+host containing the same sampling change was reported to recover more gracefully.
+That capture used the combined-Submit alternative. The source-phase trace confirmed
+quarter-step sampling after stretched pairs. The comparison did not demonstrate fewer long SDK
+stalls, and CPU handoff times do not prove headset scanout. The release is a motion
+recovery change, not a guaranteed FPS or latency improvement.
+
+The released host passed the GPU/worker checks separately; it was not the host used
+for that headset capture. The release assets retain the exact locally selected host. Its corresponding-source
+archive includes the as-built snapshot and a portable build recipe. The public
+branch carries the narrow sampling change without reverting its unrelated NR work.
+The retained host also carries previously local 2×/3× recovery behavior: after a
+late Begin, it may select a later ready generated image or reuse a committed one.
+That behavior is included in the as-built capsule but is not introduced into the
+public branch by the new quarter-sampling change.
+
+### Earlier delivery improvement
 
 A steady-flight Aircar capture used NVIDIA 4× at 120 Hz with NR off. The earlier
 build delivered 17,611 native handoffs over 147 seconds; this build delivered

@@ -133,6 +133,7 @@ def main():
                             module, signal, "host", multiplier)
     if args.suite in {"presenter", "all"}:
         module_case("cadence", "nr_fg_presenter_regression")
+        module_case("4x-phase", "nr_fg_4x_phase_regression")
 
     inherited_clock = os.environ.get("VDXR_FG_TEST_REFRESH_RATE")
     manifest = {"suite": args.suite, "module_sha256": sha256(module), "results": [],

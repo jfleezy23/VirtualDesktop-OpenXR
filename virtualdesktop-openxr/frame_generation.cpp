@@ -1091,7 +1091,7 @@ namespace virtualdesktop_openxr {
             }
         }
         for (uint32_t slot = 0; slot < input.slots.count; ++slot) {
-            submit.target_time_ns[slot] = input.slots.targets[slot];
+            submit.target_time_ns[slot] = input.slots.synthesisTime(slot);
             if (slot < input.slots.count - 1) {
                 if (input.slots.roles[slot] != (slot == 0   ? FrameGenerationRole::synthetic1
                                                 : slot == 1 ? FrameGenerationRole::synthetic2

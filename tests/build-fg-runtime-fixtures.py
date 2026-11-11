@@ -102,6 +102,8 @@ for source in args.sources:
     if name in {'nr_fg_runtime_regression', 'nr_spatial_runtime_regression', 'nr_input_toggle_regression',
                 'runtime_delivery_regression', 'native_runtime_delivery_probe', 'controlled_runtime_delivery_probe',
                 'nr_fg_prebegin_overlap_regression', 'nr_fg_prebegin_fast_begin_regression',
+                'nr_fg_4x_capture_regression',
+                'nr_fg_last_copy_gate_regression', 'nr_fg_current_copy_gate_regression',
                 'nr_fg_prebegin_failure_regression', 'nr_fg_prebegin_cancel_regression',
                 'nr_fg_copy_ready_poison_regression', 'nr_fg_pending_current_copy_regression'}:
         flags += ['/DVDXR_NR_SPATIAL_CANDIDATE=1']
@@ -132,6 +134,7 @@ for source in args.sources:
         compile_helper('context-methods', 'tests/context_method_addresses.cpp')
     if name in {'fg_delivery_isolation_regression', 'fg_delivery_dependencies_regression',
                 'delivery_transport_regression', 'nr_fg_copy_ready_poison_regression',
+                'nr_fg_last_copy_gate_regression', 'nr_fg_current_copy_gate_regression',
                 'nr_fg_pending_current_copy_regression'}:
         compile_helper('delivery-context-slots', 'tests/delivery_context_slots.cpp')
     if name == 'fg_delivery_dependencies_regression':
@@ -139,7 +142,9 @@ for source in args.sources:
     # Only isolated SDK fixtures replace system.obj. Native probes retain the real SDK loader.
     private_system = name in {'nr_fg_closed_cycle_recovery_regression', 'nr_fg_recovery_copy_regression',
                              'controlled_runtime_delivery_probe', 'nr_fg_prebegin_overlap_regression',
+                             'nr_fg_4x_capture_regression',
                              'nr_fg_prebegin_fast_begin_regression', 'nr_fg_prebegin_failure_regression',
+                             'nr_fg_last_copy_gate_regression', 'nr_fg_current_copy_gate_regression',
                              'nr_fg_prebegin_cancel_regression', 'nr_fg_copy_ready_poison_regression',
                              'nr_fg_pending_current_copy_regression', 'fg_delivery_isolation_regression',
                              'fg_delivery_dependencies_regression', 'delivery_transport_regression',
