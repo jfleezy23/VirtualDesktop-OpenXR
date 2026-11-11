@@ -98,8 +98,11 @@ The packaged metadata has schema `1`, `self_redirect_guard: true`, the exact hos
 `host_sha256`, `fg_sha256`, and `source_revision`. It binds the guarded DLL to the supplied
 metadata; it is not a digital signature. Do not manufacture this marker for an
 older DLL or copy it from a different build. The Controls app checks the hash
-without loading runtime code. The source revision identifies the published source snapshot; `build_base_revision` records the revision
-embedded in the tested host. The build receipts retain its exact as-built inputs. Controls has its own build base.
+without loading runtime code. `source_revision` identifies the publication snapshot,
+not necessarily the source compiled into the supplied DLL. The corresponding-source
+ZIP's `SOURCE-MANIFEST.json` records the retained host inputs and their path
+relocations; `BUILD-SOURCE.md` explains the build recipe and its limits. Controls
+retains its own original build provenance.
 
 ### Upgrade an existing managed installation
 

@@ -588,3 +588,12 @@ Cette limitation concerne:
 Elle s'applique �galement, m�me si Microsoft connaissait ou devrait conna�tre l'�ventualit� d'un tel dommage. Si votre pays n'autorise pas l'exclusion ou la limitation de responsabilit� pour les dommages indirects, accessoires ou de quelque nature que ce soit, il se peut que la limitation ou l'exclusion ci-dessus ne s'appliquera pas � votre �gard.
 
 EFFET JURIDIQUE. Le pr�sent contrat d�crit certains droits juridiques. Vous pourriez avoir d'autres droits pr�vus par les lois de votre pays. Le pr�sent contrat ne modifie pas les droits que vous conf�rent les lois de votre pays si celles-ci ne le permettent pas.
+
+Additional notices for the retained Controls app and runtime
+-----------------------------------------------------------
+
+The Controls 2026.11.08.1 archive is retained unchanged. Its `licenses/Python.txt` already includes the Python and libffi notices. Additional notices supplied with this release cover the PyInstaller 6.22.3 bootloader and embedded runtime hooks (`licenses/PyInstaller-6.22.3-COPYING.txt`, including its bootloader exception) and the Microsoft Visual C++ Runtime 2015–2022 (`licenses/Microsoft-Visual-C-Runtime-2015-2022-License.txt`).
+
+The frozen host also uses Microsoft Detours 4.0.1 and the Windows Implementation Library 1.0.220201.1. Their notices are included as `licenses/Detours-4.0.1-MIT.txt`, `licenses/WIL-1.0.220201.1-LICENSE.txt`, and `licenses/WIL-1.0.220201.1-ThirdPartyNotices.txt`.
+
+These notice files supplement the retained archive; the runtime DLLs and Controls executable are unchanged.

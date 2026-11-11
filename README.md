@@ -100,7 +100,7 @@ close the game, select **Stock VDXR**, then launch again.
 | Branch | Purpose |
 | --- | --- |
 | [stable](https://github.com/jfleezy23/VirtualDesktop-OpenXR/tree/stable) — default | General runtime fixes. No NR/NGX integration. |
-| [experimental-nr](https://github.com/jfleezy23/VirtualDesktop-OpenXR/tree/experimental-nr) | NR and optional OFXR development; Windows x64. NR/FG downloads come from this branch. |
+| [experimental-nr](https://github.com/jfleezy23/VirtualDesktop-OpenXR/tree/experimental-nr) | NR/FG development happens on this branch. Each dated release provides a separate corresponding-source ZIP for the shipped binaries. Its as-built sources can differ from the branch tip. |
 
 This README is shared between the branches; the dated links above open the NR release's own guides and images.
 `stable` describes the general runtime branch, not universal game compatibility. There is no separate public `main` branch.
