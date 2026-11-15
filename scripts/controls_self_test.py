@@ -129,6 +129,9 @@ def run(result_path):
         runtime = gui.runtime_selection
         runtime_path = runtime.RUNTIME_REGISTRY_PATH
         check(app.runtime_selection.get() == runtime.STOCK_LABEL, "missing redirect displays Stock VDXR")
+        check(str(app.nr_toggle.cget("state")) == "disabled"
+              and str(app.fg_selector.cget("state")) == "disabled",
+              "Stock startup disables NR and FG controls")
         temporary = tempfile.TemporaryDirectory(prefix="VDXRControlsSelfTest-")
         host = Path(temporary.name) / "virtualdesktop-openxr.dll"
         host.write_bytes(b"controls self-test fixture; never loaded")
@@ -147,6 +150,22 @@ def run(result_path):
             runtime_selector.event_generate("<<ComboboxSelected>>")
             root.update()
             check(runtime.read_selection() == label, f"actual runtime switch: {label}")
+            if label == runtime.STOCK_LABEL:
+                snapshot_before_disabled_click = snapshot()
+                app.nr_toggle.invoke()
+                app.reset_button.invoke()
+                check(snapshot() == snapshot_before_disabled_click,
+                      "disabled Stock NR/reset clicks preserve settings")
+                check(all(str(w.cget("state")) == "disabled" for w in
+                          (app.nr_toggle, app.fg_selector, app.backend_selector, app.depth_mode_selector,
+                           app.add_profile_button, app.reset_button, app.save_profile_button,
+                           *app.slider_widgets, app.processing_resolution_slider)),
+                      "Stock switch disables all Custom NR/FG editing")
+            else:
+                check(str(app.nr_toggle.cget("state")) == "normal"
+                      and all(str(w.cget("state")) == "readonly" for w in
+                              (app.fg_selector, app.backend_selector, app.depth_mode_selector)),
+                      "Custom switch restores NR/FG controls")
             if label == runtime.CUSTOM_LABEL:
                 check(read(runtime.REDIRECT_VALUE_NAME, runtime_path) == (str(host), winreg.REG_SZ),
                       "custom writes real REG_SZ redirect in private HKLM")

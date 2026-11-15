@@ -409,6 +409,103 @@ class FrameGenerationControlsTests(unittest.TestCase):
         self.assertEqual(app.runtime_selection.get(), "Stock VDXR")
         self.assertEqual(self.registry.writes, [])
 
+    def feature_controls(self, app):
+        def descendants(parent):
+            for child in parent.winfo_children():
+                yield child
+                yield from descendants(child)
+        widgets = list(descendants(self.root))
+        toggle = next(w for w in widgets if isinstance(w, gui.ttk.Checkbutton)
+                      and str(w.cget("variable")) == str(app.enabled))
+        selectors = [next(w for w in widgets if isinstance(w, gui.ttk.Combobox)
+                          and str(w.cget("textvariable")) == str(variable))
+                     for variable in (app.frame_generation, app.frame_generation_backend, app.frame_generation_depth_mode)]
+        return toggle, selectors
+
+    def test_stock_disables_nr_fg_and_reset_without_changing_saved_settings(self):
+        self.registry.values.update({"FrameGenerationMode": (4, 4), "DLSSNR_Intensity": (89, 4)})
+        before = self.registry.values.copy()
+        app = self.app()
+        toggle, selectors = self.feature_controls(app)
+        for widget in [toggle, *selectors, *app.slider_widgets, app.processing_resolution_slider, app.reset_button]:
+            self.assertEqual(str(widget.cget("state")), "disabled")
+        toggle.invoke()
+        app.reset_button.invoke()
+        self.assertEqual(self.registry.values, before)
+        self.assertEqual(self.registry.writes, [])
+        self.assertTrue(app.enabled.get(), "Saved Custom NR preference must remain visible")
+        labels = []
+        def read_labels(parent):
+            for child in parent.winfo_children():
+                if isinstance(child, gui.ttk.Label):
+                    variable = str(child.cget("textvariable"))
+                    labels.append(str(self.root.getvar(variable)) if variable else str(child.cget("text")))
+                read_labels(child)
+        read_labels(self.root)
+        self.assertTrue(any("stock" in text.lower() and "not support" in text.lower() for text in labels))
+
+    def test_switching_back_to_custom_restores_controls_and_preserves_nr_off(self):
+        self.runtime_fixture()
+        self.registry.values["DLSSNR_Enabled"] = (0, 4)
+        app = self.app()
+        app.runtime_selection.set("Custom VDXR")
+        app.on_runtime_changed()
+        toggle, selectors = self.feature_controls(app)
+        self.assertEqual(str(toggle.cget("state")), "normal")
+        self.assertTrue(all(str(w.cget("state")) == "readonly" for w in selectors))
+        self.assertTrue(all(str(w.cget("state")) == "disabled" for w in app.slider_widgets))
+        app.runtime_selection.set("Stock VDXR")
+        app.on_runtime_changed()
+        self.assertTrue(all(str(w.cget("state")) == "disabled" for w in [toggle, *selectors]))
+        app.load_scope(None)
+        self.assertTrue(all(str(w.cget("state")) == "disabled" for w in [toggle, *selectors]))
+
+    def test_failed_custom_switch_leaves_stock_features_disabled(self):
+        self.runtime_fixture()
+        app = self.app()
+        self.registry.denied = True
+        app.runtime_selection.set("Custom VDXR")
+        app.on_runtime_changed()
+        toggle, selectors = self.feature_controls(app)
+        self.assertEqual(app.runtime_selection.get(), "Stock VDXR")
+        self.assertTrue(all(str(w.cget("state")) == "disabled" for w in [toggle, *selectors]))
+
+    def test_custom_restores_enabled_nr_and_game_save_after_stock(self):
+        self.runtime_fixture()
+        before = self.registry.values.copy()
+        app = self.app()
+        app.load_scope(r"C:\\Games\\sample.exe")
+        self.assertEqual(str(app.save_profile_button.cget("state")), "disabled")
+        app.runtime_selection.set("Custom VDXR")
+        app.on_runtime_changed()
+        toggle, selectors = self.feature_controls(app)
+        self.assertTrue(all(str(w.cget("state")) == "normal" for w in
+                            [toggle, *app.slider_widgets, app.processing_resolution_slider, app.save_profile_button]))
+        self.assertTrue(all(str(w.cget("state")) == "readonly" for w in selectors))
+        self.assertEqual(self.registry.values, before)
+
+    def test_leaving_custom_resolves_profile_draft_before_stock(self):
+        support, _, values = self.runtime_fixture()
+        app = self.app()
+        app.runtime_selection.set("Custom VDXR")
+        app.on_runtime_changed()
+        app.load_scope(r"C:\Games\sample.exe")
+        app.variables[1].set(73)
+        self.assertTrue(app.profile_dirty)
+        with mock.patch.object(gui.messagebox, "askyesnocancel", return_value=None):
+            app.runtime_selection.set("Stock VDXR")
+            app.on_runtime_changed()
+        self.assertEqual(app.runtime_selection.get(), "Custom VDXR")
+        self.assertIn(support.REDIRECT_VALUE_NAME, values)
+        with mock.patch.object(gui.messagebox, "askyesnocancel", return_value=False):
+            app.runtime_selection.set("Stock VDXR")
+            app.on_runtime_changed()
+        self.assertFalse(app.profile_dirty)
+        self.assertNotIn(support.REDIRECT_VALUE_NAME, values)
+        with mock.patch.object(app.profile_store, "save") as save:
+            self.assertFalse(app.save_profile())
+            save.assert_not_called()
+
     def test_runtime_selection_autosaves_only_redirect_and_stock_retains_custom_path(self):
         support, host, values = self.runtime_fixture()
         self.registry.values.update({"FrameGenerationMode": (3, 4), "FrameGenerationBackend": (1, 4)})
@@ -433,6 +530,15 @@ class FrameGenerationControlsTests(unittest.TestCase):
         self.assertEqual(app.runtime_selection.get(), "Other/unknown override")
         self.assertIn("unknown", app.status.get().lower())
         self.assertEqual(self.registry.writes, [])
+
+    def test_launch_tree_restart_is_explained_after_runtime_switch(self):
+        self.runtime_fixture()
+        app = self.app()
+        app.runtime_selection.set("Stock VDXR")
+        with mock.patch.object(gui.runtime_selection, "write_selection", return_value=True):
+            app.on_runtime_changed()
+        self.assertIn("reconnect", app.status.get().lower())
+        self.assertIn("next game launch", app.status.get().lower())
 
     def test_runtime_permission_failure_restores_verified_choice(self):
         _, _, values = self.runtime_fixture()

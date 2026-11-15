@@ -43,7 +43,8 @@ class DepthFixture(unittest.TestCase):
         self.addCleanup(self.root.destroy)
 
     def app(self, store=None):
-        app = gui.VDXRRegistryApp(self.root, profile_store=store)
+        with mock.patch.object(gui.runtime_selection, "read_selection", return_value="Custom VDXR"):
+            app = gui.VDXRRegistryApp(self.root, profile_store=store)
         self.assertTrue(hasattr(app, "frame_generation_depth_mode"), "Missing requested reconstruction mode")
         return app
 

@@ -171,6 +171,41 @@ class RuntimeSelectionTests(unittest.TestCase):
                 runtime.write_selection(label)
         self.assertEqual(self.registry.writes, [])
 
+    def test_managed_launch_tree_selection_uses_the_transaction_coordinator(self):
+        values = self.managed(redirected=True)
+        config = self.host.with_name("launch-trees.json")
+        config.write_text("{}", encoding="utf-8")
+        values["launch_trees_config"] = (str(config), self.registry.REG_SZ)
+        coordinator = mock.Mock()
+        coordinator.inspect_selection.return_value = True
+        def activate(path, label, host):
+            self.assertEqual(path, config)
+            self.assertEqual(host, self.host)
+            if label == runtime.STOCK_LABEL:
+                values.pop(runtime.REDIRECT_VALUE_NAME, None)
+            else:
+                values[runtime.REDIRECT_VALUE_NAME] = (str(host), self.registry.REG_SZ)
+            return True
+        coordinator.activate.side_effect = activate
+        with mock.patch.object(runtime, "launch_trees", coordinator, create=True):
+            self.assertIs(runtime.write_selection(runtime.STOCK_LABEL), True)
+            coordinator.activate.assert_called_once_with(config, runtime.STOCK_LABEL, self.host)
+            self.assertEqual(self.registry.write_paths, [])
+            self.assertIs(runtime.write_selection(runtime.CUSTOM_LABEL), True)
+            self.assertEqual(coordinator.activate.call_count, 2)
+
+    def test_mismatched_launch_tree_cannot_be_reported_as_selected_stock(self):
+        values = self.managed()
+        config = self.host.with_name("launch-trees.json")
+        config.write_text("{}", encoding="utf-8")
+        values["launch_trees_config"] = (str(config), self.registry.REG_SZ)
+        coordinator = mock.Mock()
+        coordinator.inspect_selection.return_value = False
+        with mock.patch.object(runtime, "launch_trees", coordinator, create=True):
+            with self.assertRaises(OSError):
+                runtime.read_selection()
+        self.assertEqual(self.registry.write_paths, [])
+
 
 if __name__ == "__main__":
     unittest.main()

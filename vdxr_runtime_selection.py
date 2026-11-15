@@ -1,18 +1,21 @@
 """Select the next-launch VDXR host without loading runtime code.
 
 The managed path and adjacent manifest are installed by the administrator.
-This module changes only redirect_to, using the 64-bit HKLM registry view.
+With launch-tree configuration, selection coordinates the matching game routes
+and redirect. Runtime-only installations change redirect_to in 64-bit HKLM.
 """
 import hashlib
 import json
 import os
 from pathlib import Path
 import winreg
+import vdxr_launch_trees as launch_trees
 
 
 RUNTIME_REGISTRY_PATH = r"SOFTWARE\VirtualDesktop-OpenXR"
 REDIRECT_VALUE_NAME = "redirect_to"
 CUSTOM_PATH_VALUE_NAME = "custom_runtime_path"
+LAUNCH_TREES_CONFIG_VALUE_NAME = "launch_trees_config"
 STOCK_LABEL = "Stock VDXR"
 CUSTOM_LABEL = "Custom VDXR"
 OTHER_LABEL = "Other/unknown override"
@@ -57,15 +60,30 @@ def validated_custom_runtime():
 def read_selection():
     redirect = read_path(REDIRECT_VALUE_NAME)
     if redirect is None:
-        return STOCK_LABEL
+        selection = STOCK_LABEL
+        config = read_path(LAUNCH_TREES_CONFIG_VALUE_NAME)
+        if config is not None and not launch_trees.inspect_selection(config, selection):
+            raise OSError("Runtime and launch-tree selections do not match.")
+        return selection
     managed = read_path(CUSTOM_PATH_VALUE_NAME)
     if managed is None or os.path.normcase(os.path.normpath(redirect)) != os.path.normcase(os.path.normpath(managed)):
         return OTHER_LABEL
     validated_custom_runtime()
+    config = read_path(LAUNCH_TREES_CONFIG_VALUE_NAME)
+    if config is not None and not launch_trees.inspect_selection(config, CUSTOM_LABEL):
+        raise OSError("Runtime and launch-tree selections do not match.")
     return CUSTOM_LABEL
 
 
 def write_selection(label):
+    if label not in CHOICES:
+        raise ValueError("Select Stock VDXR or Custom VDXR.")
+    config = read_path(LAUNCH_TREES_CONFIG_VALUE_NAME)
+    if config is not None:
+        path = validated_custom_runtime() if label == CUSTOM_LABEL else read_path(CUSTOM_PATH_VALUE_NAME)
+        if path is None:
+            raise ValueError("The managed runtime path is missing.")
+        return launch_trees.activate(config, label, path)
     if label == CUSTOM_LABEL:
         path = validated_custom_runtime()
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, RUNTIME_REGISTRY_PATH, 0,
@@ -82,3 +100,4 @@ def write_selection(label):
         raise ValueError("Select Stock VDXR or Custom VDXR.")
     if read_selection() != label:
         raise OSError("Runtime selection readback did not match; the selection is not verified.")
+    return False

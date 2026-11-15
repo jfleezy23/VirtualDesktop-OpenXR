@@ -88,21 +88,24 @@ def apply_dark_theme(root):
               bordercolor=[("focus", COLORS["accent"])], arrowcolor=[("active", COLORS["accent"])])
 
     switch_images = []
-    for selected in (False, True):
-        image = rounded_image(root, 42, 24, 12, COLORS["blue"] if selected else "#444D60")
+    for selected, disabled in ((False, False), (True, False), (False, True), (True, True)):
+        image = rounded_image(root, 42, 24, 12, "#444D60" if disabled else (COLORS["blue"] if selected else "#444D60"))
         center = 30 if selected else 12
         for y in range(4, 20):
             half = round(max(0, 8 * 8 - (y - 11.5) ** 2) ** 0.5)
-            image.put("#FFFFFF", to=(center - half, y, center + half, y + 1))
+            image.put(COLORS["disabled"] if disabled else "#FFFFFF", to=(center - half, y, center + half, y + 1))
         switch_images.append(image)
-    style.element_create("Controls.Switch", "image", switch_images[0], ("selected", switch_images[1]))
+    style.element_create("Controls.Switch", "image", switch_images[0],
+                         ("disabled", "selected", switch_images[3]), ("disabled", switch_images[2]),
+                         ("selected", switch_images[1]))
     style.layout("Switch.TCheckbutton", [("Checkbutton.padding", {"sticky": "nswe", "children": [
         ("Controls.Switch", {"side": "left", "sticky": ""}),
         ("Checkbutton.focus", {"side": "left", "children": [("Checkbutton.label", {"sticky": "nswe"})]}),
     ]})])
     style.configure("Switch.TCheckbutton", background=COLORS["panel"], foreground=COLORS["text"],
                     focuscolor=COLORS["accent"], padding=(0, 2))
-    style.map("Switch.TCheckbutton", background=[("active", COLORS["panel"])])
+    style.map("Switch.TCheckbutton", background=[("active", COLORS["panel"])],
+              foreground=[("disabled", COLORS["disabled"])])
     button_images = [rounded_image(root, 24, 24, 8, color)
                      for color in (COLORS["control"], COLORS["hover"], "#3C4965")]
     style.element_create("Controls.Button", "image", button_images[0],
@@ -384,6 +387,10 @@ class VDXRRegistryApp:
         ttk.Label(runtime, text="For next game launch. Keep VDXR selected in Streamer.", style="Hint.TLabel").grid(
             row=1, column=0, columnspan=2, sticky="w", pady=(10, 0)
         )
+        self.runtime_features_note = tk.StringVar()
+        ttk.Label(runtime, textvariable=self.runtime_features_note, style="Hint.TLabel", wraplength=592).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(6, 0)
+        )
 
         scope_panel = RoundedPanel(frame)
         scope_panel.grid(row=3, column=0, sticky="ew", pady=(0, 14))
@@ -395,8 +402,8 @@ class VDXRRegistryApp:
                                             state="readonly", width=48, style="Dark.TCombobox")
         self.scope_selector.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         self.scope_selector.bind("<<ComboboxSelected>>", self.on_scope_changed)
-        ttk.Button(scope, text="Add game EXE…", command=self.add_profile, style="Soft.TButton").grid(
-            row=1, column=1, padx=(12, 0), pady=(8, 0))
+        self.add_profile_button = ttk.Button(scope, text="Add game EXE…", command=self.add_profile, style="Soft.TButton")
+        self.add_profile_button.grid(row=1, column=1, padx=(12, 0), pady=(8, 0))
         self.scope_feedback = tk.StringVar(value="Globals · changes save immediately. Game profiles apply automatically at launch.")
         ttk.Label(scope, textvariable=self.scope_feedback, style="Hint.TLabel", wraplength=592).grid(
             row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
@@ -411,13 +418,14 @@ class VDXRRegistryApp:
         ttk.Label(nr_header, text="Neural rendering", style="Section.TLabel").grid(row=0, column=0, sticky="w")
 
         self.enabled = tk.BooleanVar(value=self.saved_enabled)
-        ttk.Checkbutton(
+        self.nr_toggle = ttk.Checkbutton(
             nr_header,
             text="  Enable NR",
             style="Switch.TCheckbutton",
             variable=self.enabled,
             command=self.on_enabled_changed,
-        ).grid(row=0, column=1, sticky="e")
+        )
+        self.nr_toggle.grid(row=0, column=1, sticky="e")
         ttk.Label(nr, text="Saved NR changes apply during play", style="Live.TLabel").grid(
             row=1, column=0, columnspan=3, sticky="w", pady=(0, 8)
         )
@@ -512,6 +520,7 @@ class VDXRRegistryApp:
         )
         selector.grid(row=2, column=0, sticky="ew", padx=(0, 14))
         selector.bind("<<ComboboxSelected>>", self.on_frame_generation_changed)
+        self.fg_selector = selector
         try:
             backend = read_frame_generation_backend()
         except (ValueError, OSError) as error:
@@ -527,6 +536,7 @@ class VDXRRegistryApp:
         )
         backend_selector.grid(row=2, column=1, sticky="ew")
         backend_selector.bind("<<ComboboxSelected>>", self.on_frame_generation_backend_changed)
+        self.backend_selector = backend_selector
         ttk.Label(fg, text="Requested reconstruction mode", style="Card.TLabel").grid(
             row=3, column=0, columnspan=2, sticky="w", pady=(14, 6)
         )
@@ -569,7 +579,7 @@ class VDXRRegistryApp:
             row=7, column=0, sticky="w", pady=(8, 0)
         )
         root.bind("<Map>", lambda event: root.after_idle(dark_title_bar, root) if event.widget is root else None, add="+")
-        self.set_slider_state()
+        self.update_runtime_controls()
         self.updating = False
         self.refresh_profile_choices()
         root.update_idletasks()
@@ -686,7 +696,7 @@ class VDXRRegistryApp:
             self.frame_generation_depth_mode.set(self.saved_frame_generation_depth_mode)
             self.update_depth_mode_feedback()
             self.save_profile_button.configure(state="normal" if executable is not None and self.profile_valid else "disabled")
-            self.set_slider_state()
+            self.update_runtime_controls()
             self.status.set("; ".join(errors) or ("Showing effective game settings · missing values inherit globals/defaults."
                                                    if executable else "Globals · changes save automatically"))
         finally:
@@ -706,7 +716,7 @@ class VDXRRegistryApp:
         return True
 
     def save_profile(self):
-        if self.profile_executable is None or not self.profile_valid:
+        if self.saved_runtime_selection != runtime_selection.CUSTOM_LABEL or self.profile_executable is None or not self.profile_valid:
             return False
         values = {name: variable.get() for name, variable in zip(VALUE_NAMES, self.variables)}
         values.update({ENABLE_VALUE_NAME: int(self.enabled.get()),
@@ -727,8 +737,20 @@ class VDXRRegistryApp:
 
     def on_runtime_changed(self, _event=None):
         selection = self.runtime_selection.get()
+        if self.saved_runtime_selection == runtime_selection.CUSTOM_LABEL and selection != runtime_selection.CUSTOM_LABEL:
+            if self.profile_dirty:
+                if not self.confirm_profile_switch():
+                    self.runtime_selection.set(self.saved_runtime_selection)
+                    return
+                self.load_scope(self.profile_executable)
+            if ((self.processing_resolution_save_id is not None and not self.save_processing_resolution()) or
+                    (self.foveation_save_id is not None and not self.save_foveation_size(self.variables[-1]))):
+                self.runtime_selection.set(self.saved_runtime_selection)
+                return
+        self.status.set(f"Switching to {selection} and loading its launch routes…")
+        self.root.update_idletasks()
         try:
-            runtime_selection.write_selection(selection)
+            restarted = runtime_selection.write_selection(selection)
         except (OSError, ValueError) as error:
             try:
                 self.saved_runtime_selection = runtime_selection.read_selection()
@@ -741,7 +763,28 @@ class VDXRRegistryApp:
                 self.status.set(f"Runtime selection error: {error}")
         else:
             self.saved_runtime_selection = selection
-            self.status.set(f"Saved {selection} for the next game launch. Keep VDXR selected in Streamer.")
+            if restarted:
+                self.status.set(f"Saved {selection} for the next game launch. Virtual Desktop restarted; reconnect the headset.")
+            else:
+                self.status.set(f"Saved {selection} for the next game launch. Keep VDXR selected in Streamer.")
+        self.update_runtime_controls()
+
+    def update_runtime_controls(self):
+        custom = self.saved_runtime_selection == runtime_selection.CUSTOM_LABEL
+        for widget, state in ((self.nr_toggle, "normal"), (self.fg_selector, "readonly"),
+                              (self.backend_selector, "readonly"), (self.depth_mode_selector, "readonly"),
+                              (self.reset_button, "normal"), (self.add_profile_button, "normal")):
+            widget.configure(state=state if custom else "disabled")
+        self.save_profile_button.configure(
+            state="normal" if custom and self.profile_executable is not None and self.profile_valid else "disabled")
+        if custom:
+            message = "NR and frame generation controls apply to Custom VDXR."
+        elif self.saved_runtime_selection == runtime_selection.STOCK_LABEL:
+            message = "Stock VDXR does not support NR or frame generation. Your Custom settings are retained."
+        else:
+            message = "NR and frame generation require a verified Custom VDXR selection. Saved settings are retained."
+        self.runtime_features_note.set(message)
+        self.set_slider_state()
 
     def on_frame_generation_backend_changed(self, _event=None):
         if self.stage_profile_change():
@@ -815,10 +858,11 @@ class VDXRRegistryApp:
         errors.extend(read_errors)
 
     def set_slider_state(self):
-        state = tk.NORMAL if self.enabled.get() else tk.DISABLED
-        for slider in self.slider_widgets:
-            slider.configure(state=state)
-        self.processing_resolution_slider.configure(state=state)
+        active = self.enabled.get() and self.saved_runtime_selection == runtime_selection.CUSTOM_LABEL
+        for slider in [*self.slider_widgets, self.processing_resolution_slider]:
+            slider.configure(state=tk.NORMAL if active else tk.DISABLED,
+                             background="#B2C4FF" if active else "#626A78",
+                             troughcolor="#56627A" if active else "#353B46")
 
     def on_enabled_changed(self):
         if self.stage_profile_change():
