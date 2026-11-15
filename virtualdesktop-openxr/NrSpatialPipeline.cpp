@@ -10,6 +10,10 @@
 #include "NrSpatialResolvePS.h"
 #include "NrNativeResolvePS.h"
 #include "FullScreenQuadVS.h"
+#include "NrSpatialDownsampleCS_DXIL.h"
+#include "NrSpatialResolvePS_DXIL.h"
+#include "NrNativeResolvePS_DXIL.h"
+#include "FullScreenQuadVS_DXIL.h"
 #if defined(NR_SPATIAL_TEST_OBSERVER)
 #include "../tests/nr_spatial_test_observer.h"
 #define NR_SPATIAL_OBSERVE(...) test_observer::__VA_ARGS__
@@ -145,6 +149,7 @@ namespace virtualdesktop_openxr::nr_spatial {
         std::unique_ptr<Generation> generation;
         Batch* active{};
         UINT viewStride{};
+        bool useDxil{};
         inline static std::atomic<uint64_t> nextPipelineLifetime{1};
         std::atomic<uint64_t> nextGeneration{1}, nextBatch{1}, nextBind{1};
         uint64_t nrPipelineLifetimeEpoch{};
@@ -152,6 +157,11 @@ namespace virtualdesktop_openxr::nr_spatial {
         explicit Impl(ID3D12Device* d, ID3D12Fence* f) : device(d), fence(f) {
             if (d)
                 viewStride = d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            // The runtime also accepts older D3D12 devices. Select once per device;
+            // D3D11 users of the shared fullscreen source keep their SM5 bytecode.
+            D3D12_FEATURE_DATA_SHADER_MODEL model{D3D_SHADER_MODEL_6_0};
+            useDxil = d && SUCCEEDED(d->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &model, sizeof(model))) &&
+                      model.HighestShaderModel >= D3D_SHADER_MODEL_6_0;
             vdxrfg::pair_capture::nr::TryNextObservedEpoch(nextPipelineLifetime, nrPipelineLifetimeEpoch);
         }
         void Validate(const FrameInput& input) {
@@ -231,16 +241,26 @@ namespace virtualdesktop_openxr::nr_spatial {
             if (!input.nativeAnswer) {
                 D3D12_COMPUTE_PIPELINE_STATE_DESC compute{};
                 compute.pRootSignature = g->root.Get();
-                compute.CS = {g_NrSpatialDownsampleCS, sizeof(g_NrSpatialDownsampleCS)};
+                // Matched GPU runs favor DXC for raw-color input, but FXC for
+                // sRGB downsampling. Keep that guide stable and accelerate its
+                // resolve separately; this is selected only on generation creation.
+                compute.CS =
+                    useDxil && !IsSrgb(input.eyes[0].colorFormat)
+                        ? D3D12_SHADER_BYTECODE{g_NrSpatialDownsampleCS_DXIL, sizeof(g_NrSpatialDownsampleCS_DXIL)}
+                        : D3D12_SHADER_BYTECODE{g_NrSpatialDownsampleCS, sizeof(g_NrSpatialDownsampleCS)};
                 Check(device->CreateComputePipelineState(&compute, IID_PPV_ARGS(&g->downsample)));
                 nr_capture::pipelineComputeCreated(g->nrProgram, g->downsample.Get(), compute.CS);
             }
             D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics{};
             graphics.pRootSignature = g->root.Get();
-            graphics.VS = {g_FullScreenQuadVS, sizeof(g_FullScreenQuadVS)};
-            graphics.PS = input.nativeAnswer
-                              ? D3D12_SHADER_BYTECODE{g_NrNativeResolvePS, sizeof(g_NrNativeResolvePS)}
-                              : D3D12_SHADER_BYTECODE{g_NrSpatialResolvePS, sizeof(g_NrSpatialResolvePS)};
+            graphics.VS = useDxil ? D3D12_SHADER_BYTECODE{g_FullScreenQuadVS_DXIL, sizeof(g_FullScreenQuadVS_DXIL)}
+                                  : D3D12_SHADER_BYTECODE{g_FullScreenQuadVS, sizeof(g_FullScreenQuadVS)};
+            graphics.PS =
+                input.nativeAnswer
+                    ? (useDxil ? D3D12_SHADER_BYTECODE{g_NrNativeResolvePS_DXIL, sizeof(g_NrNativeResolvePS_DXIL)}
+                               : D3D12_SHADER_BYTECODE{g_NrNativeResolvePS, sizeof(g_NrNativeResolvePS)})
+                    : (useDxil ? D3D12_SHADER_BYTECODE{g_NrSpatialResolvePS_DXIL, sizeof(g_NrSpatialResolvePS_DXIL)}
+                               : D3D12_SHADER_BYTECODE{g_NrSpatialResolvePS, sizeof(g_NrSpatialResolvePS)});
             auto& blend = graphics.BlendState.RenderTarget[0];
             blend.SrcBlend = blend.SrcBlendAlpha = D3D12_BLEND_ONE;
             blend.DestBlend = blend.DestBlendAlpha = D3D12_BLEND_ZERO;

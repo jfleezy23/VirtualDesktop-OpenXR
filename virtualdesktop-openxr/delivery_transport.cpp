@@ -221,6 +221,17 @@ namespace virtualdesktop_openxr {
         *desc = found->second->desc;
         return ovrSuccess;
     }
+    bool DeliveryTransport::tryProducerIndex(ovrTextureSwapChain chain, int& index) {
+        std::unique_lock<std::recursive_mutex> lock(m_state->metadata, std::try_to_lock);
+        if (!lock.owns_lock() || m_state->unknown || m_state->closed)
+            return false;
+        const auto found = m_state->chains.find(chain);
+        if (found == m_state->chains.end() || found->second->nativeOnly || found->second->reservedReady)
+            return false;
+        index = found->second->producerIndex;
+        return true;
+    }
+
     ovrResult DeliveryTransport::current(ovrTextureSwapChain chain, int* index) {
         {
             std::lock_guard<std::recursive_mutex> lock(m_state->metadata);

@@ -1,4 +1,5 @@
 #include "frame_generation_pacing.h"
+#include "LastRoleWaitGuard.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -14,7 +15,86 @@ void require(bool condition, const char* message) {
     }
 }
 
+namespace {
+    void checkTwoPositionRecovery() {
+        constexpr int64_t first = 100000000, period = 8000000, last = first + period;
+        FrameGenerationCadence cadence;
+        for (const auto now : {first, first + 1, last - 1}) {
+            const auto reservation = cadence.reserve(now, first, period, 2, 200);
+            require(reservation.valid && reservation.reason == PredictionReservationReason::usable,
+                    "a renderable pair stays eligible up to its original B");
+            const auto plan = cadence.plan(reservation, first - period, true);
+            require(reservation.nativeId == 200 && plan.count == 2 && plan.targets[0] == first &&
+                        plan.targets[1] == last && plan.fractions[0] == .5f,
+                    "partial lateness preserves original native positions and interpolation");
+            require(cadence.onTime(plan, now) == (now == first), "late S1 retains its original deadline");
+        }
+        for (const auto now : {last, last + 1}) {
+            const auto expired = cadence.reserve(now, first, period, 2, 200);
+            require(!expired.valid && expired.reason == PredictionReservationReason::expired2 &&
+                        expired.nativeId == 200 && expired.multiplier == 2 && expired.period == period &&
+                        expired.firstTarget == first && expired.currentTarget == last,
+                    "a fully expired renderable pair retains both original positions");
+            const auto plan = cadence.plan(expired, first - period, true);
+            require(plan.count == 1 && plan.roles[0] == FrameGenerationRole::real,
+                    "expired positions cannot earn generated-frame credit");
+        }
+        const auto noRender = cadence.reserve(first + 1, first, period, 2, 200, false);
+        require(noRender.reason == PredictionReservationReason::none && !noRender.multiplier,
+                "a late no-render input cannot claim future recovery");
+        for (const auto multiplier : {1u, 3u, 4u}) {
+            const auto late = cadence.reserve(first + 1, first, period, multiplier, 200);
+            require(!late.valid && !late.multiplier, "other multipliers keep late rejection");
+        }
+        require(!cadence.reserve(first, first, period, 2, uint64_t(INT64_MAX) - 1).multiplier,
+                "unrepresentable next range cannot claim a native position");
+    }
+
+    void checkLastRoleWait() {
+        using namespace fg_live;
+        for (const auto multiplier : {2u, 3u, 4u}) {
+            const auto role = multiplier == 2   ? FrameGenerationRole::synthetic1
+                              : multiplier == 3 ? FrameGenerationRole::synthetic2
+                                                : FrameGenerationRole::synthetic3;
+            const VdxrLastRoleWaitFactsV1 sample{sizeof(VdxrLastRoleWaitFactsV1),
+                                                 1,
+                                                 multiplier,
+                                                 static_cast<uint32_t>(role),
+                                                 1,
+                                                 2,
+                                                 3,
+                                                 4,
+                                                 11,
+                                                 10,
+                                                 10,
+                                                 1,
+                                                 requiredGuardFlags};
+            require(authorizeCpp(sample) == 1, "completed B and pending last synthetic permit independent delivery");
+            for (unsigned bit = 1; bit <= requiredGuardFlags; bit <<= 1) {
+                auto missing = sample;
+                missing.flags &= ~bit;
+                require(!authorizeCpp(missing), "every handoff certification is required");
+            }
+            auto rejected = sample;
+            rejected.selectedRole = static_cast<uint32_t>(FrameGenerationRole::real);
+            require(!authorizeCpp(rejected), "a real frame cannot take the selected synthetic wait");
+            rejected = sample;
+            rejected.completedValue = sample.realValue - 1;
+            require(!authorizeCpp(rejected), "B must have completed");
+            rejected.completedValue = sample.selectedValue;
+            require(!authorizeCpp(rejected), "an already-complete synthetic does not require a wait");
+            rejected.completedValue = UINT64_MAX;
+            require(!authorizeCpp(rejected), "device removal cannot certify a handoff");
+            rejected = sample;
+            rejected.ticketToken = 0;
+            require(!authorizeCpp(rejected), "a missing owner ticket cannot qualify");
+        }
+    }
+} // namespace
+
 int main() {
+    checkTwoPositionRecovery();
+    checkLastRoleWait();
     FrameGenerationCadence four;
     const auto fourReservation = four.reserve(990000000, 1000000000, 10000000, 4, 0);
     require(fourReservation.valid && fourReservation.currentTarget == 1030000000,

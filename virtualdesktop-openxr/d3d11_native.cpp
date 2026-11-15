@@ -279,6 +279,7 @@ namespace virtualdesktop_openxr {
                 &desc, nullptr, m_resolveMultisampledDepthConstants.ReleaseAndGetAddressOf()));
             setDebugName(m_resolveMultisampledDepthConstants.Get(), "Resolve MSAA Depth Constants");
         }
+        m_gpuTimerPrecompositionRecorded.fill(false);
         for (uint32_t i = 0; i < k_numGpuTimers; i++) {
             m_gpuTimerPrecomposition[i] =
                 std::make_unique<D3D11GpuTimer>(m_ovrSubmissionDevice.Get(), m_ovrSubmissionContext.Get());
@@ -1118,12 +1119,20 @@ namespace virtualdesktop_openxr {
             if (m_asyncSubmissionError)
                 std::rethrow_exception(m_asyncSubmissionError);
             CHECK_MSG(!m_terminateAsyncThread, "FG producer completion is stopping");
-            CHECK_MSG(m_layersForAsyncSubmission.empty(), "FG producer must own the empty submission mailbox");
+            CHECK_MSG(m_layersForAsyncSubmission.empty() || m_precompositor.earlyNrPermission,
+                      "FG producer must own the empty submission mailbox");
+            if (m_precompositor.earlyNrPermission && !m_layersForAsyncSubmission.empty()) {
+                // Source ownership was acquired before preparation. Captured
+                // prime tickets and serial gaps still have independently packed
+                // inputs; an ordinary pending batch must not be overwritten.
+                CHECK_MSG(m_fgTransactionForSubmission.ticket.token, "FG NR preparation lost pending source ownership");
+            }
             // With no earlier group using the SDK queue, keep the original
             // asynchronous dependency and the application's CPU/GPU overlap.
-            if (!m_fgActiveSubmission)
+            if (!m_fgActiveSubmission && !m_precompositor.earlyNrPermission)
                 return;
-            CHECK_MSG(m_fgActiveOwnedPixels, "FG producer requires privately owned active pixels");
+            if (m_fgActiveSubmission)
+                CHECK_MSG(m_fgActiveOwnedPixels, "FG producer requires privately owned active pixels");
         }
         auto completed = fence->GetCompletedValue();
         CHECK_MSG(completed != UINT64_MAX, "FG producer fence device removed");
@@ -1187,7 +1196,9 @@ namespace virtualdesktop_openxr {
     }
 
     void OpenXrRuntime::waitOnSubmissionDevice(std::unique_lock<std::mutex>* producerLease) {
-        const bool synchronousWait = m_syncGpuWorkInEndFrame.load(std::memory_order_relaxed);
+        const bool synchronousWait = m_precompositor.syncGpuWorkOverride
+                                         ? *m_precompositor.syncGpuWorkOverride
+                                         : m_syncGpuWorkInEndFrame.load(std::memory_order_relaxed);
         waitForFrameGenerationProducerFence(
             m_ovrSubmissionFence.Get(), m_fenceValue, producerLease, "application", synchronousWait);
         if (!synchronousWait) {

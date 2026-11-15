@@ -7,20 +7,28 @@ namespace virtualdesktop_openxr {
                                                           int64_t nextNativeTarget,
                                                           int64_t displayPeriod,
                                                           uint32_t multiplier,
-                                                          uint64_t nextNativeId) const noexcept {
+                                                          uint64_t nextNativeId,
+                                                          bool shouldRender) const noexcept {
         PredictionReservation result{};
         if (now < 0 || nextNativeTarget <= 0 || displayPeriod <= 0 || displayPeriod > 1000000000 ||
-            (multiplier != 1 && multiplier != 2 && multiplier != 3 && multiplier != 4) || nextNativeTarget < now ||
+            (multiplier != 1 && multiplier != 2 && multiplier != 3 && multiplier != 4) ||
             nextNativeTarget > std::numeric_limits<int64_t>::max() - (multiplier - 1) * displayPeriod ||
             nextNativeId > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - multiplier) {
             return result;
         }
-        result.currentTarget = nextNativeTarget + (multiplier - 1) * displayPeriod;
+        const auto currentTarget = nextNativeTarget + (multiplier - 1) * displayPeriod;
+        // A late S1 remains useful before its original B. Keep both original
+        // positions and interpolation endpoints; this never makes S1 on-time.
+        if (nextNativeTarget < now && !(VDXR_PRIVATE_2X_RECOVERY && multiplier == 2 && shouldRender))
+            return result;
+        result.currentTarget = currentTarget;
         result.firstTarget = nextNativeTarget;
         result.period = displayPeriod;
         result.nativeId = nextNativeId;
         result.multiplier = multiplier;
-        result.valid = true;
+        result.valid = !VDXR_PRIVATE_2X_RECOVERY || multiplier != 2 || now < currentTarget;
+        result.shouldRender = shouldRender;
+        result.reason = result.valid ? PredictionReservationReason::usable : PredictionReservationReason::expired2;
         return result;
     }
 
@@ -64,38 +72,6 @@ namespace virtualdesktop_openxr {
         }
         candidate.count = reservation.multiplier;
         return candidate;
-    }
-
-    bool applyUniformStretchedFourSamples(FrameGenerationSlotPlan& plan,
-                                          int64_t previousTime,
-                                          int64_t currentTime) noexcept {
-        const std::array<FrameGenerationRole, 4> roles{FrameGenerationRole::synthetic1,
-                                                       FrameGenerationRole::synthetic2,
-                                                       FrameGenerationRole::synthetic3,
-                                                       FrameGenerationRole::real};
-        if (plan.count != 4 || plan.roles != roles || previousTime <= 0 || currentTime <= previousTime ||
-            plan.targets[3] != currentTime || plan.targets[0] <= 0 || plan.targets[1] <= plan.targets[0])
-            return false;
-        const int64_t period = plan.targets[1] - plan.targets[0];
-        if (period > 1000000000 || plan.targets[2] <= plan.targets[1] || plan.targets[2] - plan.targets[1] != period ||
-            plan.targets[3] <= plan.targets[2] || plan.targets[3] - plan.targets[2] != period)
-            return false;
-        const int64_t interval = currentTime - previousTime;
-        if (interval <= 4 * period)
-            return false;
-        auto candidate = plan;
-        const int64_t quotient = interval / 4;
-        const int64_t remainder = interval % 4;
-        for (int64_t k = 1; k < 4; ++k) {
-            const int64_t offset = k * quotient + (k * remainder) / 4;
-            candidate.synthesisTimes[static_cast<unsigned>(k - 1)] = previousTime + offset;
-            candidate.fractions[static_cast<unsigned>(k - 1)] =
-                static_cast<float>(static_cast<double>(offset) / static_cast<double>(interval));
-        }
-        if (candidate.synthesisTimes == plan.synthesisTimes && candidate.fractions == plan.fractions)
-            return false;
-        plan = candidate;
-        return true;
     }
 
     bool FrameGenerationCadence::onTime(const FrameGenerationSlotPlan& plan, int64_t now) const noexcept {

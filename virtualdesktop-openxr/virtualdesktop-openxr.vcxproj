@@ -584,6 +584,7 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
     <ClInclude Include="framework\dispatch.h" />
     <ClInclude Include="gpu_timers.h" />
     <ClInclude Include="frame_generation.h" />
+    <ClInclude Include="LastRoleWaitGuard.h" />
     <ClInclude Include="frame_generation_pacing.h" />
     <ClInclude Include="..\nr-frame-generation\include\vdxr_fg_api.h" />
     <ClInclude Include="log.h" />
@@ -894,7 +895,18 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
       <ShaderType>Compute</ShaderType>
     </FxCompile>
   </ItemGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PreprocessorDefinitions>VDXR_PRIVATE_LAST_ROLE_WAIT_MODE=1;VDXR_PRIVATE_2X_RECOVERY=1;VDXR_PRIVATE_KEEP_ORIGINAL_2X_WAIT=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="CompileNrD3D12Shaders" BeforeTargets="ClCompile">
+    <PropertyGroup>
+      <DxcPath Condition="'$(DxcPath)'==''">$(VDXR_DXC_PATH)</DxcPath>
+    </PropertyGroup>
+    <Exec WorkingDirectory="$(ProjectDir)" Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)..\scripts\Compile-D3D12Shaders.ps1&quot; -DxcPath &quot;$(DxcPath)&quot; -SourceDirectory &quot;$(ProjectDir).&quot; -OutputDirectory &quot;$(IntDir).&quot;" />
+  </Target>
   <ImportGroup Label="ExtensionTargets">
     <Import Project="$(SolutionDir)\packages\Microsoft.Windows.ImplementationLibrary.1.0.220201.1\build\native\Microsoft.Windows.ImplementationLibrary.targets" Condition="Exists('$(SolutionDir)\packages\Microsoft.Windows.ImplementationLibrary.1.0.220201.1\build\native\Microsoft.Windows.ImplementationLibrary.targets')" />
     <Import Project="$(SolutionDir)\packages\Detours.4.0.1\build\native\Detours.targets" Condition="Exists('$(SolutionDir)\packages\Detours.4.0.1\build\native\Detours.targets')" />

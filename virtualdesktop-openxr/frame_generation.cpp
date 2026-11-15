@@ -118,6 +118,8 @@ namespace virtualdesktop_openxr {
         std::atomic<bool> poisoned{};
         bool hostCompletionUnknown{};
         bool hostOwnsReal{}, opaqueInput{};
+        HANDLE shutdownProducerEvent{};
+        uint64_t shutdownRegisteredValue{};
         HANDLE copyCompletionEvent{};
         HANDLE readyCompletionEvent{};
         std::array<uint64_t, 2> registeredReadyValues{};
@@ -131,6 +133,9 @@ namespace virtualdesktop_openxr {
             }
             if (readyCompletionEvent) {
                 CloseHandle(readyCompletionEvent);
+            }
+            if (shutdownProducerEvent) {
+                CloseHandle(shutdownProducerEvent);
             }
             if (module) {
                 FreeLibrary(module);
@@ -1903,6 +1908,117 @@ namespace virtualdesktop_openxr {
         return completed >= value ? S_OK : VDXRFG_E_BUSY;
     }
 
+    bool FrameGeneration::LastRoleWaitReceipt::healthy() const noexcept {
+        return poisoned && !poisoned->load(std::memory_order_acquire);
+    }
+
+    HRESULT FrameGeneration::LastRoleWaitReceipt::observe(FrameGenerationRole role) const noexcept {
+        const bool real = role == FrameGenerationRole::real;
+        if (!healthy() || !consumerFence || !selectedValue || (!real && static_cast<unsigned>(role) != selectedRole))
+            return VDXRFG_E_REJECTED;
+        const auto completed = consumerFence->GetCompletedValue();
+        if (completed == UINT64_MAX)
+            return VDXRFG_E_POISONED;
+        return completed >= (real ? realValue : selectedValue) ? S_OK : VDXRFG_E_BUSY;
+    }
+
+    HRESULT FrameGeneration::LastRoleWaitReceipt::wait(DWORD timeoutMs, bool initialAlreadySampled) const noexcept {
+        if (!healthy() || !consumerFence || !completionEvent || timeoutMs == INFINITE)
+            return VDXRFG_E_REJECTED;
+        if (!initialAlreadySampled) {
+            // Match every later waitForCopy preflight: a copy that completed
+            // after a stale wake must skip the next OS wait altogether.
+            const auto initial = observe(static_cast<FrameGenerationRole>(selectedRole));
+            if (initial != VDXRFG_E_BUSY)
+                return initial;
+        }
+        const auto waited = WaitForSingleObject(completionEvent, timeoutMs);
+        if (waited == WAIT_FAILED)
+            return HRESULT_FROM_WIN32(GetLastError());
+        // An earlier registration can wake the auto-reset event. Completion
+        // comes exclusively from this receipt's exact retained consumer fence.
+        return observe(static_cast<FrameGenerationRole>(selectedRole));
+    }
+
+    HRESULT FrameGeneration::prepareLastRoleWaitReceipt(const OwnedFrameTransaction& transaction,
+                                                        FrameGenerationRole role,
+                                                        ID3D11Texture2D* selectedDestination,
+                                                        ID3D11Texture2D* realDestination,
+                                                        LastRoleWaitReceipt& receipt) noexcept {
+        receipt = {};
+        const auto index = static_cast<unsigned>(role);
+        constexpr auto realIndex = static_cast<unsigned>(FrameGenerationRole::real);
+        if (!m_state || m_state->poisoned || !m_state->deliveryContext11 || !transaction.ticket.token ||
+            transaction.ticket.prime || transaction.ticket.bank >= 2 || index >= 4 || index == realIndex ||
+            transaction.ownerGeneration != m_state->generation || !selectedDestination || !realDestination)
+            return S_FALSE;
+        auto& state = *m_state;
+        const auto bank = transaction.ticket.bank;
+        const auto& ticket = state.tickets[bank];
+        if (state.liveTokens[bank] != transaction.ticket.token || ticket.token != transaction.ticket.token ||
+            !ticket.generation || ticket.generation != transaction.ticket.generation ||
+            ticket.previous_serial != transaction.ticket.previous_serial ||
+            ticket.current_serial != transaction.ticket.current_serial || ticket.bank != bank ||
+            ticket.prime != transaction.ticket.prime || ticket.role_mask != transaction.ticket.role_mask ||
+            !(ticket.role_mask & (1u << index)) ||
+            ticket.input_consumed_fence != transaction.ticket.input_consumed_fence ||
+            ticket.input_consumed_value != transaction.ticket.input_consumed_value ||
+            ticket.output_ready_fence != transaction.ticket.output_ready_fence ||
+            ticket.output_ready_value != transaction.ticket.output_ready_value || !state.consumer11 || !state.ready11 ||
+            !state.copyCompletionEvent || state.retainedDestinations[bank][index].Get() != selectedDestination ||
+            state.retainedDestinations[bank][realIndex].Get() != realDestination ||
+            transaction.destinations[index].Get() != selectedDestination ||
+            transaction.destinations[realIndex].Get() != realDestination)
+            return S_FALSE;
+        const auto selectedValue = state.roleConsumerValues[bank][index];
+        const auto realValue = state.roleConsumerValues[bank][realIndex];
+        if (!realValue || selectedValue <= realValue || !ticket.output_ready_value)
+            return S_FALSE;
+        // This is the original wait's preflight sample. The guard certifies B
+        // from it; when B is pending it retains S without sampling twice.
+        const auto completed = state.consumer11->GetCompletedValue();
+        if (completed == UINT64_MAX) {
+            state.poisoned = state.hostCompletionUnknown = true;
+            return VDXRFG_E_POISONED;
+        }
+        if (completed >= selectedValue)
+            return S_OK;
+        auto& registered = state.registeredCopyValues[bank][index];
+        if (registered != selectedValue) {
+            const auto result = state.consumer11->SetEventOnCompletion(selectedValue, state.copyCompletionEvent);
+            if (FAILED(result))
+                return result;
+            registered = selectedValue;
+        }
+        // Reaching prepareRole's prepared image followed a successful original
+        // copyOutput Signal/Flush. A failed Signal poisons State; the optional
+        // observer-only successfulCopies table is deliberately not authority.
+        receipt.consumerFence = state.consumer11;
+        receipt.selectedDestination = selectedDestination;
+        receipt.realDestination = realDestination;
+        receipt.completionEvent = state.copyCompletionEvent;
+        receipt.poisoned = &state.poisoned;
+        receipt.ownerGeneration = state.generation;
+        receipt.ticketGeneration = ticket.generation;
+        receipt.ticketToken = ticket.token;
+        receipt.previousSerial = ticket.previous_serial;
+        receipt.serial = ticket.current_serial;
+        receipt.selectedValue = selectedValue;
+        receipt.realValue = realValue;
+        receipt.completedValue = completed;
+        receipt.bank = bank;
+        receipt.selectedRole = index;
+        receipt.fullOutputObserved = true;
+        return VDXRFG_E_BUSY;
+    }
+
+    void FrameGeneration::poisonLastRoleWait(const LastRoleWaitReceipt& receipt) noexcept {
+        // Exceptional settlement only: caller reacquires S before touching
+        // the plain unknown-completion flag. The active group pins this State.
+        if (m_state && receipt.poisoned == &m_state->poisoned && receipt.ownerGeneration == m_state->generation)
+            m_state->poisoned = m_state->hostCompletionUnknown = true;
+    }
+
     HRESULT FrameGeneration::prepareRetirementWait(const OwnedFrameTransaction& transaction,
                                                    HANDLE& completionEvent) noexcept {
         completionEvent = nullptr;
@@ -2001,7 +2117,9 @@ namespace virtualdesktop_openxr {
         return hr;
     }
 
-    HRESULT FrameGeneration::shutdown() noexcept {
+    HRESULT FrameGeneration::shutdown(HANDLE* pendingProducer) noexcept {
+        if (pendingProducer)
+            *pendingProducer = nullptr;
         if (!m_state) {
             return S_OK;
         }
@@ -2014,6 +2132,23 @@ namespace virtualdesktop_openxr {
             return VDXRFG_E_POISONED;
         }
         if (produced < m_state->producerValue) {
+            if (pendingProducer) {
+                // Retain this event on timeout or failed teardown. A registration
+                // may still complete after the caller returns.
+                if (!m_state->shutdownProducerEvent) {
+                    m_state->shutdownProducerEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                    if (!m_state->shutdownProducerEvent)
+                        return HRESULT_FROM_WIN32(GetLastError());
+                }
+                if (m_state->shutdownRegisteredValue != m_state->producerValue) {
+                    const auto hr = m_state->producer11->SetEventOnCompletion(m_state->producerValue,
+                                                                              m_state->shutdownProducerEvent);
+                    if (FAILED(hr))
+                        return hr;
+                    m_state->shutdownRegisteredValue = m_state->producerValue;
+                }
+                *pendingProducer = m_state->shutdownProducerEvent;
+            }
             return VDXRFG_E_BUSY;
         }
         if (std::any_of(
