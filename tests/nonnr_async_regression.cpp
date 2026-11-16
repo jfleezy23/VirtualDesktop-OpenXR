@@ -22,6 +22,7 @@ namespace {
         unsigned layerCount;
         std::vector<ovrLayerHeader> layers;
         float worldScale;
+        bool hasViewScale;
         bool pointerListOnStack{};
         std::vector<int> quadOrder;
     };
@@ -248,7 +249,8 @@ namespace {
         if (state.observeLayers) {
             state.observeLayers(layers, layerCount);
         }
-        SubmittedFrame frame{frameId, layerCount, {}, scale ? scale->HmdSpaceToWorldScaleInMeters : 0.f};
+        SubmittedFrame frame{
+            frameId, layerCount, {}, scale ? scale->HmdSpaceToWorldScaleInMeters : 0.f, scale != nullptr};
         ULONG_PTR stackLow = 0, stackHigh = 0;
         GetCurrentThreadStackLimits(&stackLow, &stackHigh);
         const auto listAddress = reinterpret_cast<ULONG_PTR>(layers);
@@ -641,6 +643,7 @@ namespace virtualdesktop_openxr {
             if (!submitted)
                 std::cerr << "FAIL: first queued disabled payload was discarded; backend End calls=0\n";
             bool secondSubmitted = false;
+            bool shutdownFrameBegun = false;
             if (!returnedBeforeBegin && producerFinished && !producerError && producerResult == XR_SUCCESS &&
                 submitted) {
                 producer.join();
@@ -655,6 +658,8 @@ namespace virtualdesktop_openxr {
                 require(runtime.xrEndFrame(reinterpret_cast<XrSession>(1), &secondInfo) == XR_SUCCESS,
                         "second zero-layer xrEndFrame failed");
                 secondSubmitted = state.waitFor([&] { return state.frames.size() == 2; });
+                // Stop with an open backend cycle and no third application packet.
+                shutdownFrameBegun = secondSubmitted && state.waitFor([&] { return state.begunIds.size() >= 3; });
             }
             // Always stop and join before assertions can unwind the runtime or the producer.
             stop(runtime, state, &producer);
@@ -665,17 +670,22 @@ namespace virtualdesktop_openxr {
             require(producerResult == XR_SUCCESS, "zero-layer xrEndFrame failed");
             require(!returnedBeforeBegin && submitted, "first frame readiness/payload ordering failed");
             require(secondSubmitted, "second queued disabled payload did not reach the backend");
+            require(shutdownFrameBegun, "worker did not begin the shutdown frame");
             {
                 std::lock_guard lock(state.mutex);
-                require(state.frames.size() == 2 && state.begunIds.size() >= 2 && state.waitedIds.size() >= 2 &&
-                            state.begunIds[0] == 0 && state.begunIds[1] == 1 && state.waitedIds[0] == 0 &&
-                            state.waitedIds[1] == 1,
-                        "successive backend Wait/Begin/End calls must use frame IDs 0 and 1 exactly once each");
+                const std::vector<long long> expectedIds{0, 1, 2};
+                require(state.waitedIds == expectedIds && state.begunIds == expectedIds && state.frames.size() == 3,
+                        "two published frames and the open shutdown frame must each complete once");
                 verifyDisabledFrame(state.frames.front());
                 verifyDisabledFrame(state.frames[1], 1);
+                const auto& shutdown = state.frames[2];
+                require(shutdown.id == 2 && shutdown.layerCount == 1 && shutdown.layers.size() == 1 &&
+                            shutdown.layers[0].Type == ovrLayerType_Disabled && shutdown.layers[0].Flags == 0 &&
+                            !shutdown.hasViewScale,
+                        "shutdown must close frame 2 with one disabled layer and no view scale");
             }
-            std::cout
-                << "PASS: first xrEndFrame waits for backend Begin; two disabled payloads use frame IDs 0 and 1\n";
+            std::cout << "PASS: first xrEndFrame waits for backend Begin; frames 0 and 1 submit and shutdown closes "
+                         "frame 2\n";
         }
 
         static void workerError(const wchar_t* backendDirectory, Fault fault) {
