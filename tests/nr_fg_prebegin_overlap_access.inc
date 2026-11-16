@@ -537,7 +537,8 @@ static void prebeginVerify() {
     std::cout << "PREBEGIN_VERIFIED current_ends=" << prebegin.observedEnds
               << " max_sdk_render_calls=" << prebegin.maxRenderCalls << '\n';
 #ifdef VDXR_4X_CAPTURE_REGRESSION
-    require(phaseStretched && phaseNominal, "real module accepted both stretched-quarter and nominal public captures");
+    require(phaseStretched && phaseNominal,
+            "real module accepted native-slot samples for both stretched and nominal captures");
     std::cout << "PHASE_CAPTURE_VERIFIED stretched=" << phaseStretched << " nominal=" << phaseNominal << '\n';
 #endif
 }

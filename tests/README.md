@@ -62,8 +62,8 @@ Run fixtures in separate bounded child processes. Require successful completion,
 
 ## Upstream contract regressions
 
-`nr_fg_4x_phase_regression` is a CPU-only companion to the presenter test. It checks evenly spaced 4X content samples
-for stretched source intervals while native deadlines and role order remain unchanged, plus 2X/3X controls, integer
+`nr_fg_4x_phase_regression` is a CPU-only companion to the presenter test. It checks 4X content samples at original
+reserved native-slot targets for stretched source intervals, with matching fractions and role order, plus 2X/3X controls, integer
 rounding, endpoint/fraction agreement, admission guards and overflow boundaries. Build it with
 `build-fg-runtime-fixtures.py <fresh-runtime-cohort> nr_fg_4x_phase_regression`, or run the FG CMake test `fg_4x_phase`.
 This checks the sample-time contract; it does not measure headset pacing or prove GPU output quality.
@@ -71,7 +71,7 @@ This checks the sample-time contract; it does not measure headset pacing or prov
 `nr_fg_4x_capture_regression` is the manual GPU wiring companion. Build it against the same fresh runtime cohort,
 then run with `<assets> <new-state-directory> 4 nr-off colour d3d11` (repeat with `nr-on`). A test-only prediction
 step creates a stretched source pair through public `xrEndFrame`; the observer requires the real module to receive
-and accept all three quarter-step timestamps, matching fractions and the original B endpoint, plus nominal controls.
+and accept all three original native-slot timestamps, matching fractions and the original B endpoint, plus nominal controls.
 It does not hand-prepare the corrected plan or claim to measure headset scanout.
 
 `nr_fg_last_copy_gate_regression` and `nr_fg_current_copy_gate_regression` are manual GPU tests, not headless CI
