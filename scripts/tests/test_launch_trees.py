@@ -119,7 +119,7 @@ class PlatformPathResolutionTests(unittest.TestCase):
         for drive in ("C", "D"):
             for user in ("runneradmin", "RUNNER~1"):
                 with self.subTest(drive=drive, user=user):
-                    base = Path(f"{drive}:/Users/{user}/AppData/Local/Temp/launch-tree-fixture")
+                    base = Path(f"{drive}:/fixture-profiles/{user}/Temp/launch-tree-fixture")
                     platform = Platform(base / "Custom", base / "Stock")
                     expected = Path(str(platform.custom / "Software").replace("RUNNER~1", "runneradmin"))
                     def canonicalize(path):
