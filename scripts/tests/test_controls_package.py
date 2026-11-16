@@ -80,6 +80,8 @@ class ControlsPackageTests(unittest.TestCase):
             bundle.mkdir()
             guide = b"![Controls](images/controls-overview.png)\n![Backend](images/controls-fg-only.png)\n![Profile](images/controls-game-profile.png)\n"
             (snapshot / "docs/NR-FG-CONTROLS.md").write_bytes(guide)
+            quickstart = b"# Quickstart\n![Controls](images/controls-overview.png)\n"
+            (snapshot / "docs/NR-FG-QUICKSTART.md").write_bytes(quickstart)
             runtime_guide = b"# Runtime selection\nUse the Runtime selector for the next game launch.\n"
             (snapshot / "docs/SIDE-BY-SIDE-RUNTIME.md").write_bytes(runtime_guide)
             game_guide = b"# Game routing\nKeep a working original launch route.\n"
@@ -92,6 +94,9 @@ class ControlsPackageTests(unittest.TestCase):
                 (snapshot / "docs/images" / name).write_bytes(data)
             module.copy_documentation(snapshot, bundle)
             self.assertEqual((bundle / "README.md").read_bytes(), guide)
+            self.assertEqual((bundle / "NR-FG-CONTROLS.md").read_bytes(), guide)
+            self.assertEqual((bundle / "NR-FG-QUICKSTART.md").read_bytes(), quickstart)
+            self.assertIn("docs/NR-FG-QUICKSTART.md", module.SOURCE_FILES)
             self.assertTrue((bundle / "SIDE-BY-SIDE-RUNTIME.md").is_file(), "Missing linked offline runtime guide")
             self.assertEqual((bundle / "SIDE-BY-SIDE-RUNTIME.md").read_bytes(), runtime_guide)
             self.assertIn("docs/SIDE-BY-SIDE-RUNTIME.md", module.SOURCE_FILES)

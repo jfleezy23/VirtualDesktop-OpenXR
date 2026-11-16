@@ -31,12 +31,12 @@ that unprivileged programs can modify.
 
 ## Install from the release
 
-The [**2026.11.10.1 release**](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.10.1) supplies the guarded runtime and
+The [**2026.11.15.1 release**](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.15.1) supplies the guarded runtime and
 `CUSTOM-RUNTIME.json` together. Older runtime packages without this metadata are
 not the switcher package. Download the dated runtime ZIP and dated Controls ZIP
-from that release, and verify them against `SHA256SUMS-2026.11.10.1.txt` before continuing.
-Use `VDXR-NR-FG-Windows-x64-2026.11.10.1.zip` and
-`VDXR-NR-FG-Controls-Windows-x64-2026.11.08.1.zip` together.
+from that release, and verify them against `SHA256SUMS-2026.11.15.1.txt` before continuing.
+Use `VDXR-NR-FG-Windows-x64-2026.11.15.1.zip` and
+`VDXR-NR-FG-Controls-Windows-x64-2026.11.15.1.zip` together.
 
 1. Close VR games. Keep Virtual Desktop Streamer's **official** runtime installed.
    If you previously replaced its DLL with a community build, restore the original
@@ -87,12 +87,29 @@ try {
 5. Extract the **whole** Controls ZIP and open `VDXR-NR-FG-Controls.exe`, keeping
    `_internal` beside it. Accept the administrator prompt. Choose **Custom VDXR**
    in the Runtime card, keep **VDXR** selected in Streamer, then launch a game
-   through its supported VDXR route. For OFXR, turn VD's SSW off. For the first NR
-   comparison, enable NR, set processing resolution to **80%**, keep coverage at
-   **100%**, and choose **OFXR 4× / NVIDIA**. Fresh NR settings use native 100%
+   through its supported VDXR route. For OFXR, turn VD's SSW off. For the first FG
+   comparison, leave NR off and choose **OFXR 2× / NVIDIA**. To add NR with its separately supplied
+   component, enable it, set processing resolution to **80%** and keep coverage at
+   **100%**. Fresh NR settings use native 100%
    processing and NR off; installation preserves existing preferences.
-6. To compare with the official runtime, choose **Stock VDXR** and relaunch the
-   game. Neither Streamer nor Controls needs to restart.
+6. To compare with the official runtime, choose **Stock VDXR** and relaunch the game.
+   Runtime-only selection does not require restarting Streamer or Controls. Optional prepared
+   launch-library selection can restart Streamer and ask you to reconnect the headset.
+
+The dated Controls package reuses the locally tested binary labelled 2026.11.08.1, without a fresh rebuild.
+Compared with the previous public package, it adds optional prepared launch-library support and disables
+Custom NR/FG controls in Stock mode. Existing preferences and defaults are preserved.
+
+### Optional prepared launch libraries
+
+The normal installation above does not create separate Stock/Custom launch libraries or convert
+native game launch routes. Automatic NR/FG profiles remain separate: the custom runtime applies a saved
+profile when its matching executable launches, without Controls staying open.
+
+If an installation already has a protected, validated launch-library configuration, its compatible
+Controls component can coordinate the launch routes and runtime selection. Close all VR games first;
+follow the resulting restart/reconnect status. Keep the whole Controls package, including its helper
+and source folders. Runtime selection alone does not establish that this optional setup exists.
 
 The packaged metadata has schema `1`, `self_redirect_guard: true`, the exact host
 `host_sha256`, `fg_sha256`, and `source_revision`. It binds the guarded DLL to the supplied

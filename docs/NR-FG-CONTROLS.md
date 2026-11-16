@@ -7,11 +7,15 @@ selector chooses stock or custom VDXR for the next VR launch.
 
 ![The actual Controls app showing processing resolution, coverage and OFXR settings](images/controls-overview.png)
 
-*The screenshots show the actual app with example settings. The appearance sliders are
-examples, not a preset applied by installation.*
+*Retained illustrations of the app with example settings, not installation defaults or a complete view
+of every selector. The appearance sliders are not a preset applied by installation.*
 
-The 2026.11.08.1 runtime adds bounded perceptual color transfer for NR processing below 100%.
-It uses the existing Controls layout and settings, with no new toggle. Install the matching runtime package;
+The 2026.11.15.1 runtime improves 2× recovery while retaining NR processing, coverage and appearance controls.
+The 2026.11.15.1 Controls package reuses the locally tested binary labelled 2026.11.08.1, without a fresh rebuild.
+Compared with the previous public package, it adds optional prepared Stock/Custom launch-library support and
+disables Custom NR/FG and profile-editing controls in Stock mode. Saved settings, reconstruction choices and
+defaults are preserved. Bounded perceptual color transfer remains available below 100% processing.
+The recovery update has no new toggle. Install the matching runtime package;
 your saved global values, appearance choices and game profiles remain in place.
 
 ## Get started
@@ -29,13 +33,15 @@ your saved global values, appearance choices and game profiles remain in place.
    Desktop when using OFXR, and disable any separate external FG layer.
    For a [side-by-side installation](SIDE-BY-SIDE-RUNTIME.md), choose **Custom VDXR**
    in this app's Runtime card. **Stock VDXR** returns to Streamer's official runtime.
-   Streamer and the Controls app can stay open; restart an already running game to
-   use the newly selected runtime.
+   For runtime-only selection, Streamer and Controls can stay open. Optional prepared launch libraries
+   can require a Streamer restart and headset reconnection; the normal install does not prepare them.
+   Restart an already running game to use the newly selected runtime.
 5. Choose **Off**, **OFXR 2×**, **OFXR 3×** or **OFXR 4×**, then an optical-flow backend.
    Start with **NVIDIA (default)**. Fully close and relaunch the game after changing
    either FG selector.
-6. With the updated custom runtime installed, enable **Enable NR**, set **NR coverage (%) to 100**,
-   and set **NR processing resolution (%) to 80** for the first comparison. The toggle, processing,
+6. For a first FG comparison, leave NR off and choose **OFXR 2× / NVIDIA**. To add NR with its separately
+   supplied licensed component, enable **Enable NR**, set **NR coverage (%) to 100**,
+   and set **NR processing resolution (%) to 80**. The toggle, processing,
    coverage and appearance controls save automatically and can be adjusted during play. Compare
    processing 100% and 80% in the same scene.
 
@@ -65,11 +71,12 @@ Global **Reset NR settings** continues to reset only NR and preserves the FG sel
 
 ![The actual Controls app showing an example 4× game profile](images/controls-game-profile.png)
 
-*Example executable path and settings; no personal game inventory is included in the download.*
+*Retained illustration with an example executable and settings. Its override count predates the eleventh setting;
+no personal game inventory is included in the download.*
 
 The scope displays the executable's full path, the number of overrides and inherited values.
-All appearance controls, NR enable, coverage, processing resolution, FG mode and optical-flow
-backend support overrides. **Save game profile** stores all ten displayed values, so later
+All appearance controls, NR enable, coverage, processing resolution, FG mode, optical-flow
+backend and requested reconstruction mode support overrides. **Save game profile** stores all eleven values, so later
 global edits do not change that game's saved setup. New or manually partial profiles inherit
 each missing value from the current global value, then the runtime default. Reset removes
 all saved overrides and restores that inheritance. Missing coverage defaults to **100%** in
@@ -114,6 +121,7 @@ on per-game settings. OFXR 4× requires a matching 4×-capable host and FG modul
 | NR coverage (%) | Centered per-eye rectangle for NR, independent of processing resolution; slider **0–100%**, runtime minimum **10%** | During play, saved after a short pause while dragging |
 | Mode | Off, OFXR 2×, OFXR 3× or OFXR 4× | After restarting the game |
 | Optical-flow backend | NVIDIA or experimental FidelityFX at full resolution | After restarting the game |
+| Requested reconstruction mode | Standard, Depth assist or experimental Depth reconstruction | After restarting the game |
 
 Globals saves immediately. Game scope uses **Save game profile**. The status line confirms
 a saved change or reports an error.
@@ -188,7 +196,9 @@ selector in this app controls the bundled runtime's development redirect; it doe
 not add a fourth entry to Streamer's menu or replace a running game's DLL.
 
 Choose **Custom VDXR** to use the guarded, separately installed runtime, or
-**Stock VDXR** to remove the redirect. Changes save immediately; there is no Apply
+**Stock VDXR** to return to the official route. Without optional prepared launch libraries this removes only the redirect;
+with them, Controls coordinates the corresponding launch routes as described in the [side-by-side guide](SIDE-BY-SIDE-RUNTIME.md).
+The ordinary install does not create those libraries. Changes save immediately; there is no Apply
 button. NR, FG and controller settings are preserved in either direction. Resetting
 NR settings does not change the selected runtime.
 
@@ -246,7 +256,7 @@ From a full source checkout on Windows x64 with Python 3.13 and Tcl/Tk:
 
 Building Controls needs the pinned Python requirements below. The full regression
 command also compiles sampler shaders and requires Windows SDK **10.0.26100.0**
-(including FXC); see the [FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.10.1/tests/frame-generation.md).
+(including FXC); see the [FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.15.1/tests/frame-generation.md).
 
 ```powershell
 python -m venv bin/controls-build-env

@@ -47,6 +47,8 @@ namespace virtualdesktop_openxr {
         ovrResult length(ovrTextureSwapChain chain, int* length);
         ovrResult description(ovrTextureSwapChain chain, ovrTextureSwapChainDesc* desc);
         ovrResult current(ovrTextureSwapChain chain, int* index);
+        // Producer-only readiness peek: never enter the SDK or wait for metadata.
+        bool tryProducerIndex(ovrTextureSwapChain chain, int& index);
         ovrResult buffer(ovrTextureSwapChain chain, int index, REFIID iid, void** output);
         // S: receipt only. Native-only P: actual SDK Commit, after P writes.
         ovrResult commit(ovrTextureSwapChain chain);

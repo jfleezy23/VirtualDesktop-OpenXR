@@ -1,9 +1,11 @@
 # Try VDXR NR and OFXR frame generation
 
-The [November 10 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.10.1)
-improves motion distribution during **4× recovery** while retaining bounded perceptual NR color transfer.
+The [November 15 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.15.1)
+includes **2× recovery after slow frames** and the current NR and 2×/3×/4× delivery paths.
 **OFXR 2×/3×/4×**, frame-delivery recovery and automatic per-game NR/FG profiles remain included.
-Use the existing controls; the recovery update has no new toggle. Controls 2026.11.08.1 remains the matching app.
+The recovery update has no new toggle. The 2026.11.15.1 Controls package reuses the locally tested binary
+labelled 2026.11.08.1, without a fresh rebuild. Compared with the previous public package, it supports optional
+prepared Stock/Custom launch libraries and disables Custom NR/FG controls in Stock mode. Defaults are preserved.
 NR processing resolution and coverage are independent, including **95% coverage / 80% processing** and
 **90% coverage / 85% processing**. FG offers Off, 2×, 3× and 4× and also works with NR off.
 
@@ -23,10 +25,10 @@ it does not provide Steam Frame or ALVR streaming. Frame Launcher's separate Ste
 
 ## Install once
 
-1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.11.10.1.zip` and
-   `VDXR-NR-FG-Controls-Windows-x64-2026.11.08.1.zip` from the
-   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.10.1).
-   Check them against `SHA256SUMS-2026.11.10.1.txt`.
+1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.11.15.1.zip` and
+   `VDXR-NR-FG-Controls-Windows-x64-2026.11.15.1.zip` from the
+   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.15.1).
+   Check them against `SHA256SUMS-2026.11.15.1.txt`.
 2. Follow the [complete side-by-side setup](SIDE-BY-SIDE-RUNTIME.md). It installs the matching host DLL, FG DLL
    and `CUSTOM-RUNTIME.json` under `%ProgramFiles%\VDXR-NR-FG\OpenXR`, then registers the managed path.
    Keep this release's host, FG module and metadata together; older hosts or modules may not support 4×.
@@ -41,22 +43,24 @@ app can live in its own extracted folder. Existing NR, appearance and FG setting
 
 ## First comparison
 
-If you already have a working setup, keep it. Upgrading preserves NR, FG, coverage and appearance settings;
-bounded color transfer applies automatically while NR is enabled and processing is below 100%.
+If you already have a working setup, keep it. Upgrading preserves NR, FG, coverage and appearance settings.
+Fresh settings remain NR off, FG off, 100% processing and 100% coverage.
 
 1. Turn Virtual Desktop's **SSW Off**, and disable any separate external FG layer.
 2. Choose **Globals** for defaults, or select the actual game EXE with **Add game EXE…** for a game profile.
-   Enable NR, set **NR coverage (%) to 100** and **NR processing resolution (%) to 80**.
-   Keep your face, hair, tone and detail choices as they are. NR may also remain off for FG-only use.
-3. Select **OFXR 4×** and **NVIDIA (default)**. Globals save automatically; in game scope, click
+   Leave NR off for a first FG-only comparison; this does not require the licensed NR component.
+3. Select **OFXR 2×** and **NVIDIA (default)**. Keep **Depth assist** when no reconstruction request was
+   previously set; missing usable depth keeps ordinary color FG. Globals save automatically; in game scope, click
    **Save game profile**. Close and relaunch the game after changing FG mode, backend,
    requested reconstruction mode or runtime.
 4. Check that both eyes align, controllers work, and faces, hair, dark scenes and head motion look acceptable.
-   Compare processing **100%** against **80%** in the same scene, with game resolution and other settings held fixed.
+   Compare 3× and 4× separately if desired. To add NR, supply its licensed component, enable NR, set coverage
+   to **100%** and processing to **80%**, then compare processing **100%** against **80%** in the same scene.
+   Hold game resolution and other settings fixed; NR + FG requires coverage of at least **90%**.
 
 ![The actual Controls app with the spatial NR controls](images/controls-overview.png)
 
-*Actual app with example settings, not installation defaults.*
+*Retained Controls illustration with example settings, not installation defaults or a complete view of every selector.*
 
 Globals save automatically; game-profile edits remain drafts until **Save game profile**. Saved NR enable,
 processing, coverage and appearance changes can apply during play. FG mode, backend and requested reconstruction
@@ -71,7 +75,7 @@ Both percentages describe linear dimensions. Reduced processing reconstructs NR 
 its crop edge smoothly; outside coverage, the original image and alpha remain. At 100% coverage there is no crop
 edge. The bounded color transfer is part of this existing reconstruction step; it adds no model evaluation, copy
 or rendering pass. Game pixel density and final output dimensions do not change.
-Processing **100%** uses the unchanged native NR path;
+Processing **100%** uses the native NR path;
 zero NR strength preserves the original RGB. Your appearance settings remain separate. See the
 [Controls guide](NR-FG-CONTROLS.md) for the transition and mixed-setting details.
 
@@ -131,19 +135,21 @@ not automatically converted by selecting VDXR. Routing a game successfully does 
 - If settings fail to save, read the Controls status line and check administrator access.
 - If custom loading fails after a Streamer update, return to Stock and check the
   [side-by-side compatibility notes](SIDE-BY-SIDE-RUNTIME.md#updates-and-verification).
-- To return to the official runtime, close the game, select **Stock VDXR**, then launch again. Streamer may stay open.
+- To return to the official runtime, close the game, select **Stock VDXR**, then launch again. Runtime-only
+  installations can leave Streamer open. An optional prepared launch-library installation may restart it and ask
+  you to reconnect; normal installation does not create those libraries automatically.
   If an older install overwrote vendor DLLs, restore their backup or reinstall/update Streamer first.
 
 Rapid head turns, ghosting and exposure-change artifacts can remain. This release does not establish universal
 game compatibility, artifact-free motion or identical perceived detail at every processing percentage.
-The color update is an appearance change, with no claimed FPS gain or reduced headset latency.
-See the [release notes](releases/2026.11.10.1.md) for scope.
+The recovery update preserves original frame targets; it does not promise an FPS gain or reduced headset latency.
+See the [release notes](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.15.1/docs/releases/2026.11.15.1.md) for scope.
 
 ## Source and licenses
 
 The host retains its MIT license. The optional synthesis module includes OFXR code under LGPL-3.0, with AMD
 FidelityFX and NVIDIA interface notices retained. Matching corresponding source and rebuild instructions accompany
-the release; see the [module notice](../nr-frame-generation/NOTICE.md). Thanks to
+the release; see the [module notice](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.15.1/nr-frame-generation/NOTICE.md). Thanks to
 [janblade's F5 project](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass) for the spatial and perceptual-transfer
 inspiration, and [Björn Ottosson](https://bottosson.github.io/posts/oklab/) for the published Oklab transforms.
 The runtime implementation is independently written; no F5 GPL implementation was copied.

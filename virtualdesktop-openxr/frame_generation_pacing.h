@@ -3,8 +3,16 @@
 #include <array>
 #include <cstdint>
 
+// Release retains both positions of an issued 2x reservation.
+#ifndef VDXR_PRIVATE_2X_RECOVERY
+#define VDXR_PRIVATE_2X_RECOVERY 1
+#endif
+static_assert(VDXR_PRIVATE_2X_RECOVERY == 1);
+
 namespace virtualdesktop_openxr {
     enum class FrameGenerationRole { synthetic1, synthetic2, real, synthetic3 };
+
+    enum class PredictionReservationReason : uint32_t { none, usable, expired2, monotonic, discarded };
 
     struct PredictionReservation {
         int64_t currentTarget{};
@@ -16,6 +24,9 @@ namespace virtualdesktop_openxr {
         uint32_t multiplier{};
         bool valid{};
         bool shouldRender{true};
+        PredictionReservationReason reason{};
+        // The actual public timestamp returned by this Wait, including clamp.
+        int64_t returnedDisplayTime{};
     };
 
     struct FrameGenerationSlotPlan {
@@ -33,18 +44,14 @@ namespace virtualdesktop_openxr {
         }
     };
 
-    // Apply only after the cadence planner admits a complete group.
-    bool applyUniformStretchedFourSamples(FrameGenerationSlotPlan& plan,
-                                          int64_t previousTime,
-                                          int64_t currentTime) noexcept;
-
     class FrameGenerationCadence {
       public:
         PredictionReservation reserve(int64_t now,
                                       int64_t nextNativeTarget,
                                       int64_t displayPeriod,
                                       uint32_t multiplier,
-                                      uint64_t nextNativeId) const noexcept;
+                                      uint64_t nextNativeId,
+                                      bool shouldRender = true) const noexcept;
         FrameGenerationSlotPlan plan(const PredictionReservation& reservation,
                                      int64_t previousTime,
                                      bool pairReady) noexcept;

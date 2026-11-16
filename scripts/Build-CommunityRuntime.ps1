@@ -6,6 +6,7 @@ param(
     [string]$MsBuildPath = '',
     [ValidateSet('v143', 'v145')][string]$Toolset = 'v145',
     [string]$VCToolsVersion = '',
+    [string]$DxcPath = '',
     [switch]$Analyze
 )
 $ErrorActionPreference = 'Stop'
@@ -77,6 +78,7 @@ $arguments = @(
 )
 if ($Analyze) { $arguments += '/p:WholeProgramOptimization=false' }
 if ($VCToolsVersion) { $arguments += "/p:VCToolsVersion=$VCToolsVersion" }
+if ($DxcPath) { $arguments += "/p:DxcPath=$((Resolve-Path -LiteralPath $DxcPath).Path)" }
 & $MsBuildPath @arguments
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Output "PASS: core $Configuration|$Platform (analyze=$Analyze); objects: $objects"

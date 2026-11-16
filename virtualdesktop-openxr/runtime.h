@@ -437,6 +437,10 @@ namespace virtualdesktop_openxr {
             std::array<ovrTextureSwapChain, 3> pendingColourCommits{};
             DlssnrSettings dlssnrSettings;
             float sharpenFactor{0.f};
+            // Producer-scoped permission; never a worker or capacity-admission flag.
+            bool earlyNrPermission{};
+            std::optional<bool> syncGpuWorkOverride;
+            std::optional<bool> compositorDepthOverride;
             // State for the current frame.
             // Ordered unique lists retain capacity across frames. The drain
             // snapshot stays independent while resolve removes pending entries.
@@ -639,13 +643,18 @@ namespace virtualdesktop_openxr {
         XrSpaceLocationFlags getBodyJointPose(XrFullBodyJointMETA joint, XrTime time, XrPosef& pose) const;
 
         // frame.cpp
+        enum class LayerStage { Complete, Colour, Pose };
         XrResult handleProjectionLayer(const XrCompositionLayerProjection& proj,
                                        ovrLayer_Union& layer,
-                                       std::unique_lock<std::mutex>* producerLease = nullptr);
+                                       std::unique_lock<std::mutex>* producerLease = nullptr,
+                                       LayerStage stage = LayerStage::Complete);
         XrResult handleQuadCylinderLayer(const XrCompositionLayerQuad& quad,
                                          const XrCompositionLayerCylinderKHR& cylinder,
-                                         ovrLayer_Union& layer);
-        XrResult handleCubeLayer(const XrCompositionLayerCubeKHR& cube, ovrLayer_Union& layer);
+                                         ovrLayer_Union& layer,
+                                         LayerStage stage = LayerStage::Complete);
+        XrResult handleCubeLayer(const XrCompositionLayerCubeKHR& cube,
+                                 ovrLayer_Union& layer,
+                                 LayerStage stage = LayerStage::Complete);
         void preprocessSwapchainImage(Swapchain& xrSwapchain,
                                       uint32_t layerIndex,
                                       uint32_t slice,
@@ -1030,6 +1039,7 @@ namespace virtualdesktop_openxr {
         void orderApplicationAfterSourceReads(uint64_t complete);
         void cleanupFrameGeneration();
         void asyncFrameGenerationThread();
+        void waitForFrameGenerationSourceOwnership(std::unique_lock<std::mutex>& frameLock);
         void waitForFrameGenerationCapacity();
         void noteFrameGenerationPresentationMiss() noexcept;
 
@@ -1143,6 +1153,7 @@ namespace virtualdesktop_openxr {
         static constexpr uint32_t k_numGpuTimers = 3;
         std::unique_ptr<ITimer> m_gpuTimerApp[k_numGpuTimers];
         std::unique_ptr<ITimer> m_gpuTimerPrecomposition[k_numGpuTimers];
+        std::array<bool, k_numGpuTimers> m_gpuTimerPrecompositionRecorded{};
         uint32_t m_currentTimerIndex{0};
         std::shared_ptr<SettingsWatcherState> m_settingsWatcherState;
     };

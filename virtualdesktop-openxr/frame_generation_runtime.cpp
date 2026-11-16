@@ -3,6 +3,16 @@
 #include "log.h"
 #include "utils.h"
 #include "frame_generation_layers.h"
+#include "LastRoleWaitGuard.h"
+
+#ifndef VDXR_PRIVATE_LAST_ROLE_WAIT_MODE
+#define VDXR_PRIVATE_LAST_ROLE_WAIT_MODE 1
+#endif
+#ifndef VDXR_PRIVATE_KEEP_ORIGINAL_2X_WAIT
+#define VDXR_PRIVATE_KEEP_ORIGINAL_2X_WAIT 0
+#endif
+static_assert(VDXR_PRIVATE_KEEP_ORIGINAL_2X_WAIT == 0);
+static_assert(VDXR_PRIVATE_LAST_ROLE_WAIT_MODE == 1, "Release requires the C++ last-role wait guard");
 
 namespace virtualdesktop_openxr {
     using namespace log;
@@ -46,16 +56,20 @@ namespace virtualdesktop_openxr {
             }
             return false;
         };
-        const bool eligible = m_frameGenerationMode && !m_frameGenerationUnavailable && m_useAsyncSubmission &&
-                              !m_useApplicationDeviceForSubmission &&
-                              (!settings.enabled || settings.foveationSize >= .90f) && info.layerCount == 1 &&
-                              (settings.enabled || m_d3d11Context || m_d3d12CommandQueue) &&
-                              m_layersForFrame.size() == 1 &&
-                              (m_layersForFrame[0].Header.Type == ovrLayerType_EyeFov ||
-                               m_layersForFrame[0].Header.Type == ovrLayerType_EyeFovDepth) &&
-                              m_precompositor.finalColour[0] && m_precompositor.finalColour[1] &&
-                              m_fgBegunReservation.valid && m_fgBegunReservation.shouldRender && info.layers &&
-                              info.layers[0] && info.displayTime == m_fgBegunReservation.currentTarget;
+        const bool expiredRecovery =
+            VDXR_PRIVATE_2X_RECOVERY && m_frameGenerationMode == 2 && m_fgBegunReservation.multiplier == 2 &&
+            m_fgBegunReservation.reason == PredictionReservationReason::expired2 && !m_fgBegunReservation.valid &&
+            m_fgBegunReservation.shouldRender && info.displayTime == m_fgBegunReservation.returnedDisplayTime;
+        const bool eligible =
+            m_frameGenerationMode && !m_frameGenerationUnavailable && m_useAsyncSubmission &&
+            !m_useApplicationDeviceForSubmission && (!settings.enabled || settings.foveationSize >= .90f) &&
+            info.layerCount == 1 && (settings.enabled || m_d3d11Context || m_d3d12CommandQueue) &&
+            m_layersForFrame.size() == 1 &&
+            (m_layersForFrame[0].Header.Type == ovrLayerType_EyeFov ||
+             m_layersForFrame[0].Header.Type == ovrLayerType_EyeFovDepth) &&
+            m_precompositor.finalColour[0] && m_precompositor.finalColour[1] && m_fgBegunReservation.shouldRender &&
+            info.layers && info.layers[0] &&
+            ((m_fgBegunReservation.valid && info.displayTime == m_fgBegunReservation.currentTarget) || expiredRecovery);
         if (!eligible) {
             return bypass();
         }
@@ -76,7 +90,7 @@ namespace virtualdesktop_openxr {
         if (isSRGBFormat(leftSource.dxgiFormatForSubmission) != isSRGBFormat(rightSource.dxgiFormatForSubmission)) {
             return bypass();
         }
-        if (m_fgNeedReprime.exchange(false)) {
+        if (!expiredRecovery && m_fgNeedReprime.exchange(false)) {
             m_fgPreviousCapturedTime = 0;
         }
         const auto& projection = m_layersForFrame[0].EyeFov;
@@ -186,6 +200,50 @@ namespace virtualdesktop_openxr {
             if (!std::isfinite(norm) || std::abs(norm - 1.f) > .02f || view.fov[0] >= view.fov[1] ||
                 view.fov[3] >= view.fov[2])
                 guide.affineVerified = false;
+        }
+        if (expiredRecovery) {
+            // Timing-only recovery never initializes/captures a GPU ticket.
+            // Apply capture's colour/view admission checks before preserving
+            // future 2x cadence. Unsupported input still takes ordinary bypass.
+            ComPtr<IUnknown> expectedDevice;
+            if (!m_ovrSubmissionDevice || FAILED(m_ovrSubmissionDevice.As(&expectedDevice)))
+                return bypass();
+            for (unsigned eye = 0; eye < 2; ++eye) {
+                const auto& view = input.views[eye];
+                const auto& rect = view.rect;
+                D3D11_TEXTURE2D_DESC desc{};
+                ComPtr<ID3D11Device> owner;
+                ComPtr<IUnknown> identity;
+                input.colour[eye]->GetDevice(&owner);
+                input.colour[eye]->GetDesc(&desc);
+                const bool bgra = desc.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS ||
+                                  desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                                  desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+                if (!owner || FAILED(owner.As(&identity)) || identity.Get() != expectedDevice.Get() ||
+                    desc.SampleDesc.Count != 1 || !desc.ArraySize || !rect.width || !rect.height ||
+                    rect.width != static_cast<unsigned>(size.w) || rect.height != static_cast<unsigned>(size.h) ||
+                    uint64_t(rect.x) + rect.width > desc.Width || uint64_t(rect.y) + rect.height > desc.Height ||
+                    (!bgra && desc.Format != DXGI_FORMAT_R8G8B8A8_TYPELESS && desc.Format != format &&
+                     desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM))
+                    return bypass();
+                float norm{};
+                for (const auto component : view.orientation) {
+                    if (!std::isfinite(component))
+                        return bypass();
+                    norm += component * component;
+                }
+                if (std::abs(norm - 1.f) > .02f)
+                    return bypass();
+                for (const auto component : view.position)
+                    if (!std::isfinite(component))
+                        return bypass();
+                for (const auto component : view.fov)
+                    if (!std::isfinite(component))
+                        return bypass();
+                if (view.fov[0] >= view.fov[1] || view.fov[3] >= view.fov[2])
+                    return bypass();
+            }
+            return bypass(true);
         }
         if (!m_fgDepthGuidanceRequested && m_frameGenerationDepthMode != 0 && m_frameGenerationBackend != 1 &&
             frameGenerationDepthSourceValid(m_ovrSubmissionDevice.Get(), input.depth[0]) &&
@@ -353,9 +411,6 @@ namespace virtualdesktop_openxr {
         }
         input.slots = m_frameGenerationCadence.plan(
             m_fgBegunReservation, m_fgPreviousCapturedTime, m_fgPreviousCapturedTime != 0);
-        // Distribute stretched 4x content steps without moving
-        // native presentation targets, pose predictions, or readiness deadlines.
-        applyUniformStretchedFourSamples(input.slots, m_fgPreviousCapturedTime, input.time);
         const bool collectDepthDiagnostics = IsTraceEnabled();
         FrameGeneration::CaptureDiagnostics depthDiagnostics{};
         const auto result = m_frameGeneration->capture(
@@ -640,32 +695,54 @@ namespace virtualdesktop_openxr {
         CHECK_MSG(!m_fgDepthCompletionUnknown, "FG depth completion unknown; retaining the complete graph");
         if (m_frameGeneration) {
             const auto deadline = std::chrono::steady_clock::now() + 10s;
+            // The worker is joined at session teardown. Reconfiguration runs only
+            // after admission with no active group. Cleanup is the sole event waiter.
+            const auto settle = [&](OwnedFrameTransaction* transaction) {
+                while (true) {
+                    HANDLE event{};
+                    HRESULT result;
+                    if (transaction) {
+                        result = m_frameGeneration->retire(*transaction);
+                        if (result == VDXRFG_E_BUSY) {
+                            result = m_frameGeneration->prepareRetirementWait(*transaction, event);
+                            if (result == VDXRFG_E_BUSY) {
+                                CHECK_MSG(event, "Missing FG cleanup retirement event");
+                            } else if (result == S_OK) {
+                                // The GPU may have finished between retire and
+                                // registration. Retry before treating BUSY as private.
+                                result = m_frameGeneration->retire(*transaction);
+                            }
+                        }
+                    } else {
+                        result = m_frameGeneration->shutdown(&event);
+                    }
+                    if (result != VDXRFG_E_BUSY) {
+                        CHECK_HRCMD(result);
+                        return;
+                    }
+                    const auto remaining =
+                        std::chrono::ceil<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+                    if (remaining <= 0ms)
+                        CHECK_HRCMD(result);
+                    if (event) {
+                        const auto waited = WaitForSingleObject(event, static_cast<DWORD>(remaining.count()));
+                        CHECK_MSG(waited == WAIT_OBJECT_0 || waited == WAIT_TIMEOUT, "FG cleanup event wait failed");
+                        if (waited == WAIT_TIMEOUT)
+                            CHECK_HRCMD(result);
+                    } else {
+                        // Private module holds (or unknown live tickets at shutdown)
+                        // expose no fence. Preserve the bounded compatibility retry.
+                        std::this_thread::sleep_for(1ms);
+                    }
+                }
+            };
             for (auto* transaction :
                  {&m_fgTransactionForFrame, &m_fgTransactionForSubmission, &m_fgFailedTransaction}) {
-                if (!transaction->ticket.token) {
-                    continue;
-                }
-                HRESULT result;
-                do {
-                    result = m_frameGeneration->retire(*transaction);
-                    if (result != VDXRFG_E_BUSY) {
-                        break;
-                    }
-                    std::this_thread::sleep_for(1ms);
-                } while (std::chrono::steady_clock::now() < deadline);
-                CHECK_HRCMD(result);
+                if (transaction->ticket.token)
+                    settle(transaction);
             }
-            // Leave the complete graph owned on failed settlement. The caller
-            // must stop teardown rather than destroying its presentation chains.
-            HRESULT result;
-            do {
-                result = m_frameGeneration->shutdown();
-                if (result != VDXRFG_E_BUSY) {
-                    break;
-                }
-                std::this_thread::sleep_for(1ms);
-            } while (std::chrono::steady_clock::now() < deadline);
-            CHECK_HRCMD(result);
+            // Failed settlement retains the graph and its registered events.
+            settle(nullptr);
             m_frameGeneration.reset();
         }
         for (auto& bank : m_fgPresentationBanks) {
@@ -777,16 +854,17 @@ namespace virtualdesktop_openxr {
                 }
                 if (timing.enabled) {
                     timing.predictionAfter = ovr_GetPredictedDisplayTime(m_ovrSession, nativeId);
-                    timing.beginLeaseEnter = ovr_GetTimeInSeconds();
                 }
                 // Independent delivery keeps the SDK on its presentation
                 // context. Its blocking Begin must not lease the producer's
                 // unrelated context; the SDK rendering gate still applies.
                 std::unique_lock contextLease(m_fgContextMutex, std::defer_lock);
                 if (!m_deliveryTransport) {
+                    timing.beginLeaseEnter = timingNow(timing.enabled);
                     contextLease.lock();
+                    timing.beginLeaseAcquired = timingNow(timing.enabled);
                 }
-                timing.beginLeaseAcquired = timing.beginEnter = timingNow(timing.enabled);
+                timing.beginEnter = timingNow(timing.enabled);
                 const auto beginResult = beginSubmissionFrame(m_ovrSession, nativeId);
                 timing.beginReturn = timingNow(timing.enabled);
                 timing.beginResult = static_cast<int>(beginResult);
@@ -852,12 +930,15 @@ namespace virtualdesktop_openxr {
                     CHECK_HRCMD(m_frameGeneration->copyOutput(transaction, role, output.images[image].Get()));
                     copyQueued[index] = timingNow(traceGroup);
                 };
+                bool depthCopiedBeforeReal{};
                 if (hasGpuOutput) {
                     std::unique_lock contextLease(m_fgContextMutex);
                     // Stage finalized B before any synthesis wait. A missed
                     // synthetic deadline can now use the same 100% NR pixels.
-                    if (m_deliveryTransport && ownedLayers[0].Header.Type == ovrLayerType_EyeFovDepth)
+                    if (m_deliveryTransport && ownedLayers[0].Header.Type == ovrLayerType_EyeFovDepth) {
                         m_deliveryTransport->copy(m_fgDepthDelivery[transaction.ticket.bank]);
+                        depthCopiedBeforeReal = true;
+                    }
                     prepareRole(FrameGenerationRole::real);
                 }
                 if (!hasGpuOutput && m_deliveryTransport) {
@@ -871,7 +952,16 @@ namespace virtualdesktop_openxr {
                 }
                 const unsigned cycles =
                     reservation.multiplier >= 1 && reservation.multiplier <= 4 ? reservation.multiplier : 1;
+                // Closed native cycles can omit expired original slots. An
+                // already-begun cycle still needs its matching End; do not
+                // assume that the SDK permits replacing that open cycle.
                 const bool recoverExpiredSlots = generated && cycles == 4 && !begun;
+                const bool recoverReadyContent =
+                    generated && !begun && m_deliveryTransport && (cycles == 2 || cycles == 3);
+                // Comparison arm: retain preparation and producer admission
+                // before the SDK's blocking timing calls. Recovery and
+                // independent-End lease release remain enabled.
+                bool stopping{};
                 unsigned firstUsefulSlot{};
                 const auto awaitRole = [&](FrameGenerationRole role, int64_t target) {
                     const auto deadline = xrTimeToOvrTime(target);
@@ -910,13 +1000,29 @@ namespace virtualdesktop_openxr {
                         if (!completionEvent || ovr_GetTimeInSeconds() >= deadline) {
                             return finish(false);
                         }
-                        // GPU completion wakes us immediately. Bound timeout
-                        // retries for shutdown; neither context mutex is held.
-                        const auto waited = WaitForSingleObject(completionEvent, 1);
-                        if (waited == WAIT_FAILED) {
-                            CHECK_HRCMD(HRESULT_FROM_WIN32(GetLastError()));
+                        // A timeout checks only cancellation and the role
+                        // deadline. Revisit GPU readiness/context ownership on
+                        // an actual wake, or once at the deadline; a pending
+                        // event registration stays valid across these checks.
+                        while (true) {
+                            const auto waited = WaitForSingleObject(completionEvent, 1);
+                            if (waited == WAIT_FAILED) {
+                                CHECK_HRCMD(HRESULT_FROM_WIN32(GetLastError()));
+                            }
+                            CHECK_MSG(waited == WAIT_OBJECT_0 || waited == WAIT_TIMEOUT, "FG ready event wait failed");
+                            if (waited == WAIT_OBJECT_0) {
+                                break;
+                            }
+                            {
+                                std::unique_lock lock(m_asyncSubmissionMutex);
+                                if (m_terminateAsyncThread) {
+                                    return finish(false);
+                                }
+                            }
+                            if (ovr_GetTimeInSeconds() >= deadline) {
+                                break;
+                            }
                         }
-                        CHECK_MSG(waited == WAIT_OBJECT_0 || waited == WAIT_TIMEOUT, "FG ready event wait failed");
                     }
                 };
                 bool retainedMissNoted{};
@@ -932,9 +1038,7 @@ namespace virtualdesktop_openxr {
                         noteFrameGenerationPresentationMiss();
                     }
                 }
-                double leaseEnter = timingNow(traceGroup);
                 std::unique_lock contextLease(m_fgContextMutex);
-                double leaseAcquired = timingNow(traceGroup);
                 if (generated && !recoverExpiredSlots) {
                     // Only S1 may be complete. Do not queue an unresolved tail
                     // dependency ahead of its native handoff or independent B.
@@ -961,26 +1065,129 @@ namespace virtualdesktop_openxr {
                         m_asyncSubmissionCondVar.notify_all();
                     }
                 };
-                bool stopping{};
                 if (m_deliveryTransport) {
                     // The current copies precede any next-producer work.
                     // Admit that work before the SDK timing/Begin calls when
                     // the existing full-output ownership predicate permits it.
                     openAdmission();
                 }
-                if (!begun && !recoverExpiredSlots) {
+                if (!begun && !recoverExpiredSlots && !stopping) {
                     // Prepare subsequent groups before the SDK's timing wait.
                     // Waiting first leaves only its short render lead for
                     // cross-API destination copies and completion polling.
                     contextLease.unlock();
                     stopping = !beginNative();
-                    leaseEnter = timingNow(traceGroup);
                 }
                 // Acquire the producer lease below only if presentation still
                 // needs mutable FG state or pending-copy settlement.
                 bool committedReal{};
                 ovrLayer_Union realLayer{};
+                ovrLayer_Union lastSyntheticLayer{};
+                unsigned lastSyntheticSlot = cycles;
+                bool realPresented{};
+                // Worker-local immutable handoff owners. The active group pins
+                // its native chains, current-bank batch and State-owned event;
+                // neither opposite-bank capture nor quiescent reset can replace
+                // them. Keeping one Transfer retains its depth chain without a
+                // per-frame vector allocation or changing failure-bank ownership.
+                FrameGeneration::LastRoleWaitReceipt lastRoleWait;
+                bool lastRolePresentationOnly{};
+                bool lastRoleWaitFirstWait{};
+                ovrTextureSwapChain receiptSelectedChain{}, receiptRealChain{}, receiptDepthChain{};
+                int receiptSelectedImage{-1}, receiptRealImage{-1}, receiptDepthImage{-1};
+                ComPtr<ID3D11Texture2D> receiptDepthDestination;
+                DeliveryTransport::Transfer receiptDepthTransfer;
+                const DeliveryTransport::Batch* receiptDepthBatch{};
+                uint64_t receiptDepthSourceReady{}, receiptDepthSerial{};
+                const auto checkReceiptResult = [&](HRESULT result) {
+                    if (result == VDXRFG_E_POISONED) {
+                        // Only an actual MAX sample enters this serialized
+                        // unknown-completion path. OS wait failure retains the
+                        // original HRESULT and ordinary failed-group owners.
+                        std::exception_ptr fault;
+                        try {
+                            CHECK_HRCMD(result);
+                        } catch (...) {
+                            fault = std::current_exception();
+                        }
+                        {
+                            std::unique_lock lock(m_asyncSubmissionMutex);
+                            if (!m_asyncSubmissionError)
+                                m_asyncSubmissionError = fault;
+                            m_asyncSubmissionReady = false;
+                            m_asyncSubmissionCondVar.notify_all();
+                        }
+                        // Publish cancellation before acquiring S: an admitted
+                        // producer can be holding S while awaiting this group.
+                        if (!contextLease.owns_lock())
+                            contextLease.lock();
+                        m_frameGeneration->poisonLastRoleWait(lastRoleWait);
+                    }
+                    if (result != VDXRFG_E_BUSY)
+                        CHECK_HRCMD(result);
+                    return result;
+                };
+                const auto receiptCopyReady = [&](FrameGenerationRole role) {
+                    if (!lastRoleWait.consumerFence)
+                        return m_frameGeneration->copyReady(transaction, role);
+                    CHECK_MSG(lastRoleWait.healthy(), "FG last-role graph is poisoned");
+                    CHECK_MSG(role == FrameGenerationRole::real ||
+                                  static_cast<unsigned>(role) == lastRoleWait.selectedRole,
+                              "FG last-role receipt role changed");
+                    // Replace the original B probe at the same site, retaining
+                    // device-removal detection even after entry certification.
+                    return checkReceiptResult(lastRoleWait.observe(role)) == S_OK;
+                };
+                const auto validateReceiptHandoff = [&](FrameGenerationRole role, bool repeated) {
+                    if (!lastRoleWait.consumerFence)
+                        return;
+                    CHECK_MSG(lastRoleWait.healthy(), "FG last-role graph is poisoned");
+                    {
+                        std::unique_lock lock(m_asyncSubmissionMutex);
+                        if (m_asyncSubmissionError)
+                            std::rethrow_exception(m_asyncSubmissionError);
+                    }
+                    CHECK_MSG(transaction.ownerGeneration == lastRoleWait.ownerGeneration &&
+                                  transaction.ticket.generation == lastRoleWait.ticketGeneration &&
+                                  transaction.ticket.token == lastRoleWait.ticketToken &&
+                                  transaction.ticket.previous_serial == lastRoleWait.previousSerial &&
+                                  transaction.ticket.current_serial == lastRoleWait.serial &&
+                                  transaction.ticket.bank == lastRoleWait.bank,
+                              "FG last-role receipt owner changed");
+                    if (!repeated || role == FrameGenerationRole::real) {
+                        const bool real = role == FrameGenerationRole::real;
+                        CHECK_MSG(real || static_cast<unsigned>(role) == lastRoleWait.selectedRole,
+                                  "FG last-role handoff role changed");
+                        const int image = real ? receiptRealImage : receiptSelectedImage;
+                        const auto chain = real ? receiptRealChain : receiptSelectedChain;
+                        const auto destination =
+                            real ? lastRoleWait.realDestination.Get() : lastRoleWait.selectedDestination.Get();
+                        auto& output = presentationRole(role);
+                        CHECK_MSG(preparedImages[static_cast<unsigned>(role)] == image && image >= 0 &&
+                                      static_cast<size_t>(image) < output.images.size() &&
+                                      output.ovrSwapchain == chain && output.images[image].Get() == destination,
+                                  "FG last-role prepared image changed");
+                        if (real && receiptDepthBatch) {
+                            const auto& depth = m_fgDepthPresentationBanks[lastRoleWait.bank];
+                            const auto& batch = m_fgDepthDelivery[lastRoleWait.bank];
+                            CHECK_MSG(&batch == receiptDepthBatch && batch.sourceReady == receiptDepthSourceReady &&
+                                          batch.serial == receiptDepthSerial && batch.images.size() == 1 &&
+                                          batch.images[0].owner == receiptDepthTransfer.owner &&
+                                          batch.images[0].sourceIndex == receiptDepthTransfer.sourceIndex &&
+                                          depth.token == lastRoleWait.ticketToken &&
+                                          depth.preparedImage == receiptDepthImage &&
+                                          depth.output.ovrSwapchain == receiptDepthChain && receiptDepthImage >= 0 &&
+                                          static_cast<size_t>(receiptDepthImage) < depth.output.images.size() &&
+                                          depth.output.images[receiptDepthImage].Get() == receiptDepthDestination.Get(),
+                                      "FG last-role real depth pair changed");
+                        }
+                    }
+                };
                 for (unsigned slot = 0; slot < cycles && !stopping; ++slot) {
+                    // Last new acquisition of this retained lease in this
+                    // iteration, not total wait/hold time. Zero means no new
+                    // acquisition; a lease inherited from preparation may exist.
+                    double leaseEnter{}, leaseAcquired{};
                     if (recoverExpiredSlots && generated && !begun && slot < cycles - 1) {
                         while (slot < cycles - 1) {
                             // A slightly late ready image is still useful until
@@ -1047,7 +1254,9 @@ namespace virtualdesktop_openxr {
                             contextLease.unlock();
                         const bool outputReady =
                             awaitRole(transaction.slots.roles[slot], transaction.slots.targets[slot]);
+                        leaseEnter = timingNow(traceGroup);
                         contextLease.lock();
+                        leaseAcquired = timingNow(traceGroup);
                         if (outputReady) {
                             for (unsigned tail = slot; tail < cycles - 1; ++tail)
                                 prepareRole(transaction.slots.roles[tail]);
@@ -1061,19 +1270,69 @@ namespace virtualdesktop_openxr {
                     if (!begun && !beginNative()) {
                         break;
                     }
+                    // SDK cycle IDs remain reserved and consecutive. Content
+                    // can advance after a blocking Begin, but never before its
+                    // original time or backwards after B has been presented.
+                    unsigned contentSlot = slot;
+                    if (recoverReadyContent && !generated && !realPresented && !slot && !admissionOpened) {
+                        // Source work can finish inside the blocking SDK Begin
+                        // after missing its first deadline. Recover it without
+                        // another source wait or waiting for the producer lock.
+                        const bool alreadyOwned = contextLease.owns_lock();
+                        const auto recoveryLeaseEnter = timingNow(traceGroup);
+                        if (alreadyOwned || contextLease.try_lock()) {
+                            if (!alreadyOwned) {
+                                leaseEnter = recoveryLeaseEnter;
+                                leaseAcquired = timingNow(traceGroup);
+                            }
+                            const auto now = ovrTimeToXrTime(ovr_GetTimeInSeconds());
+                            if (now < transaction.slots.targets[cycles - 1] && m_frameGeneration->ready(transaction)) {
+                                contentSlot = cycles == 3 && now >= transaction.slots.targets[1] ? 1u : 0u;
+                                firstUsefulSlot = contentSlot;
+                                for (unsigned tail = contentSlot; tail < cycles - 1; ++tail) {
+                                    const auto role = transaction.slots.roles[tail];
+                                    if (preparedImages[static_cast<unsigned>(role)] < 0)
+                                        prepareRole(role);
+                                }
+                                generated = true;
+                                // All new current copies still precede any
+                                // next-producer work. Keep the lease through
+                                // existing selected-copy qualification below.
+                                openAdmission();
+                            } else if (!alreadyOwned) {
+                                contextLease.unlock();
+                            }
+                        }
+                    }
+                    if (recoverReadyContent) {
+                        const auto now = ovrTimeToXrTime(ovr_GetTimeInSeconds());
+                        if (realPresented || slot == cycles - 1 || now >= transaction.slots.targets[cycles - 1]) {
+                            generated = false;
+                        } else if (cycles == 3 && now >= transaction.slots.targets[1] &&
+                                   preparedImages[static_cast<unsigned>(FrameGenerationRole::synthetic2)] >= 0 &&
+                                   receiptCopyReady(FrameGenerationRole::synthetic2)) {
+                            // Only a completed local copy may replace obsolete
+                            // S1 here; never queue or wait on a future S2.
+                            contentSlot = 1;
+                            generated = true;
+                        } else if (lastSyntheticSlot < cycles - 1 && (!generated || slot < lastSyntheticSlot)) {
+                            contentSlot = lastSyntheticSlot;
+                            generated = true;
+                        }
+                    }
                     // Only the selected image must be complete for this handoff.
                     // Waiting for a later copy can strand a ready image behind
                     // the admitted producer's unrelated context lease. All
                     // images and the highest consumer fence remain owned until
                     // retirement, independently of this per-image readiness.
-                    const auto currentCopyRole = generated ? transaction.slots.roles[slot] : FrameGenerationRole::real;
-                    const bool independentPresentation = hasGpuOutput && m_deliveryTransport && admissionOpened &&
-                                                         m_frameGeneration->copyReady(transaction, currentCopyRole);
+                    const auto currentCopyRole =
+                        generated ? transaction.slots.roles[contentSlot] : FrameGenerationRole::real;
+                    bool independentPresentation =
+                        hasGpuOutput && m_deliveryTransport && admissionOpened && receiptCopyReady(currentCopyRole);
                     if (independentPresentation) {
                         if (contextLease.owns_lock()) {
                             contextLease.unlock();
                         }
-                        leaseEnter = leaseAcquired = 0.; // No producer lease was needed.
                     } else if (!contextLease.owns_lock()) {
                         leaseEnter = timingNow(traceGroup);
                         contextLease.lock();
@@ -1083,43 +1342,177 @@ namespace virtualdesktop_openxr {
                     unsigned layerCount{};
                     ovrLayer_Union layer{};
                     FrameGenerationRole selectedRole = FrameGenerationRole::real;
+                    bool repeatedSynthetic{};
+                    bool selectedCopyObserved = independentPresentation;
                     double copyWaitEnter{}, copyWaitReturn{}, commitEnter{}, commitReturn{};
                     int commitResult{};
                     if (hasGpuOutput) {
-                        auto role = generated ? transaction.slots.roles[slot] : FrameGenerationRole::real;
-                        // A missed later slot is real-only; never retime S2 with
-                        // its original fraction or replay an already sent S1.
+                        auto role = generated ? transaction.slots.roles[contentSlot] : FrameGenerationRole::real;
+                        // Keep each image's original fraction. Recovery can use
+                        // a later prepared image or repeat a qualified current-
+                        // group image; an already-presented B stays absorbing.
                         if (generated && slot < cycles - 1) {
                             copyWaitEnter = timingNow(traceGroup);
-                            const auto deadline = xrTimeToOvrTime(transaction.slots.targets[slot]);
-                            bool copyIsReady =
-                                independentPresentation || m_frameGeneration->copyReady(transaction, role);
-                            while (!copyIsReady && ovr_GetTimeInSeconds() < deadline) {
-                                const auto remainingMs = (deadline - ovr_GetTimeInSeconds()) * 1000;
-                                const auto timeoutMs = static_cast<DWORD>(std::clamp(std::ceil(remainingMs), 1., 5.));
-                                const auto result = m_frameGeneration->waitForCopy(transaction, role, timeoutMs);
-                                if (result != VDXRFG_E_BUSY) {
-                                    CHECK_HRCMD(result);
-                                }
-                                {
-                                    std::unique_lock lock(m_asyncSubmissionMutex);
-                                    if (m_terminateAsyncThread) {
-                                        break;
+                            bool copyCompleted{}, copyStopping{};
+                            const auto advancePreparedContent = [&] {
+                                if (!recoverReadyContent || cycles != 3 || contentSlot != 0 ||
+                                    preparedImages[static_cast<unsigned>(FrameGenerationRole::synthetic2)] < 0)
+                                    return false;
+                                const auto now = ovrTimeToXrTime(ovr_GetTimeInSeconds());
+                                if (now < transaction.slots.targets[1] || now >= transaction.slots.targets[2])
+                                    return false;
+                                // Prepared means its synthesis source was
+                                // already complete. Never sacrifice an owned,
+                                // ready image to reacquire a busy producer lease.
+                                if (!contextLease.owns_lock() &&
+                                    !m_frameGeneration->copyReady(transaction, FrameGenerationRole::synthetic2))
+                                    return false;
+                                contentSlot = 1;
+                                role = FrameGenerationRole::synthetic2;
+                                return true;
+                            };
+                            while (true) {
+                                advancePreparedContent();
+                                // Wait only for a queued, source-ready local
+                                // copy, up to the next ORIGINAL content target.
+                                // There is at most one forward S1->S2 advance.
+                                const auto deadline = xrTimeToOvrTime(
+                                    transaction.slots.targets[contentSlot + (recoverReadyContent ? 1 : 0)]);
+                                bool copyIsReady =
+                                    (independentPresentation && role == currentCopyRole) || receiptCopyReady(role);
+                                while (!copyIsReady && ovr_GetTimeInSeconds() < deadline) {
+                                    const auto remainingMs = (deadline - ovr_GetTimeInSeconds()) * 1000;
+                                    const auto timeoutMs =
+                                        static_cast<DWORD>(std::clamp(std::ceil(remainingMs), 1., 5.));
+                                    HRESULT result = S_FALSE;
+                                    if (!lastRoleWait.consumerFence && contextLease.owns_lock() && hasGpuOutput &&
+                                        m_deliveryTransport && admissionOpened && begun && generated &&
+                                        slot < cycles - 1 && contentSlot == cycles - 2 &&
+                                        role == transaction.slots.roles[cycles - 2]) {
+                                        bool copiesStaged = !m_fgNeedReprime;
+                                        for (unsigned tail = firstUsefulSlot; tail < cycles - 1; ++tail)
+                                            copiesStaged &=
+                                                preparedImages[static_cast<unsigned>(transaction.slots.roles[tail])] >=
+                                                0;
+                                        const auto realIndex = static_cast<unsigned>(FrameGenerationRole::real);
+                                        const auto selectedIndex = static_cast<unsigned>(role);
+                                        auto& selected = presentationRole(role);
+                                        auto& real = presentationRole(FrameGenerationRole::real);
+                                        const int selectedImage = preparedImages[selectedIndex];
+                                        const int realImage = preparedImages[realIndex];
+                                        const bool imagesValid =
+                                            selectedImage >= 0 && realImage >= 0 &&
+                                            static_cast<size_t>(selectedImage) < selected.images.size() &&
+                                            static_cast<size_t>(realImage) < real.images.size() &&
+                                            selected.ovrSwapchain && real.ovrSwapchain;
+                                        const bool hasDepth = ownedLayers[0].Header.Type == ovrLayerType_EyeFovDepth;
+                                        auto& depth = m_fgDepthPresentationBanks[transaction.ticket.bank];
+                                        const auto& batch = m_fgDepthDelivery[transaction.ticket.bank];
+                                        const bool depthCertified =
+                                            !hasDepth ||
+                                            (depthCopiedBeforeReal && !m_fgDepthCompletionUnknown &&
+                                             depth.token == transaction.ticket.token && depth.preparedImage >= 0 &&
+                                             static_cast<size_t>(depth.preparedImage) < depth.output.images.size() &&
+                                             depth.output.ovrSwapchain &&
+                                             batch.serial == transaction.ticket.current_serial && batch.sourceReady &&
+                                             batch.images.size() == 1 && batch.images[0].owner &&
+                                             batch.images[0].sourceIndex == depth.preparedImage);
+                                        if (copiesStaged && imagesValid && depthCertified) {
+                                            FrameGeneration::LastRoleWaitReceipt candidate;
+                                            result = m_frameGeneration->prepareLastRoleWaitReceipt(
+                                                transaction,
+                                                role,
+                                                selected.images[selectedImage].Get(),
+                                                real.images[realImage].Get(),
+                                                candidate);
+                                            if (result == VDXRFG_E_BUSY) {
+                                                const VdxrLastRoleWaitFactsV1 facts{
+                                                    sizeof(VdxrLastRoleWaitFactsV1),
+                                                    1,
+                                                    cycles,
+                                                    candidate.selectedRole,
+                                                    candidate.ownerGeneration,
+                                                    candidate.ticketGeneration,
+                                                    candidate.ticketToken,
+                                                    candidate.serial,
+                                                    candidate.selectedValue,
+                                                    candidate.realValue,
+                                                    candidate.completedValue,
+                                                    candidate.bank,
+                                                    fg_live::identitiesValidated | fg_live::independentDelivery |
+                                                        fg_live::admissionOpened | fg_live::requiredCopiesStaged |
+                                                        fg_live::nativeCycleOpen | fg_live::depthOrderingCertified |
+                                                        fg_live::originalWaitRequested |
+                                                        (candidate.fullOutputObserved ? fg_live::fullOutputObserved
+                                                                                      : 0u) |
+                                                        (candidate.healthy() ? fg_live::graphHealthy : 0u)};
+                                                const auto authorized = fg_live::authorizeCpp(facts);
+                                                // Valid native receipts can be waited under S
+                                                // even when the guard rejects release (eg B pending).
+                                                lastRoleWait = std::move(candidate);
+                                                lastRoleWaitFirstWait = true;
+                                                receiptSelectedChain = selected.ovrSwapchain;
+                                                receiptRealChain = real.ovrSwapchain;
+                                                receiptSelectedImage = selectedImage;
+                                                receiptRealImage = realImage;
+                                                if (hasDepth) {
+                                                    receiptDepthChain = depth.output.ovrSwapchain;
+                                                    receiptDepthImage = depth.preparedImage;
+                                                    receiptDepthDestination = depth.output.images[depth.preparedImage];
+                                                    receiptDepthTransfer = batch.images[0];
+                                                    receiptDepthBatch = &batch;
+                                                    receiptDepthSourceReady = batch.sourceReady;
+                                                    receiptDepthSerial = batch.serial;
+                                                }
+                                                if (authorized == 1) {
+                                                    contextLease.unlock();
+                                                    lastRolePresentationOnly = true;
+                                                    independentPresentation = true;
+                                                }
+                                            }
+                                        }
                                     }
-                                    if (result == S_OK) {
-                                        copyIsReady = true;
-                                        break;
+                                    if (lastRoleWait.consumerFence) {
+                                        result =
+                                            checkReceiptResult(lastRoleWait.wait(timeoutMs, lastRoleWaitFirstWait));
+                                        lastRoleWaitFirstWait = false;
+                                    } else if (result == S_FALSE)
+                                        result = m_frameGeneration->waitForCopy(transaction, role, timeoutMs);
+                                    if (result != VDXRFG_E_BUSY) {
+                                        CHECK_HRCMD(result);
                                     }
+                                    {
+                                        std::unique_lock lock(m_asyncSubmissionMutex);
+                                        if (m_terminateAsyncThread) {
+                                            copyStopping = true;
+                                            break;
+                                        }
+                                        if (result == S_OK) {
+                                            copyIsReady = true;
+                                            break;
+                                        }
+                                    }
+                                    copyIsReady = receiptCopyReady(role);
                                 }
-                                copyIsReady = m_frameGeneration->copyReady(transaction, role);
+                                copyCompleted = copyIsReady || receiptCopyReady(role);
+                                if (copyStopping || !advancePreparedContent())
+                                    break;
                             }
-                            const bool copyCompleted = copyIsReady || m_frameGeneration->copyReady(transaction, role);
                             const auto selectionTime = copyCompleted ? ovrTimeToXrTime(ovr_GetTimeInSeconds()) : 0;
-                            const bool lateCopy = copyCompleted && selectionTime > transaction.slots.targets[slot];
+                            const bool lateCopy =
+                                copyCompleted && selectionTime > transaction.slots.targets[contentSlot];
                             const bool retainLateCopy = selectionTime < transaction.slots.targets[cycles - 1];
                             if (!copyCompleted || (lateCopy && !retainLateCopy)) {
-                                generated = false;
-                                role = FrameGenerationRole::real;
+                                if (recoverReadyContent && !realPresented && lastSyntheticSlot < cycles - 1 &&
+                                    ovrTimeToXrTime(ovr_GetTimeInSeconds()) < transaction.slots.targets[cycles - 1]) {
+                                    contentSlot = lastSyntheticSlot;
+                                    role = transaction.slots.roles[contentSlot];
+                                    selectedCopyObserved = true;
+                                } else {
+                                    generated = false;
+                                    role = FrameGenerationRole::real;
+                                    selectedCopyObserved = false;
+                                }
                                 noteFrameGenerationPresentationMiss();
                             } else {
                                 // Use authoritative completion from the first
@@ -1128,6 +1521,7 @@ namespace virtualdesktop_openxr {
                                 // then prefer fresh B over stale interpolation.
                                 if (lateCopy)
                                     noteRetainedPresentationMiss();
+                                selectedCopyObserved = true;
                                 copyObserved[static_cast<unsigned>(role)] = timingNow(traceGroup);
                             }
                             copyWaitReturn = timingNow(traceGroup);
@@ -1136,10 +1530,17 @@ namespace virtualdesktop_openxr {
                         const unsigned index = static_cast<unsigned>(role);
                         if (role == FrameGenerationRole::real && committedReal) {
                             layer = realLayer;
+                        } else if (recoverReadyContent && role != FrameGenerationRole::real &&
+                                   contentSlot == lastSyntheticSlot) {
+                            // Commit advances the native chain. A successful
+                            // current-group image repeats using End alone.
+                            layer = lastSyntheticLayer;
+                            repeatedSynthetic = true;
                         } else {
                             auto& output = presentationRole(role);
                             const int image = preparedImages[index];
                             CHECK_MSG(image >= 0, "Unprepared FG compositor image");
+                            validateReceiptHandoff(role, false);
                             commitEnter = timingNow(traceGroup);
                             const auto committed = commitSubmissionSwapchain(m_ovrSession, output.ovrSwapchain);
                             commitReturn = timingNow(traceGroup);
@@ -1156,7 +1557,9 @@ namespace virtualdesktop_openxr {
                                 // A partial pair commit must fail with both
                                 // owners retained, never submit mismatched B.
                                 if (m_deliveryTransport)
-                                    m_deliveryTransport->commitCopied(m_fgDepthDelivery[transaction.ticket.bank]);
+                                    m_deliveryTransport->commitCopied(receiptDepthBatch
+                                                                          ? *receiptDepthBatch
+                                                                          : m_fgDepthDelivery[transaction.ticket.bank]);
                                 else
                                     CHECK_OVRCMD(commitSubmissionSwapchain(m_ovrSession, bank.output.ovrSwapchain));
                                 bank.output.lastCommittedIndex = bank.preparedImage;
@@ -1187,6 +1590,22 @@ namespace virtualdesktop_openxr {
                     if (!slot || recoverExpiredSlots) {
                         openAdmission();
                     }
+                    // Copy settlement can make a previously pending image
+                    // independent. The SDK's P-only End no longer needs to
+                    // hold the producer lease after that dependency completes.
+                    const bool settledSyntheticFour = generated && cycles == 4 && slot < cycles - 1 &&
+                                                      m_deliveryTransport && !repeatedSynthetic &&
+                                                      selectedRole != FrameGenerationRole::real && selectedCopyObserved;
+                    if ((recoverReadyContent || settledSyntheticFour) && admissionOpened && contextLease.owns_lock() &&
+                        (selectedCopyObserved || receiptCopyReady(selectedRole))) {
+                        contextLease.unlock();
+                        independentPresentation = true;
+                    }
+                    validateReceiptHandoff(selectedRole, repeatedSynthetic);
+                    if (lastRolePresentationOnly)
+                        independentPresentation = !contextLease.owns_lock();
+                    const auto selectedContentSlot =
+                        selectedRole == FrameGenerationRole::real ? cycles - 1 : contentSlot;
                     const auto endEnter = timingNow(timing.enabled);
                     const auto result = endSubmissionFrame(m_ovrSession, nativeId, &scale, pointers.data(), layerCount);
                     const auto endReturn = timingNow(timing.enabled);
@@ -1195,8 +1614,10 @@ namespace virtualdesktop_openxr {
                                       TLArg(nativeId, "NativeId"),
                                       TLArg(transaction.ticket.current_serial, "Serial"),
                                       TLArg(slot, "Slot"),
+                                      TLArg(selectedContentSlot, "ContentSlot"),
                                       TLArg(cycles, "Slots"),
                                       TLArg(generated && slot < cycles - 1, "Synthetic"),
+                                      TLArg(repeatedSynthetic, "SyntheticRepeat"),
                                       TLArg(!generated && slot < cycles - 1, "PaddingRepeat"),
                                       TLArg(static_cast<int>(result), "Result"));
                     if (timing.enabled && traceGroup) {
@@ -1206,22 +1627,26 @@ namespace virtualdesktop_openxr {
                         const int64_t target =
                             reservation.valid ? reservation.firstTarget + slot * reservation.period : 0;
                         const float fraction =
-                            selectedRole == FrameGenerationRole::real ? 1.f : transaction.slots.fractions[slot];
+                            selectedRole == FrameGenerationRole::real ? 1.f : transaction.slots.fractions[contentSlot];
                         TraceLoggingWrite(log::g_traceProvider,
                                           "FG_NativeTiming",
                                           TLArg(nativeId, "NativeId"),
                                           TLArg(reservation.nativeId, "ReservedNativeId"),
                                           TLArg(transaction.ticket.current_serial, "Serial"),
                                           TLArg(slot, "Slot"),
+                                          TLArg(selectedContentSlot, "ContentSlot"),
                                           TLArg(cycles, "Slots"),
                                           TLArg(role, "Role"),
                                           TLArg(requestedRole, "RequestedRole"),
                                           TLArg(fraction, "Fraction"),
                                           TLArg(target, "ReservedPhotonTarget"),
-                                          TLArg(!hasGpuOutput ? 0
-                                                : selectedRole == FrameGenerationRole::real
+                                          TLArg(selectedRole == FrameGenerationRole::real
                                                     ? reservation.currentTarget
-                                                    : transaction.slots.synthesisTime(slot),
+                                                    : transaction.slots.targets[selectedContentSlot],
+                                                "ContentPhotonTarget"),
+                                          TLArg(selectedRole == FrameGenerationRole::real
+                                                    ? reservation.currentTarget
+                                                    : transaction.slots.synthesisTime(selectedContentSlot),
                                                 "SynthesisSampleTime"),
                                           TLArg(reservation.period, "NativePeriod"),
                                           TLArg(timing.waitEnter, "WaitEnter"),
@@ -1257,6 +1682,20 @@ namespace virtualdesktop_openxr {
                     ++nativeId;
                     begun = false;
                     CHECK_OVRCMD(result);
+                    if (recoverReadyContent && slot + 1 == cycles - 1) {
+                        // Only B remains. An abandoned, unqueued synthetic
+                        // cannot hold admission; full output readiness and
+                        // retirement of every queued copy still apply.
+                        firstUsefulSlot = cycles - 1;
+                    }
+                    if (recoverReadyContent && hasGpuOutput) {
+                        if (selectedRole == FrameGenerationRole::real) {
+                            realPresented = true;
+                        } else {
+                            lastSyntheticSlot = contentSlot;
+                            lastSyntheticLayer = layer;
+                        }
+                    }
                     // Output can finish during End, including repeated B.
                     // Reopen under the same ownership predicate before another
                     // blocking Begin can strand the next producer until retire.
@@ -1344,7 +1783,8 @@ namespace virtualdesktop_openxr {
             // A pending group may already be published: retain both owners.
             m_fgFailedTransaction = std::move(transaction);
             m_fgFailedLayers.swap(ownedLayers);
-            m_asyncSubmissionError = std::current_exception();
+            if (!m_asyncSubmissionError)
+                m_asyncSubmissionError = std::current_exception();
             m_asyncSubmissionReady = false;
             m_asyncSubmissionCondVar.notify_all();
         }
@@ -1370,6 +1810,31 @@ namespace virtualdesktop_openxr {
             m_asyncSubmissionCondVar.notify_all();
         });
         contextLease.lock();
+    }
+
+    // A captured ticket has independently packed inputs. An ordinary
+    // delivery still owns the source until its worker finishes using it.
+    void OpenXrRuntime::waitForFrameGenerationSourceOwnership(std::unique_lock<std::mutex>& frameLock) {
+        std::unique_lock lock(m_asyncSubmissionMutex);
+        const auto ready = [&] {
+            return m_terminateAsyncThread || m_asyncSubmissionError ||
+                   ((!m_fgActiveSubmission || m_fgActiveOwnedPixels) &&
+                    (m_layersForAsyncSubmission.empty() || m_fgTransactionForSubmission.ticket.token));
+        };
+        bool frameReleased{};
+        if (!ready()) {
+            frameLock.unlock();
+            frameReleased = true;
+            m_asyncSubmissionCondVar.wait(lock, ready);
+        }
+        const auto error = m_asyncSubmissionError;
+        const bool stopping = m_terminateAsyncThread;
+        lock.unlock();
+        if (frameReleased)
+            frameLock.lock();
+        if (error)
+            std::rethrow_exception(error);
+        CHECK_MSG(!stopping, "Frame-generation source ownership is stopping");
     }
 
     void OpenXrRuntime::waitForFrameGenerationCapacity() {

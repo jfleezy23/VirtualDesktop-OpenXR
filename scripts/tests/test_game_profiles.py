@@ -3,6 +3,7 @@ import importlib.util
 import pathlib
 import sys
 import unittest
+from unittest import mock
 import uuid
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -11,6 +12,9 @@ sys.path.insert(0, str(ROOT))
 
 class ProfileTests(unittest.TestCase):
     def setUp(self):
+        runtime = mock.patch("vdxr_runtime_selection.read_selection", return_value="Custom VDXR")
+        runtime.start()
+        self.addCleanup(runtime.stop)
         self.assertIsNotNone(importlib.util.find_spec("vdxr_game_profiles"),
                              "runtime/Controls executable profile storage is missing")
         import vdxr_game_profiles as profiles

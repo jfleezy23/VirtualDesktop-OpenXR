@@ -119,6 +119,10 @@ jobs:
         run: |
           nuget restore VirtualDesktop-OpenXR.sln -NonInteractive
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Set up pinned DXC
+        run: |
+          $dxc = & scripts/Setup-Dxc.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'vdxr-dxc-1.9.2609')
+          "VDXR_DXC_PATH=$dxc" >> $env:GITHUB_ENV
       - name: Build unsigned core project
         env:
           BUILD_CONFIGURATION: ${{ matrix.configuration }}
@@ -309,6 +313,10 @@ jobs:
         with:
           vs-version: ${{ needs.source-checks.outputs.vs_range }}
           msbuild-architecture: x64
+      - name: Set up pinned DXC for both cohorts
+        run: |
+          $dxc = & candidate/scripts/Setup-Dxc.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'vdxr-dxc-1.9.2609')
+          "VDXR_DXC_PATH=$dxc" >> $env:GITHUB_ENV
       - name: Restore and analyze baseline and candidate with identical tools
         run: |
           foreach ($cohort in @('baseline', 'candidate')) {

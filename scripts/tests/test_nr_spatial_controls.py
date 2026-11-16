@@ -28,7 +28,9 @@ class SpatialControlsTests(unittest.TestCase):
         self.root.destroy()
 
     def app(self):
-        app = gui.VDXRRegistryApp(self.root)
+        # These tests exercise editable Custom NR controls, not Stock capability.
+        with mock.patch.object(gui.runtime_selection, "read_selection", return_value="Custom VDXR"):
+            app = gui.VDXRRegistryApp(self.root)
         self.assertTrue(hasattr(app, "processing_resolution"), "Missing independent processing resolution control")
         return app
 

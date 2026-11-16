@@ -9,6 +9,7 @@
 #include <wrl/client.h>
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <filesystem>
 #include <memory>
@@ -169,7 +170,9 @@ namespace virtualdesktop_openxr {
         // context lease and retry retirement; a wake does not release ownership.
         HRESULT prepareRetirementWait(const OwnedFrameTransaction& transaction, HANDLE& completionEvent) noexcept;
         HRESULT reset(uint32_t reason) noexcept;
-        HRESULT shutdown() noexcept;
+        // Optional State-owned event for the final queued producer signal.
+        // Only cleanup's exclusive owner waits; the ordinary call remains nonblocking.
+        HRESULT shutdown(HANDLE* pendingProducer = nullptr) noexcept;
         HRESULT getStatistics(VDXRFG_StatisticsV1& statistics) const noexcept;
         bool ready(const OwnedFrameTransaction& transaction) const noexcept;
         // Call under the context lease. BUSY borrows a State-owned event;
@@ -186,6 +189,34 @@ namespace virtualdesktop_openxr {
         HRESULT waitForCopy(const OwnedFrameTransaction& transaction,
                             FrameGenerationRole role,
                             DWORD timeoutMs) noexcept;
+        // Private last-role experiment. The active worker group pins this
+        // exact State/event until retirement; session cleanup joins the worker
+        // and graph replacement is forbidden while that group is active.
+        // Prepare requires latched full-output admission and the producer-
+        // context lease; poison also requires that lease. Observe/wait
+        // use only retained COM owners and the pinned atomic poison flag.
+        struct LastRoleWaitReceipt {
+            Microsoft::WRL::ComPtr<ID3D11Fence> consumerFence;
+            Microsoft::WRL::ComPtr<ID3D11Texture2D> selectedDestination, realDestination;
+            HANDLE completionEvent{};
+            const std::atomic<bool>* poisoned{};
+            uint64_t ownerGeneration{}, ticketGeneration{}, ticketToken{}, previousSerial{}, serial{};
+            uint64_t selectedValue{}, realValue{}, completedValue{};
+            uint32_t bank{}, selectedRole{};
+            bool fullOutputObserved{};
+            HRESULT observe(FrameGenerationRole role) const noexcept;
+            HRESULT wait(DWORD timeoutMs, bool initialAlreadySampled) const noexcept;
+            bool healthy() const noexcept;
+        };
+        // S_FALSE leaves the original wait path unchanged; S_OK is already
+        // complete; BUSY owns an exact, successfully registered pending copy.
+        // BUSY can still have pending B; the guard must retain S in that case.
+        HRESULT prepareLastRoleWaitReceipt(const OwnedFrameTransaction& transaction,
+                                           FrameGenerationRole role,
+                                           ID3D11Texture2D* selectedDestination,
+                                           ID3D11Texture2D* realDestination,
+                                           LastRoleWaitReceipt& receipt) noexcept;
+        void poisonLastRoleWait(const LastRoleWaitReceipt& receipt) noexcept;
         struct PrivateNrCanonicalBorrow {
             void* context{};
             ID3D11Device5* device{};
