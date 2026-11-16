@@ -152,6 +152,11 @@ foreach(RECIPE IN LISTS SHADER_RECIPES)
     if(VDXR_FG_NVIDIA_GRID4 AND NAME MATCHES "^nvidia_.*synthesize")
         list(APPEND DEFINES /D XRFG_NVIDIA_GRID4=1)
     endif()
+    if(NAME STREQUAL "nvidia_synthesize_midpoint_pixel" OR NAME STREQUAL "nvidia_shared_3x_synthesize_pixel" OR
+       NAME STREQUAL "nvidia_depth_synthesize_pixel" OR NAME STREQUAL "nvidia_depth_shared_synthesize_pixel" OR
+       NAME STREQUAL "nvidia_reconstruction_synthesize_pixel" OR NAME STREQUAL "nvidia_reconstruction_shared_synthesize_pixel")
+        list(APPEND DEFINES /D XRFG_WEAK_MOTION_RGB=1)
+    endif()
     if(VDXR_FG_SHADER_COMPILER STREQUAL "DXC")
         string(REPLACE "_5_1" "_6_0" DXC_PROFILE "${PROFILE}")
         set(DXC_PRECISION)

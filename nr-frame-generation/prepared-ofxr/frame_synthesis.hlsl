@@ -83,6 +83,27 @@ float4 pack_flow_input_color(float4 color) {
     return packed;
 }
 
+#ifdef XRFG_WEAK_MOTION_RGB
+// Ordinary NVIDIA RGB only. Retain its original q/alpha/depth contracts; this
+// bounded multiplier reduces weak, contested warps without trusting noise.
+// Both B representations already exist for the camera-only error. Derive the
+// sRGB slope from them rather than fetching samples or evaluating another pow.
+float weak_motion_weight(float support, float camera_error, float warped_error,
+                         float3 current_b_linear, float3 current_b_packed) {
+    float noise_floor = 2.0 / 255.0;
+    if (encode_srgb_flow_input()) {
+        float3 linear_b = saturate(current_b_linear);
+        float3 high_slope = (current_b_packed + 0.055) /
+            (2.4 * max(linear_b, 0.0031308));
+        float3 slope = linear_b <= 0.0031308 ? float3(12.92, 12.92, 12.92) : high_slope;
+        noise_floor = max(noise_floor, max(slope.r, max(slope.g, slope.b)) / 1024.0);
+    }
+    float weak_support = 1.0 - smoothstep(0.25, 0.75, support);
+    float evidence = smoothstep(1.0, 3.0, (warped_error - camera_error) / noise_floor);
+    return 1.0 - 0.25 * weak_support * evidence;
+}
+#endif
+
 // Rec. 709 weights give relative luminance from linear values; the encode
 // then spreads it over the codes the way the swapchain spreads colour.
 float pack_flow_input_luma(float4 color) {
@@ -1107,14 +1128,27 @@ float4 synthesize_midpoint(
                             flow_midpoint,
                             confidence));
                         if (!validate_fast && !use_nvidia_bidirectional && repeated_capture_flag() == 0) {
+#ifdef XRFG_WEAK_MOTION_RGB
+                            float4 current_packed = pack_flow_input_color(current_fallback.color);
+                            float camera_only_error = rgb_error(
+                                pack_flow_input_color(previous_fallback.color), current_packed);
+#else
                             float camera_only_error = rgb_error(
                                 pack_flow_input_color(previous_fallback.color), pack_flow_input_color(current_fallback.color));
+#endif
                             float warped_error = rgb_error(
                                 pack_flow_input_color(previous_sample.color), pack_flow_input_color(current_sample.color));
                             float rgb_confidence = saturate(1.0 + (camera_only_error - warped_error) * 8.0);
                             rgb_confidence *= cost_confidence;
+#ifdef XRFG_WEAK_MOTION_RGB
+                            float weak_weight = weak_motion_weight(cost_confidence, camera_only_error, warped_error,
+                                current_fallback.color.rgb, current_packed.rgb);
+                            output_color.rgb = saturate(lerp(
+                                current_fallback.color.rgb, current_sample.color.rgb, rgb_confidence * weak_weight));
+#else
                             output_color.rgb = saturate(lerp(
                                 current_fallback.color.rgb, current_sample.color.rgb, rgb_confidence));
+#endif
 #if defined(XRFG_DEPTH_GUIDANCE) && !defined(XRFG_DEPTH_RECONSTRUCTION)
                             output_color = depth_endpoint_preference(pixel, raw_backward, synthesis_fraction(), Slice, ViewIndex,
                                 cost_confidence, saturate(1.0 + (camera_only_error - warped_error) * 8.0), rgb_confidence, camera_only_error, warped_error,
@@ -1175,6 +1209,9 @@ float4 SynthesizeNvidiaFastBidirectionalMidpointPS(
 struct NvidiaSharedSynthesisCommon {
     float2 pixel;
     CameraSample current_fallback;
+#ifdef XRFG_WEAK_MOTION_RGB
+    float4 current_packed;
+#endif
     CameraSample previous_fallback;
     float2 raw_backward;
     float backward_flow_support;
@@ -1203,9 +1240,16 @@ NvidiaSharedSynthesisCommon prepare_nvidia_shared_synthesis(FullscreenVertex inp
 #else
             common.previous_fallback = sample_previous_target(common.pixel, Slice, ViewIndex);
 #endif
+#ifdef XRFG_WEAK_MOTION_RGB
+            common.current_packed = pack_flow_input_color(common.current_fallback.color);
+            common.camera_only_error = rgb_error(
+                pack_flow_input_color(common.previous_fallback.color),
+                common.current_packed);
+#else
             common.camera_only_error = rgb_error(
                 pack_flow_input_color(common.previous_fallback.color),
                 pack_flow_input_color(common.current_fallback.color));
+#endif
             common.valid = true;
         }
     }
@@ -1236,8 +1280,15 @@ float4 synthesize_nvidia_shared_phase(NvidiaSharedSynthesisCommon common, float 
                 pack_flow_input_color(previous_sample.color), pack_flow_input_color(current_sample.color));
             float rgb_confidence = saturate(1.0 + (common.camera_only_error - warped_error) * 8.0);
             rgb_confidence *= cost_confidence;
+#ifdef XRFG_WEAK_MOTION_RGB
+            float weak_weight = weak_motion_weight(cost_confidence, common.camera_only_error, warped_error,
+                common.current_fallback.color.rgb, common.current_packed.rgb);
+            output_color.rgb = saturate(lerp(
+                common.current_fallback.color.rgb, current_sample.color.rgb, rgb_confidence * weak_weight));
+#else
             output_color.rgb = saturate(lerp(
                 common.current_fallback.color.rgb, current_sample.color.rgb, rgb_confidence));
+#endif
 #if defined(XRFG_DEPTH_GUIDANCE) && !defined(XRFG_DEPTH_RECONSTRUCTION)
             output_color = depth_endpoint_preference(common.pixel, common.raw_backward, fraction, Slice, ViewIndex,
                 cost_confidence, saturate(1.0 + (common.camera_only_error - warped_error) * 8.0), rgb_confidence, common.camera_only_error, warped_error,
