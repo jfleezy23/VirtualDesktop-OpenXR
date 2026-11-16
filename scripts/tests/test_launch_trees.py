@@ -45,7 +45,7 @@ class Platform:
 
     def resolve(self, path):
         path = Path(path)
-        return self.custom / "Software" if path == self.stock / "Software" else path.resolve()
+        return (self.custom / "Software" if path == self.stock / "Software" else path).resolve()
 
     def read_value(self, hive, path, name):
         return copy.deepcopy(self.values.get((hive, path, name)))
@@ -111,6 +111,23 @@ class Platform:
             self.running = True  # A partial handoff must be quiesced before rollback.
             raise OSError("normal-user restart verification failed")
         self.running = True
+
+
+class PlatformPathResolutionTests(unittest.TestCase):
+    def test_fake_junction_canonicalizes_its_destination_on_either_drive(self):
+        # Emulate the runner's short-name TEMP without requiring its alias or D:.
+        for drive in ("C", "D"):
+            for user in ("runneradmin", "RUNNER~1"):
+                with self.subTest(drive=drive, user=user):
+                    base = Path(f"{drive}:/Users/{user}/AppData/Local/Temp/launch-tree-fixture")
+                    platform = Platform(base / "Custom", base / "Stock")
+                    expected = Path(str(platform.custom / "Software").replace("RUNNER~1", "runneradmin"))
+                    def canonicalize(path):
+                        return Path(str(path).replace("RUNNER~1", "runneradmin"))
+                    with mock.patch.object(Path, "resolve", autospec=True, side_effect=canonicalize):
+                        self.assertEqual(platform.resolve(platform.stock / "Software"), expected)
+                        self.assertEqual(platform.resolve(platform.custom / "Software"), expected)
+                        self.assertNotEqual(platform.resolve(base / "Unrelated" / "Software"), expected)
 
 
 class LaunchTreeTests(unittest.TestCase):
