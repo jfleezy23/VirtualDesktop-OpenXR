@@ -1,112 +1,58 @@
 # Frame delivery and pacing
 
-The experimental runtime lets the next real frame prepare while Virtual Desktop
-waits to begin presenting the current frame group. A completed generated image
-does not need to reacquire the next frame's producer-context lock before its CPU handoff.
-This applies to 2×, 3× and 4×, with NR enabled or disabled.
+The 2026.11.15.1 release uses the selected C++ host with improved **2× recovery after slow frames**.
+OFXR 2×, 3× and 4× remain available, with NR on or off. Their multipliers request one, two or three generated
+images between real frames; they do not guarantee equivalent game-FPS gains or headset display rates.
 
-The native SDK's Wait/Begin/End ordering is preserved. GPU completion, bank ownership
-and image-retirement fences still protect every delivered image. Pending copies,
-failed captures and shared-context paths retain their synchronization. There is no
-new pacing sleep, image copy, synthesis pass or appearance control.
+## 2× recovery
 
-The source includes the retained NR/FG contracts and delivery implementation needed
-to build this host together. Use matching host and module contracts rather than
-mixing intermediate headers or object files. See the
-[retained module recipe](build-retained-fg.md) and [build instructions](../CONTRIBUTING.md).
-Licensed NR components must be supplied separately; none are included here.
+The runtime preserves the two native positions and original targets already issued for a 2× application frame.
+A partially late group can still use useful generated content before its original real-frame target. When the
+whole group has expired, ordinary delivery consumes the owned positions and the runtime can establish fresh
+history for the next generated/real pair. The returned prediction and reservation frontier stay consistent.
 
-## Local evidence
+This avoids losing future 2× cadence solely because a previous pair was late. It does not move the missed
+targets into the future or count ordinary fallback frames as generated frames. Unsupported input, a discarded
+frame or an application-supplied alternate display time does not authorize that recovery path.
 
-### November 10: distribute recovery motion across 4× images
+The focused 2× reservation repair has no new toggle and adds no fixed pacing sleep. Saved NR processing,
+coverage and appearance settings are preserved. The complete release also includes the delivery baseline below.
 
-When a real-frame pair spans longer than four native display intervals, the runtime
-now places its three synthetic samples at one-quarter, one-half and three-quarters
-of that source interval. The real endpoint stays at the end. Previously, most of
-the extra motion could land in the first synthetic image even when delivery was
-evenly spaced. The sampling change preserves native deadlines, pose metadata and image ownership.
+## Other delivery changes since November 10
 
-The release also qualifies independent CPU handoff using the selected image's
-completion fence, rather than a later synthetic destination's fence. GPU completion
-and retirement remain protected. This does not establish that the headset displays
-S1 before later GPU work finishes.
+For stretched **4×** source intervals, generated content is sampled at the group's original reserved native-slot
+times. Each fraction expresses that slot time within the previous/current real-frame interval. The November 10
+package instead redistributed those samples uniformly across the interval at one-quarter, one-half and
+three-quarters. This sampling change keeps the original native deadlines, slot order and real B endpoint.
 
-The sampling adjustment affects admitted stretched 4× groups only. That adjustment
-does not alter nominal cadence, 2×/3×, NR processing or appearance settings. It adds no image copy,
-GPU pass or sleep. The runtime keeps split Wait/Begin/End submission; the separate
-combined-Submit experiment was not selected for this release.
+The selected host also includes early NR staging before the capacity wait on eligible paths, guarded last-role
+copy handoff for 2×/3×/4×, and updated DXC-built D3D12 preprocessing shaders. These baseline changes are separate
+from the focused 2× reservation repair; their presence is not a new live 3×/4× or NR performance claim.
 
-In a Quest 3 / RTX 4090 Aircar comparison at 120 Hz and 3776×4032 per eye, a separate
-host containing the same sampling change was reported to recover more gracefully.
-That capture used the combined-Submit alternative. The source-phase trace confirmed
-quarter-step sampling after stretched pairs. The comparison did not demonstrate fewer long SDK
-stalls, and CPU handoff times do not prove headset scanout. The release is a motion
-recovery change, not a guaranteed FPS or latency improvement.
+## Copy completion and fallback
 
-The released host passed the GPU/worker checks separately; it was not the host used
-for that headset capture. The release assets retain the exact locally selected host. Its corresponding-source
-archive includes the as-built snapshot and a portable build recipe. The public
-branch carries the narrow sampling change without reverting its unrelated NR work.
-The retained host also carries previously local 2×/3× recovery behavior: after a
-late Begin, it may select a later ready generated image or reuse a committed one.
-That behavior is included in the as-built capsule but is not introduced into the
-public branch by the new quarter-sampling change.
+A generated image must satisfy its actual GPU-copy completion fence before handoff. When a queued local copy
+is pending, the worker can wait on its completion event in short bounded slices, ending at the applicable
+original target. An event can wake early; the fence remains the readiness authority. A pending or too-late
+image uses the existing real-frame or permitted current-group fallback rather than an uncompleted image.
 
-### Earlier delivery improvement
+The producer context is released only when the independent-delivery and ownership conditions permit it.
+GPU completion, real-frame readiness, depth ordering, bank ownership and retirement remain protected.
+The native SDK's Wait/Begin/End ordering is retained. These protections do not eliminate application loading,
+GPU contention, network stalls or long native SDK calls.
 
-A steady-flight Aircar capture used NVIDIA 4× at 120 Hz with NR off. The earlier
-build delivered 17,611 native handoffs over 147 seconds; this build delivered
-10,505 over 88 seconds. After initial resolution adjustments settled:
+## What to expect
 
-| Native handoff interval | Earlier build | This build |
-| --- | ---: | ---: |
-| 99th percentile | 14.704 ms | 8.680 ms |
-| Maximum | 31.759 ms | 9.453 ms |
-| Intervals longer than 12.5 ms | 321 | 0 |
-| Catch-up intervals shorter than 4.167 ms | 320 | 0 |
+Start with NR off and **OFXR 2× / NVIDIA**, with Virtual Desktop's **SSW Off**. Compare the same scene and
+motion, then try 3× or 4× separately. NR remains independent; enabling NR with FG requires at least 90% coverage.
+Restart the game after changing the FG multiplier, backend, reconstruction request or runtime selection.
 
-Both captures retained correct complete generated/real frame ordering, with no
-steady-state fallback or padding. The later run rendered 44% more pixels per eye
-and was reported smoother. Resolution, scene and connection were not controlled
-between runs, so this is a gameplay observation, not a causal latency percentage
-or proof of headset display cadence. Startup and deliberate resize hitches are
-excluded from the table. Native Begin can still block even with regular delivery.
+The selected 2× recovery behavior does not establish a new performance gain for every multiplier, NR setting,
+graphics API or game. CPU handoff times are not headset scanout measurements. Smoothness, an FPS counter or a
+saved selector alone cannot prove that every generated image reached the headset.
 
-## Reproduce the synchronization checks
-
-Build a fresh x64 ReleaseBundle runtime and record its source/artifact receipt with
-`scripts/fg-build-provenance.py`. The fixture builder takes that cohort directory,
-containing `result.json`, the completed `build-source.json` and `obj/`:
-
-```powershell
-python tests/build-fg-runtime-fixtures.py $cohort `
-  nr_fg_prebegin_overlap_regression.cpp nr_fg_prebegin_fast_begin_regression.cpp `
-  nr_fg_prebegin_failure_regression.cpp nr_fg_prebegin_cancel_regression.cpp `
-  nr_fg_copy_ready_poison_regression.cpp nr_fg_pending_current_copy_regression.cpp `
-  --installation $visualStudioInstallation
-```
-
-Build the repository's OVRNull backend separately. For controlled tests, put that
-backend's `LibOVRRT64_1.dll`, the matching FG module and a separately supplied NR
-component in an isolated asset directory. Do not use that test backend as your
-installed gaming runtime. Run each lifecycle fixture in a bounded child process:
-
-```powershell
-& "$cohort/tests/nr_fg_prebegin_fast_begin_regression.exe" `
-  $assets $uniqueStateDirectory 3 nr-on colour d3d11
-```
-
-Exercise `2`, `3`, `4`; `nr-on`, `nr-off`; and `d3d11`, `d3d12`. Overlap tests park
-the real next producer and require every current SDK End to finish. Failure and
-cancellation tests require both owners to survive until joined cleanup. The two
-component tests instead take the FG module path and multiplier; they cover current
-copy readiness during opposite-bank capture, pending-copy retention and poison.
-Require exit success and the fixture's complete `PASS:` marker, retaining expected
-injected failures separately.
-
-The controlled fixtures exercise actual GPU resources and the public submission
-worker with an isolated SDK. They do not qualify the real VD SDK or headset.
-`native_runtime_delivery_probe` deliberately retains the real SDK loader; use a
-connected headset and the documented asset, state, multiplier, NR, depth and API
-arguments for native checks. Do not count an unavailable or sleeping headset as a
-passed native test.
+Install the matching host, FG module and `CUSTOM-RUNTIME.json` from the
+[2026.11.15.1 release](releases/2026.11.15.1.md). Use its corresponding-source archive and build manifests when
+rebuilding; do not mix intermediate headers or old object files. See the [quickstart](NR-FG-QUICKSTART.md),
+[side-by-side setup](SIDE-BY-SIDE-RUNTIME.md) and [retained module guide](build-retained-fg.md).
+The compatible licensed NR component is supplied separately and is not included or downloaded.

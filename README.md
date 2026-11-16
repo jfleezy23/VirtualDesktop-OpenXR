@@ -1,50 +1,60 @@
-# VirtualDesktop-OpenXR — NR and OFXR 4× frame generation
+# VirtualDesktop-OpenXR — NR and OFXR 2×/3×/4× frame generation
 
 An independent Windows runtime fork maintained by [jfleezy23](https://github.com/jfleezy23), built on
 [VirtualDesktop-OpenXR](https://github.com/mbucchia/VirtualDesktop-OpenXR). Run compatible OpenXR games through
 Virtual Desktop with optional neural rendering (NR), **OFXR 2×/3×/4× PC frame generation**, and automatic
 settings profiles for individual game executables.
 
-**4× is included in the current release.** OFXR can add up to three generated frames between real frames,
-with NR on or off. Select **OFXR 4×** in Controls, turn VD's **SSW Off**, and restart the game.
-Generation depends on timing and eligibility; 4× does not guarantee a fourfold game-FPS increase.
+**2×, 3× and 4× are included.** OFXR can add one, two or three generated frames between real frames,
+with NR on or off. Start with **OFXR 2× / NVIDIA**, turn VD's **SSW Off**, and restart the game.
+Generation depends on timing and eligibility; the multiplier does not guarantee an equivalent game-FPS increase.
 
-**[Download NR + OFXR 4× for Windows](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.10.1)** ·
-[Install and try it](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.10.1/docs/NR-FG-QUICKSTART.md) ·
-[Controls guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.10.1/docs/NR-FG-CONTROLS.md) ·
-[Game routing help](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.10.1/docs/GAME-COMPATIBILITY.md)
+**[Download NR + OFXR for Windows](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.15.1)** ·
+[Install and try it](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.15.1/docs/NR-FG-QUICKSTART.md) ·
+[Controls guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.15.1/docs/NR-FG-CONTROLS.md) ·
+[Game routing help](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.15.1/docs/GAME-COMPATIBILITY.md)
 
-[Runtime ZIP](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/download/nr-fg-2026.11.10.1/VDXR-NR-FG-Windows-x64-2026.11.10.1.zip) · [Controls ZIP](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/download/nr-fg-2026.11.10.1/VDXR-NR-FG-Controls-Windows-x64-2026.11.08.1.zip)
+[Runtime ZIP](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/download/nr-fg-2026.11.15.1/VDXR-NR-FG-Windows-x64-2026.11.15.1.zip) · [Controls ZIP](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/download/nr-fg-2026.11.15.1/VDXR-NR-FG-Controls-Windows-x64-2026.11.15.1.zip)
 
 ## What's new
 
-**Smoother 4× motion recovery** is included in the November 10 release. When a pair of real frames spans
-more than four display intervals, generated motion is distributed across all three intermediate images.
-This reduces the large first motion step during recovery. Native presentation deadlines stay unchanged;
-there is no new toggle, image copy, synthesis pass or pacing sleep. The existing split SDK submission
-path is retained. This improves motion distribution; long streaming or SDK stalls can still occur.
+**More reliable 2× recovery** is included in the November 15 release. After a slow frame, the C++ host keeps
+the two native positions already reserved by the application and can return to generated/real delivery
+after ordinary fallback frames. A partially late group can retain useful generated content before its original
+real-frame target. Original targets are preserved; there is no new toggle or pacing sleep.
+This does not eliminate loading, streaming or native SDK stalls.
+
+**2×/3×/4× and NR remain available on D3D11/D3D12.** Alongside the focused 2× recovery repair, this release
+includes delivery and shader updates accumulated since the November 10 package. These changes do not establish
+a new performance gain for every multiplier, graphics API or NR setting.
 
 **Bounded perceptual NR color transfer** is retained from the November 8 release. With NR processing below
 100%, the runtime reconstructs NR's lightness and color edits using a perceptual color space and limits
 their transfer when the guide differs from the native image. It uses the existing reconstruction step,
 with no additional model evaluation, image copy or rendering pass. There is no new toggle: keep your
-preferred NR, FG, coverage and appearance settings. **Native 100% processing is unchanged.**
+preferred NR, FG, coverage and appearance settings. **Native 100% processing remains available.**
 
-**4× frame recovery** keeps later useful generated images when an earlier slot misses its deadline,
-with real frames available as fallback. The release also retains the earlier delivery improvements for
-**2×/3×/4×**, NR on or off: the next real frame can prepare during native waiting, and a completed image's
-CPU handoff can proceed without reacquiring that producer lock. See the
-[pacing notes](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.10.1/docs/frame-delivery-pacing.md).
+**4× samples its original native-slot targets.** For stretched source intervals, this replaces the November 10
+package's uniform quarter-step content samples. The real endpoint, native deadlines and slot order stay fixed.
+Later useful generated images and real-frame fallback remain available when an earlier slot misses.
 
-**Earlier frame handoff** lets the first generated stereo image reach Virtual Desktop while later images
-finish on supported synthesis paths. Install this release's matching host, FG module and metadata together;
-there is no new toggle. NR processing, coverage and face/hair appearance settings stay unchanged.
+**Earlier NR preparation and guarded copy handoff** allow preparation to overlap waiting where its ownership
+conditions permit. A last selected copy can wait without retaining the producer context when the required
+real-frame, depth and ownership conditions are certified. This applies across **2×/3×/4×**. The release also
+includes updated D3D12 preprocessing shaders. See the
+[pacing notes](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.15.1/docs/frame-delivery-pacing.md).
+
+Install this release's matching host, FG module and metadata together. NR processing, coverage and
+face/hair appearance settings are preserved. The dated Controls package reuses the locally tested binary
+labelled 2026.11.08.1, without a fresh rebuild. Compared with the previous public package, it adds support for
+optional prepared Stock/Custom launch libraries and disables Custom NR/FG controls while Stock is selected.
+Saved settings and defaults are preserved.
 
 **OFXR 2×/3×/4×** and automatic game profiles remain available. NR and FG work independently. NVIDIA is the
 default optical-flow backend; full-resolution FidelityFX remains experimental. A selected multiplier is a
 request, rather than a guaranteed game-FPS gain.
 
-**Automatic game profiles** remember all ten NR/FG settings for the actual game EXE and apply when it launches
+**Automatic game profiles** remember all eleven NR/FG settings for the actual game EXE and apply when it launches
 through the custom runtime. Globals save automatically. Game edits remain drafts until **Save game profile**,
 which locks the complete setup; **Reset game profile** restores global inheritance. Controls does not scan your
 game library or need to stay open.
@@ -53,12 +63,13 @@ game library or need to stay open.
 settings such as **95% coverage / 80% processing** or **90% / 85%**. Reduced processing reconstructs NR inside the
 selected coverage at native output size. Game pixel density and saved face/hair/detail controls stay separate.
 Fresh settings remain **NR Off, FG Off, 100% processing and 100% coverage**. See the
-[release notes](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.10.1/docs/releases/2026.11.10.1.md)
+[release notes](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.15.1/docs/releases/2026.11.15.1.md)
 for validation scope and limits.
 
-![The actual VDXR NR/FG Controls app](https://raw.githubusercontent.com/jfleezy23/VirtualDesktop-OpenXR/nr-fg-2026.11.10.1/docs/images/controls-overview.png)
+![The actual VDXR NR/FG Controls app](https://raw.githubusercontent.com/jfleezy23/VirtualDesktop-OpenXR/nr-fg-2026.11.15.1/docs/images/controls-overview.png)
 
-*Actual app with example settings; installation preserves existing preferences.*
+*Retained illustration of the Controls app with example settings, not installation defaults or a complete view
+of every selector. Installation preserves existing preferences.*
 
 ## What you need
 
@@ -76,20 +87,22 @@ runtime; Frame Launcher's existing SteamVR route remains separate.
 ## Try it
 
 1. Download the dated **runtime** and **Controls** ZIPs from the
-   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.10.1).
-   Follow the [side-by-side installation](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.10.1/docs/SIDE-BY-SIDE-RUNTIME.md)
+   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.15.1).
+   Follow the [side-by-side installation](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.15.1/docs/SIDE-BY-SIDE-RUNTIME.md)
    to install the matching runtime DLLs and metadata in `%ProgramFiles%\VDXR-NR-FG\OpenXR`.
    Streamer's original files stay in place.
 2. Extract the **entire** Controls ZIP, keep `_internal` beside the EXE, and run **VDXR-NR-FG-Controls.exe**.
    Select **Custom VDXR** there and **VDXR** in Streamer. Turn Virtual Desktop's **SSW Off** for OFXR.
-3. Choose **Globals**, or use **Add game EXE…** for the actual game executable. For a first comparison, enable NR,
-   set **100% coverage / 80% processing**, and select **OFXR 4× / NVIDIA**. In game scope, click **Save game profile**.
-   Existing preferences survive installation; make these choices explicitly. NR can also stay off while using FG.
-4. Relaunch the game after changing runtime, FG mode or backend. Saved NR controls remain adjustable during play.
-   Check both eyes, controllers, faces/hair and head motion. Compare processing 100% versus 80% in the same scene.
+3. Choose **Globals**, or use **Add game EXE…** for the actual game executable. For a first FG comparison, leave NR
+   off and select **OFXR 2× / NVIDIA**. **Depth assist** is the default request when unset; missing usable depth
+   keeps color-only FG. In game scope, click **Save game profile**. Existing preferences survive installation.
+4. Relaunch the game after changing runtime, FG mode, backend or reconstruction request. Check both eyes,
+   controllers and head motion. Then compare 3× or 4× separately. To add NR, supply the licensed component,
+   enable NR and try **100% coverage / 80% processing**; NR + FG requires coverage of at least **90%**.
+   Saved NR controls remain adjustable during play.
 
 If the game still uses SteamVR or native Oculus, follow the
-[game routing guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.10.1/docs/GAME-COMPATIBILITY.md).
+[game routing guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.15.1/docs/GAME-COMPATIBILITY.md).
 Some titles need a compatible translation layer or a title-specific fix; routing to VDXR does not guarantee an NR
 visual benefit. If interpolation is unsuitable, choose **FG Off**, save if editing a game profile, and restart.
 To return to the official runtime,
@@ -106,7 +119,7 @@ This README is shared between the branches; the dated links above open the NR re
 `stable` describes the general runtime branch, not universal game compatibility. There is no separate public `main` branch.
 
 For source builds, start with [CONTRIBUTING.md](CONTRIBUTING.md). NR/FG build requirements and regression scope are
-in the [dated FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.10.1/tests/frame-generation.md).
+in the [dated FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.15.1/tests/frame-generation.md).
 Binary downloads include matching corresponding source and license notices; branch source may advance later.
 
 ## Credits and licenses
@@ -123,7 +136,7 @@ No F5 GPL implementation was copied; this is not F5's full temporal pipeline.
 
 The optional synthesis module builds on [djules75/OFXR-Bridge](https://github.com/djules75/OFXR-Bridge) and includes
 **LGPL-3.0** code. AMD FidelityFX and NVIDIA interface notices accompany it. See the
-[module notice](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.10.1/nr-frame-generation/NOTICE.md)
+[module notice](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.15.1/nr-frame-generation/NOTICE.md)
 for component terms and corresponding source. The runtime's MIT license does not replace those terms.
 
 This is an independent community project, provided as-is, with no Khronos conformance claim. For original runtime

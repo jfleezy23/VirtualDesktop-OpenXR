@@ -53,6 +53,7 @@ selects an explicit installation. `-Toolset v143` remains available for delibera
 ```powershell
 git submodule update --init --recursive
 nuget restore VirtualDesktop-OpenXR.sln
+$env:VDXR_DXC_PATH = & scripts/Setup-Dxc.ps1 -OutputDirectory (Join-Path $env:TEMP ('vdxr-dxc-' + [guid]::NewGuid().ToString('N')))
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Build-CommunityRuntime.ps1 -Configuration ReleaseBundle -Platform x64
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Build-CommunityRuntime.ps1 -Configuration ReleaseBundle -Platform x64 -Analyze
 ```
@@ -62,6 +63,12 @@ folders under `bin/community/`, and `/fp:precise`. It disables inherited pre/pos
 generates `commit.h` in the intermediate folder, and exits nonzero on MSBuild failure. Analyzer builds use `/analyze`
 without whole-program optimization. Do not use a bare solution build as a substitute: the upstream solution also requires
 installer tooling. A core project build does not validate an installer.
+
+D3D12 NR preprocessing requires the pinned DXC 1.9.2609.5 compiler. `Setup-Dxc.ps1` downloads the official
+Microsoft archive into a new directory and verifies the archive and all three compiler DLL/executable hashes.
+Reuse that compiler path for later builds through `VDXR_DXC_PATH` or the build helper's `-DxcPath` parameter.
+Shader compilation fails if the selected tools differ; it does not silently fall back to an older compiler.
+D3D11 shaders retain their existing compilation path.
 
 The experimental x64 project and NR/FG build helper also default to v145. CI uses the VS 2026 runner and the pinned
 compiler for both candidate and diagnostic baseline; comparisons never mix compiler generations. The runtime remains
