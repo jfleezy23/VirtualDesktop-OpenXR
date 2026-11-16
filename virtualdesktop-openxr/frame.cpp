@@ -1050,8 +1050,8 @@ namespace virtualdesktop_openxr {
                                                   std::unique_lock<std::mutex>* producerLease,
                                                   LayerStage stage) {
         const bool colour = stage != LayerStage::Pose;
-        const bool pose = stage != LayerStage::Colour;
-        if (pose) {
+        const bool writePose = stage != LayerStage::Colour;
+        if (writePose) {
             TraceLoggingWrite(g_traceProvider,
                               "xrEndFrame_Layer",
                               TLArg("Proj", "Type"),
@@ -1100,7 +1100,7 @@ namespace virtualdesktop_openxr {
         }
 
         for (uint32_t viewIndex = 0; viewIndex < xr::StereoView::Count; viewIndex++) {
-            if (pose) {
+            if (writePose) {
                 TraceLoggingWrite(g_traceProvider,
                                   "xrEndFrame_View",
                                   TLArg("Proj", "Type"),
@@ -1173,7 +1173,7 @@ namespace virtualdesktop_openxr {
                 }
             }
 
-            if (pose) {
+            if (writePose) {
                 // Fill out pose and FOV information.
                 if (viewIndex == 0) {
                     locateSpace(*(Space*)proj.space, *m_originSpace, m_precompositor.displayTime, layerPose);
@@ -1183,7 +1183,7 @@ namespace virtualdesktop_openxr {
             }
 
             XrFovf fov = proj.views[viewIndex].fov;
-            if (pose) {
+            if (writePose) {
                 layer.EyeFov.Fov[viewIndex].DownTan = -tan(fov.angleDown);
                 layer.EyeFov.Fov[viewIndex].UpTan = tan(fov.angleUp);
                 layer.EyeFov.Fov[viewIndex].LeftTan = -tan(fov.angleLeft);
@@ -1202,7 +1202,7 @@ namespace virtualdesktop_openxr {
                         const XrCompositionLayerDepthInfoKHR* depth =
                             reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(entry);
 
-                        if (pose) {
+                        if (writePose) {
                             TraceLoggingWrite(g_traceProvider,
                                               "xrEndFrame_View",
                                               TLArg("Depth", "Type"),
@@ -1271,7 +1271,7 @@ namespace virtualdesktop_openxr {
                                 guide.nearZ = depth->nearZ;
                                 guide.farZ = depth->farZ;
                             }
-                            if (pose) {
+                            if (writePose) {
                                 const auto& pose = layer.EyeFov.RenderPose[viewIndex];
                                 guide.captureView.position[0] = pose.Position.x;
                                 guide.captureView.position[1] = pose.Position.y;
@@ -1314,7 +1314,7 @@ namespace virtualdesktop_openxr {
                             ensureSwapchainDlssnrResources(xrDepthSwapchain, depth->subImage.imageArrayIndex);
                         }
 
-                        if (pose) {
+                        if (writePose) {
                             // Fill out projection information.
                             layer.EyeFovDepth.ProjectionDesc = projectionFromDepthInfo(*depth);
                         }
@@ -1330,7 +1330,7 @@ namespace virtualdesktop_openxr {
 
         // Restore the original IPD, otherwise the compositor will reproject the altered IPD
         // into the real IPD.
-        if (pose && m_lastSeenIpd) {
+        if (writePose && m_lastSeenIpd) {
             overrideIpd(
                 layer.EyeFov.RenderPose[ovrEye_Left], layer.EyeFov.RenderPose[ovrEye_Right], m_lastSeenIpd.value());
         }
@@ -1345,7 +1345,7 @@ namespace virtualdesktop_openxr {
             upscaler(subImages, layer.EyeFov);
         }
 
-        if (pose && layer.Header.Type == ovrLayerType_EyeFovDepth) {
+        if (writePose && layer.Header.Type == ovrLayerType_EyeFovDepth) {
             alignDepthLayer(subImages, depthSubImages, depthMetadata, layer.EyeFovDepth);
         }
 

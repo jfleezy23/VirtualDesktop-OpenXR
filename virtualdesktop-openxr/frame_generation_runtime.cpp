@@ -1385,8 +1385,7 @@ namespace virtualdesktop_openxr {
                                     const auto timeoutMs =
                                         static_cast<DWORD>(std::clamp(std::ceil(remainingMs), 1., 5.));
                                     HRESULT result = S_FALSE;
-                                    if ((!VDXR_PRIVATE_KEEP_ORIGINAL_2X_WAIT || cycles != 2) &&
-                                        !lastRoleWait.consumerFence && contextLease.owns_lock() && hasGpuOutput &&
+                                    if (!lastRoleWait.consumerFence && contextLease.owns_lock() && hasGpuOutput &&
                                         m_deliveryTransport && admissionOpened && begun && generated &&
                                         slot < cycles - 1 && contentSlot == cycles - 2 &&
                                         role == transaction.slots.roles[cycles - 2]) {
@@ -1465,7 +1464,7 @@ namespace virtualdesktop_openxr {
                                                     receiptDepthSourceReady = batch.sourceReady;
                                                     receiptDepthSerial = batch.serial;
                                                 }
-                                                if (authorized == 1 && VDXR_PRIVATE_LAST_ROLE_WAIT_MODE != 0) {
+                                                if (authorized == 1) {
                                                     contextLease.unlock();
                                                     lastRolePresentationOnly = true;
                                                     independentPresentation = true;
