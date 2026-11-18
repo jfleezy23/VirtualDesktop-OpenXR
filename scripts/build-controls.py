@@ -20,7 +20,7 @@ ALLOWED_DLLS = {"python3.dll", "python313.dll", "tcl86t.dll", "tk86t.dll", "libf
 DOC_IMAGES = ("docs/images/controls-overview.png", "docs/images/controls-fg-only.png",
               "docs/images/controls-game-profile.png")
 SOURCE_FILES = (
-    "vdxr_registry_gui.py", "vdxr_runtime_selection.py", "vdxr_game_profiles.py", "vdxr_launch_trees.py",
+    "vdxr_registry_gui.py", "vdxr_live_status.py", "vdxr_runtime_selection.py", "vdxr_game_profiles.py", "vdxr_launch_trees.py",
     "virtualdesktop-openxr/game_profiles.h",
     "scripts/controls_entry.py", "scripts/controls_self_test.py",
     "scripts/build-controls.py", "scripts/controls-build-requirements.txt",
@@ -28,7 +28,7 @@ SOURCE_FILES = (
     "scripts/tests/test_launch_trees.py", "scripts/tests/test_launch_tree_preparation.py",
     "scripts/tests/test_fg_controls.py", "scripts/tests/test_runtime_selection.py", "scripts/tests/test_controls_package.py",
     "scripts/tests/test_nr_spatial_controls.py",
-    "scripts/tests/test_game_profiles.py",
+    "scripts/tests/test_game_profiles.py", "scripts/tests/test_live_status.py",
     "scripts/tests/test_depth_controls.py", "scripts/tests/test_controls_candidate_package.py",
     "scripts/tests/test_controls_self_test_depth.py",
     "scripts/licenses/Tcl-8.6.15.txt", "docs/NR-FG-QUICKSTART.md", "docs/NR-FG-CONTROLS.md", "docs/SIDE-BY-SIDE-RUNTIME.md",

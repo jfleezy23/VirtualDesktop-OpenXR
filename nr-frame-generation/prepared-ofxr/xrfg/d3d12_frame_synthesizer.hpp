@@ -150,6 +150,16 @@ namespace xrfg {
     class D3D12FrameSynthesizer final {
       public:
         D3D12FrameSynthesizer() noexcept;
+        // Supplemental NVIDIA stage. S_FALSE leaves ordinary submission untouched.
+        [[nodiscard]] HRESULT prepare_flow(ID3D12Resource* atlas,
+                                           ID3D12Fence* producer,
+                                           uint64_t producer_value,
+                                           std::span<const D3D12ReprojectionView> views,
+                                           ID3D12Fence** input_read,
+                                           uint64_t* input_read_value) noexcept;
+        [[nodiscard]] bool select_prepared_flow(std::span<const D3D12ReprojectionView> views) noexcept;
+        void cancel_prepared_flow() noexcept;
+        [[nodiscard]] HRESULT prepared_teardown_status() noexcept;
         void set_depth_guidance(std::shared_ptr<const D3D12DepthGuidance>) noexcept;
         ~D3D12FrameSynthesizer();
 

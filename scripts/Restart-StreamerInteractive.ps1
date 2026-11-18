@@ -17,6 +17,42 @@ public static class VdxrLaunchToken {
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
     [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
     [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetTokenInformation(IntPtr token, int info, out int value, int size, out int returned);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetProcessTimes(
+        IntPtr process, out long created, out long exited, out long kernel, out long user);
+
+    [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle, uint timeout);
+    // Pin the process object while checking CIM/SCM evidence. CIM timestamps
+    // have microsecond precision, while GetProcessTimes returns 100 ns ticks.
+    public sealed class Lifetime : IDisposable {
+        IntPtr process;
+        public long Creation { get; private set; }
+        internal Lifetime(IntPtr process, long expectedCreation) {
+            this.process = process;
+            RequireLive();
+            long created, exited, kernel, user;
+            if (!GetProcessTimes(process, out created, out exited, out kernel, out user))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            Creation = created;
+            if (Math.Abs(Creation - expectedCreation) > 9)
+                throw new InvalidOperationException("Virtual Desktop process identity changed.");
+        }
+        public void RequireLive() {
+            uint state = WaitForSingleObject(process, 0);
+            if (state == 258) return; // WAIT_TIMEOUT: process has not signaled exit.
+            if (state == 0xffffffff) throw new Win32Exception(Marshal.GetLastWin32Error());
+            throw new InvalidOperationException("Virtual Desktop process exited.");
+        }
+        public void Dispose() {
+            if (process != IntPtr.Zero) { CloseHandle(process); process = IntPtr.Zero; }
+        }
+    }
+    public static Lifetime Pin(int id, long expectedCreation) {
+        IntPtr process = OpenProcess(0x1000 | 0x100000, false, id); // QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+        if (process == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        try { return new Lifetime(process, expectedCreation); }
+        catch { CloseHandle(process); throw; }
+    }
+
     public static bool IsElevated(int processId) {
         IntPtr process = OpenProcess(0x1000, false, processId);
         if (process == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -76,15 +112,83 @@ function Get-VDProcesses($config) {
     $owned
 }
 
-function Get-Status($config, $identity, [bool]$inspectGames) {
+function Open-VDProcessLifetime($process) {
+    if (-not $process.CreationDate) { throw 'Cannot verify Virtual Desktop process creation.' }
+    [VdxrLaunchToken]::Pin($process.ProcessId, $process.CreationDate.ToFileTimeUtc())
+}
+
+function Test-VDProcessElevated([int]$processId) {
+    [VdxrLaunchToken]::IsElevated($processId)
+}
+
+function Get-VerifiedStreamerOwner($config, $identity, $process, [bool]$forRestart) {
+    if ($process.ExecutablePath -ine $config.streamer_path -or $process.SessionId -ne $identity.session) {
+        throw 'Virtual Desktop Streamer image or interactive session differs.'
+    }
+    $childLife = Open-VDProcessLifetime $process
+    try {
+        $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
+        if ($owner.ReturnValue -ne 0) { throw 'Cannot verify Virtual Desktop Streamer owner.' }
+        if ($owner.Sid -eq $identity.sid) {
+            if ($forRestart -and (Test-VDProcessElevated $process.ProcessId)) {
+                throw 'Restart produced an elevated user-owned Streamer.'
+            }
+            $childLife.RequireLive()
+            return 'interactive_user'
+        }
+        if ($owner.Sid -ne 'S-1-5-18') { throw 'Unexpected Virtual Desktop Streamer owner.' }
+
+        $service = Get-CimInstance Win32_Service -Filter "Name='VirtualDesktop.Service.exe'"
+        if (-not $service -or $service.Name -ine 'VirtualDesktop.Service.exe' -or $service.State -ne 'Running' -or
+            $service.StartName -notin @('LocalSystem', 'NT AUTHORITY\SYSTEM') -or
+            $service.ProcessId -le 0 -or $service.ProcessId -ne $process.ParentProcessId) {
+            throw 'Cannot verify the registered Virtual Desktop service as the Streamer parent.'
+        }
+        # Accept a quoted executable or a single unquoted executable token.
+        # An ambiguous unquoted path with spaces cannot match the live image.
+        if ($service.PathName -notmatch '^\s*(?:"([^"]+)"|([^\s"]+))(?=\s|$)') {
+            throw 'Invalid Virtual Desktop service executable.'
+        }
+        $serviceExe = if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
+        $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($service.ProcessId)"
+        if (-not $parent -or $parent.SessionId -ne 0 -or $parent.ProcessId -ne $service.ProcessId -or
+            $parent.Name -ine 'VirtualDesktop.Service.exe' -or $parent.ExecutablePath -ine $serviceExe) {
+            throw 'Virtual Desktop service parent differs from its registered executable.'
+        }
+        $parentLife = Open-VDProcessLifetime $parent
+        try {
+            $parentOwner = Invoke-CimMethod -InputObject $parent -MethodName GetOwnerSid
+            if ($parentOwner.ReturnValue -ne 0 -or $parentOwner.Sid -ne 'S-1-5-18' -or
+                $parentLife.Creation -ge $childLife.Creation) {
+                throw 'Cannot verify the live Virtual Desktop service parent identity.'
+            }
+            $appSignature = Get-AuthenticodeSignature -LiteralPath $config.streamer_path
+            $serviceSignature = Get-AuthenticodeSignature -LiteralPath $serviceExe
+            if ($appSignature.Status -ne 'Valid' -or $serviceSignature.Status -ne 'Valid' -or
+                $appSignature.SignerCertificate.GetNameInfo('SimpleName', $false) -notin @('Virtual Desktop, Inc', 'Virtual Desktop, Inc.') -or
+                $appSignature.SignerCertificate.Subject -ine $serviceSignature.SignerCertificate.Subject) {
+                throw 'Virtual Desktop Streamer and service publisher verification failed.'
+            }
+            $current = Get-CimInstance Win32_Service -Filter "Name='VirtualDesktop.Service.exe'"
+            if (-not $current -or $current.State -ne 'Running' -or $current.ProcessId -ne $parent.ProcessId -or
+                $current.StartName -ine $service.StartName -or $current.PathName -ine $service.PathName) {
+                throw 'Virtual Desktop service registration changed during verification.'
+            }
+            $parentLife.RequireLive()
+            $childLife.RequireLive()
+            return 'service_brokered_system'
+        } finally { $parentLife.Dispose() }
+    } finally { $childLife.Dispose() }
+}
+
+
+function Get-Status($config, $identity, [bool]$inspectGames, [bool]$forRestart = $false) {
+    $owners = @()
     $streamers = @()
     $servers = @()
     foreach ($process in @(Get-VDProcesses $config)) {
         if ($process.Name -ieq 'VirtualDesktop.Streamer.exe') {
-            $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
-            if ($owner.ReturnValue -ne 0 -or $owner.Sid -ne $identity.sid -or $process.SessionId -ne $identity.session) {
-                throw 'Virtual Desktop Streamer belongs to a different interactive session.'
-            }
+            $owners += Get-VerifiedStreamerOwner $config $identity $process $forRestart
             $streamers += [int]$process.ProcessId
         } else { $servers += [int]$process.ProcessId }
     }
@@ -114,7 +218,7 @@ function Get-Status($config, $identity, [bool]$inspectGames) {
             if ($match) { $games += [int]$process.ProcessId }
         }
     }
-    @{ streamer_pids = @($streamers); server_pids = @($servers); games = @($games) }
+    @{ streamer_pids = @($streamers); server_pids = @($servers); streamer_owners = @($owners); games = @($games) }
 }
 
 function Stop-Streamer($config, $identity) {
@@ -133,22 +237,16 @@ function Stop-Streamer($config, $identity) {
     throw 'Streamer/server did not exit; launch trees were not changed.'
 }
 
-function Assert-NormalStreamer($config, $identity, [int]$processId) {
-    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$processId"
-    if (-not $process -or $process.ExecutablePath -ine $config.streamer_path -or $process.SessionId -ne $identity.session) {
-        throw 'Restart did not produce Streamer in the configured interactive session.'
-    }
-    $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
-    if ($owner.ReturnValue -ne 0 -or $owner.Sid -ne $identity.sid -or [VdxrLaunchToken]::IsElevated($processId)) {
-        throw 'Restart did not produce Streamer under the normal user token.'
-    }
+function Get-RestartResult($status, [bool]$requested) {
+    @{ restarted = $requested; launch_requested = $requested
+       normal_user = $status.streamer_owners -notcontains 'service_brokered_system'
+       streamer_pids = $status.streamer_pids; streamer_owners = $status.streamer_owners }
 }
 
 function Restart-Streamer($config, $identity) {
-    $existing = Get-Status $config $identity $false
+    $existing = Get-Status $config $identity $false $true
     if ($existing.streamer_pids.Count -gt 0) {
-        foreach ($processId in $existing.streamer_pids) { Assert-NormalStreamer $config $identity $processId }
-        return @{ restarted = $false; normal_user = $true; streamer_pids = $existing.streamer_pids }
+        return Get-RestartResult $existing $false
     }
     $name = 'VDXR-LaunchTrees-' + [Guid]::NewGuid().ToString('N')
     $powershell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
@@ -164,10 +262,9 @@ function Restart-Streamer($config, $identity) {
         Start-ScheduledTask -TaskName $name
         $deadline = [DateTime]::UtcNow.AddSeconds(20)
         do {
-            $status = Get-Status $config $identity $false
+            $status = Get-Status $config $identity $false $true
             if ($status.streamer_pids.Count -gt 0) {
-                foreach ($processId in $status.streamer_pids) { Assert-NormalStreamer $config $identity $processId }
-                return @{ restarted = $true; normal_user = $true; streamer_pids = $status.streamer_pids }
+                return Get-RestartResult $status $true
             }
             Start-Sleep -Milliseconds 100
         } while ([DateTime]::UtcNow -lt $deadline)
@@ -186,7 +283,7 @@ try {
         'Stop' { Stop-Streamer $config $identity; @{ stopped = $true } | ConvertTo-Json -Compress }
         'Restart' { Restart-Streamer $config $identity | ConvertTo-Json -Compress -Depth 4 }
         'Launch' {
-            if ([VdxrLaunchToken]::IsElevated($PID)) { throw 'The one-shot launch helper must run unelevated.' }
+            if (Test-VDProcessElevated $PID) { throw 'The one-shot launch helper must run unelevated.' }
             if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne $identity.sid) { throw 'Wrong user for Streamer launch.' }
             Start-Process -FilePath $config.streamer_path -ArgumentList '-StartMinimized' -WindowStyle Hidden | Out-Null
             @{ launched = $true } | ConvertTo-Json -Compress

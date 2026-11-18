@@ -30,6 +30,7 @@
 #include "accessibility.h"
 #include "frame_generation.h"
 #include "delivery_transport.h"
+#include "live_status.h"
 #include "utils.h"
 #include "NrSpatialPipeline.h"
 
@@ -423,6 +424,20 @@ namespace virtualdesktop_openxr {
             uint32_t processingResolution{100};
         };
 
+        struct FrameGenerationSourceLedger {
+            uint64_t epoch{}, serial{}, historyEpoch{};
+            FrameGeneration* owner{};
+            XrSpace space{XR_NULL_HANDLE};
+            std::array<XrSwapchainSubImage, 2> releasedViews{};
+            std::array<int, 2> releasedIndices{};
+            std::array<ComPtr<ID3D11Texture2D>, 2> colours;
+            std::array<D3D11_TEXTURE2D_DESC, 2> descriptions{};
+            std::array<VDXRFG_RectV1, 2> rects{};
+            DlssnrSettings settings;
+            float sharpen{};
+            bool srgb{};
+        };
+
         using SwapchainImageList = std::vector<std::pair<Swapchain*, uint32_t>>;
 
         struct PrecompositorState {
@@ -703,8 +718,13 @@ namespace virtualdesktop_openxr {
         }
         ovrResult waitToBeginSubmissionFrame(ovrSession, long long) const;
         ovrResult beginSubmissionFrame(ovrSession, long long) const;
-        ovrResult endSubmissionFrame(
-            ovrSession, long long, const ovrViewScaleDesc*, const ovrLayerHeader* const*, unsigned) const;
+        ovrResult endSubmissionFrame(ovrSession,
+                                     long long,
+                                     const ovrViewScaleDesc*,
+                                     const ovrLayerHeader* const*,
+                                     unsigned,
+                                     uint64_t sourceSerial = 0,
+                                     FrameGenerationRole selectedRole = FrameGenerationRole::real);
         void cleanupSessionResources();
         void ensureAppSwapchainImages(Swapchain& xrSwapchain);
         std::vector<HANDLE> getSwapchainImages(Swapchain& xrSwapchain);
@@ -964,6 +984,11 @@ namespace virtualdesktop_openxr {
         std::vector<ovrLayer_Union> m_layersForAsyncSubmission;
         std::chrono::high_resolution_clock::time_point m_lastWaitToBeginFrameTime{};
 
+        live_status::Publisher m_liveStatus;
+        live_status::Configuration m_liveConfiguration;
+        live_status::Producer m_liveProducer;   // xrEndFrame owner
+        live_status::Presenter m_livePresenter; // End owner, synchronous or worker for the entire session
+
         uint32_t m_frameGenerationMode{};
         uint32_t m_frameGenerationBackend{};
         uint32_t m_frameGenerationDepthMode{1};
@@ -997,6 +1022,7 @@ namespace virtualdesktop_openxr {
         uint64_t m_fgNextReservedNativeId{};
         int64_t m_fgLastReservedTime{}, m_fgPreviousCapturedTime{};
         uint64_t m_fgHistoryEpoch{}, m_fgPreviousHistoryEpoch{};
+        uint64_t m_fgColourEpoch{};
         bool m_fgObservedVisible{}, m_fgObservedRecenter{};
         XrSpace m_fgPreviousSpace{XR_NULL_HANDLE};
         std::array<ovrFovPort, 2> m_fgPreviousFov{};
@@ -1024,7 +1050,16 @@ namespace virtualdesktop_openxr {
         PredictionReservation m_fgReservationForSubmission;
         ovrSizei m_fgEyeResolution{};
         DXGI_FORMAT m_fgFormat{DXGI_FORMAT_UNKNOWN};
-        bool prepareFrameGeneration(const XrFrameEndInfo& info);
+        static bool makeEarlyFrameGenerationViews(const Space& layerSpace,
+                                                  const Space& originSpace,
+                                                  const XrCompositionLayerProjectionView (&appViews)[2],
+                                                  const ovrLayerEyeFov& finalizedColour,
+                                                  std::array<VDXRFG_ViewV1, 2>& result) noexcept;
+        HRESULT prepareEarlyFrameGeneration(const XrFrameEndInfo& info, FrameGenerationSourceLedger& ledger);
+        bool frameGenerationSourcesMatch(const XrFrameEndInfo& info,
+                                         const FinalProjectionInput& input,
+                                         const FrameGenerationSourceLedger& ledger) const;
+        bool prepareFrameGeneration(const XrFrameEndInfo& info, const FrameGenerationSourceLedger* ledger = nullptr);
         void snapshotFrameGenerationDepth(OwnedFrameTransaction& transaction, const ovrLayerEyeFovDepth& layer);
         void renderDepth(ID3D11ShaderResourceView* source,
                          ID3D11DepthStencilView* destination,

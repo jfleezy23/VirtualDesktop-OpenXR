@@ -58,6 +58,53 @@ def exercise_depth_mode_selector(app, control, root, read, current_snapshot, che
               "depth-mode: global selection preserves other settings")
 
 
+
+def exercise_live_card(app, root, current_snapshot, check):
+    """Drive simultaneous neutral sessions without loading a runtime or writing requests."""
+    import struct
+    live = gui.live_status
+    app.stop_live_status()
+    check(app.live_poll_id is None and app.live_worker.stop_event.is_set(),
+          "live-status: background stop cancels Tk callback without joining")
+    before, scope = current_snapshot(), app.scope_selection.get()
+    channels = [[0] * 32 for _ in range(3)]
+    channels[0][:13] = [2, live.MAGIC, 1, 768, 42, 123, 1, 1, 2, 0, 1, 12, 90000]
+    channels[1][:22] = [2, 10, 9, 1, 100, 100, 0, 100, 20, 70, 50, 1, 2, 0, 1, 3, 5, 4, 0, 0, 0, 10]
+    channels[2][:8] = [2, 20, 15, 10, 5, 1, 10, 2]
+    data = b"".join(struct.pack("<32Q", *channel) for channel in channels)
+    steam = live.parse_snapshot(data, 42, 123, r"C:\NeutralSteam\Game\Game.exe")
+    channels[0][4], channels[0][5], channels[0][6] = 43, 124, 2
+    data = b"".join(struct.pack("<32Q", *channel) for channel in channels)
+    meta = live.parse_snapshot(data, 43, 124, r"C:\NeutralMeta\Game\Game.exe")
+    requested = {"FrameGenerationMode": 4, "FrameGenerationBackend": 0,
+                 "FrameGenerationDepthMode": 1, "DLSSNR_Enabled": 0}
+    rates = {"base": 45, "nr": 45, "pc": 90, "distinct": None, "synthetic": 45}
+    app.live_observations = [live.Observation(steam, rates, requested), live.Observation(meta, rates, requested)]
+    app.live_selector.configure(values=tuple(live.session_label(item.snapshot) for item in app.live_observations),
+                                state="readonly")
+    app.live_selector.current(1)
+    app.live_selector.event_generate("<<ComboboxSelected>>")
+    root.update()
+    check(app.live_selected_identity == meta.identity and "NeutralMeta" in app.live_selection.get(),
+          "live-status: explicit session selection preserves full EXE store identity")
+    check(root.winfo_reqheight() <= root.winfo_screenheight() - 40,
+          "live-status: populated card and editor viewport fit the display")
+    text = app.live_text.get()
+    check("PC submissions 90.0/s" in text and "Distinct images unavailable" in text,
+          "live-status: submission rate and unavailable distinct rate are separate")
+    check("restart pending" in text and "next real frame" in text,
+          "live-status: running request separates FG restart and NR pending frame")
+    check("Early prepared 5" in text and "used 4" in text and "stereo depth" in text,
+          "live-status: prepared, used and provided stereo depth remain distinct")
+    check(app.scope_selection.get() == scope and current_snapshot() == before,
+          "live-status: viewing another session preserves editor and registry")
+    app.live_observations = []
+    app.live_selected_identity = None
+    app.live_explicit_selection = False
+    app.live_selector.configure(values=(), state="disabled")
+    app.render_live_status()
+
+
 def run(result_path):
     result = {"passed": False, "frozen": bool(getattr(sys, "frozen", False)),
               "elevated": gui.is_elevated(), "checks": []}
@@ -121,6 +168,12 @@ def run(result_path):
         app = gui.VDXRRegistryApp(root)
         root.update()
         check(snapshot() == before, "normal startup is read-only")
+        check(app.live_worker is not None and app.live_worker.thread.daemon,
+              "live-status: discovery starts on daemon worker")
+        check(app.live_poll_id is not None, "live-status: Tk polls worker mailbox")
+        check("Stock" in app.live_text.get(), "live-status: Stock has neutral telemetry capability")
+        check(str(app.live_selector.cget("state")) == "disabled",
+              "live-status: missing publisher is not an active session")
         check(app.variables[-1].get() == 100 and not app.enabled.get(), "fresh defaults: NR off, coverage 100")
         check(app.processing_resolution.get() == 100, "fresh processing resolution is native 100")
         check(app.frame_generation_depth_mode.get() == "Depth assist"
@@ -132,6 +185,7 @@ def run(result_path):
         check(str(app.nr_toggle.cget("state")) == "disabled"
               and str(app.fg_selector.cget("state")) == "disabled",
               "Stock startup disables NR and FG controls")
+        exercise_live_card(app, root, snapshot, check)
         temporary = tempfile.TemporaryDirectory(prefix="VDXRControlsSelfTest-")
         host = Path(temporary.name) / "virtualdesktop-openxr.dll"
         host.write_bytes(b"controls self-test fixture; never loaded")
@@ -232,6 +286,8 @@ def run(result_path):
         app.slider_widgets[-1].set(90)
         app.processing_resolution_slider.set(85)
         app.on_close()
+        check(app.live_poll_id is None and app.live_worker.stop_event.is_set(),
+              "live-status: window close stops background discovery")
         root = None
         check(read("FoveationSize")[0] == 90, "closing flushes pending coverage independently")
         check(read(gui.PROCESSING_RESOLUTION_VALUE_NAME) == (85, winreg.REG_DWORD),
@@ -329,6 +385,8 @@ def run(result_path):
         check(snapshot() == globals_before_profile, "depth-mode: game operations preserve globals")
         app.load_scope(None)
         app.on_close()
+        check(app.live_poll_id is None and app.live_worker.stop_event.is_set(),
+              "live-status: window close stops background discovery")
         root = None
         for coverage, processing in ((95, 80), (90, 85), (90, 80), (100, 80)):
             set_value("FoveationSize", coverage)
@@ -369,6 +427,8 @@ def run(result_path):
               and "invalid" in app.status.get().lower() and snapshot() == depth_malformed_before,
               "depth-mode: malformed startup warns without writes")
         app.on_close()
+        check(app.live_poll_id is None and app.live_worker.stop_event.is_set(),
+              "live-status: window close stops background discovery")
         root = None
         check(snapshot() == depth_malformed_before, "depth-mode: malformed close preserves stored request")
         set_value(gui.FRAME_GENERATION_DEPTH_MODE_NAME, 2)

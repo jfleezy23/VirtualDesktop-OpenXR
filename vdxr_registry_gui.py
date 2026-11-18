@@ -9,6 +9,7 @@ import winreg
 
 import vdxr_runtime_selection as runtime_selection
 import vdxr_game_profiles as game_profiles
+import vdxr_live_status as live_status
 
 
 REGISTRY_PATH = r"SOFTWARE\Virtual Desktop, Inc.\OpenXR"
@@ -346,17 +347,40 @@ class VDXRRegistryApp:
         self.load_processing_resolution(errors)
         self.saved_values = read_values(errors)
 
+        # Live diagnostics stay visible while the existing editor scrolls.
+        self.live_observations = []
+        self.live_selected_identity = None
+        self.live_explicit_selection = False
+        self.live_poll_id = None
+        self.live_worker = None
+        live_panel = RoundedPanel(root)
+        live_panel.grid(row=0, column=0, columnspan=2, sticky="ew", padx=20, pady=(16, 0))
+        self.live_panel = live_panel
+        live_card = live_panel.content
+        live_card.columnconfigure(0, weight=1)
+        ttk.Label(live_card, text="Live runtime", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        self.live_selection = tk.StringVar()
+        self.live_selector = ttk.Combobox(live_card, textvariable=self.live_selection, state="disabled",
+                                         width=76, style="Dark.TCombobox")
+        self.live_selector.grid(row=1, column=0, sticky="ew", pady=(6, 4))
+        self.live_selector.bind("<<ComboboxSelected>>", self.on_live_session_changed)
+        self.live_text = tk.StringVar(value="Discovering custom live sessions…")
+        ttk.Label(live_card, textvariable=self.live_text, style="Hint.TLabel", wraplength=592).grid(
+            row=2, column=0, sticky="w")
+        root.bind("<Destroy>", self.on_live_destroy, add="+")
+
         # A bounded viewport keeps the existing cards reachable on scaled displays.
         self.viewport = tk.Canvas(root, background=COLORS["background"], highlightthickness=0, borderwidth=0)
-        self.viewport.grid(row=0, column=0, sticky="nsew")
+        self.viewport.grid(row=1, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(root, orient="vertical", command=self.viewport.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
+        scrollbar.grid(row=1, column=1, sticky="ns")
         self.viewport.configure(yscrollcommand=scrollbar.set)
         frame = ttk.Frame(self.viewport, padding=(20, 16), style="App.TFrame")
         self.viewport.create_window(0, 0, anchor="nw", window=frame)
         frame.bind("<Configure>", lambda _event: self.viewport.configure(scrollregion=self.viewport.bbox("all")))
         root.bind("<MouseWheel>", lambda event: self.viewport.yview_scroll(-int(event.delta / 120), "units"), add="+")
         frame.columnconfigure(0, minsize=592)
+        self.editor_frame = frame
 
         ttk.Label(frame, text="VDXR Controls", style="Title.TLabel").grid(
             row=0, column=0, sticky="w"
@@ -584,7 +608,65 @@ class VDXRRegistryApp:
         self.refresh_profile_choices()
         root.update_idletasks()
         self.viewport.configure(width=frame.winfo_reqwidth(),
-                                height=min(frame.winfo_reqheight(), max(200, root.winfo_screenheight() - 120)))
+                                height=min(frame.winfo_reqheight(), max(200, root.winfo_screenheight() - 140
+                                                   - live_panel.winfo_reqheight())))
+        live_panel.bind("<Configure>", self.resize_editor_viewport, add="+")
+        self.live_worker = live_status.StatusWorker(self.profile_store)
+        self.live_poll_id = root.after(250, self.poll_live_status)
+
+    def resize_editor_viewport(self, _event=None):
+        # A populated live card can wrap more lines than the startup placeholder.
+        height = min(self.editor_frame.winfo_reqheight(), max(200,
+                     self.root.winfo_screenheight() - 140 - self.live_panel.winfo_reqheight()))
+        if int(self.viewport.cget("height")) != height:
+            self.viewport.configure(height=height)
+
+    def poll_live_status(self):
+        self.live_poll_id = None
+        result = self.live_worker.latest()
+        if result is not None:
+            self.live_observations, note = result
+            labels = tuple(live_status.session_label(item.snapshot) for item in self.live_observations)
+            self.live_selector.configure(values=labels, state="readonly" if labels else "disabled")
+            identities = {item.snapshot.identity for item in self.live_observations}
+            if self.live_selected_identity not in identities:
+                self.live_explicit_selection = False
+                self.live_selected_identity = None
+            if not self.live_explicit_selection:
+                default = live_status.choose_session(self.live_observations)
+                self.live_selected_identity = default.snapshot.identity if default else None
+            self.render_live_status()
+            if not labels and self.saved_runtime_selection != runtime_selection.STOCK_LABEL:
+                self.live_text.set(note + " · live activity unavailable")
+        self.live_poll_id = self.root.after(250, self.poll_live_status)
+
+    def on_live_session_changed(self, _event=None):
+        index = self.live_selector.current()
+        if 0 <= index < len(self.live_observations):
+            self.live_explicit_selection = True
+            self.live_selected_identity = self.live_observations[index].snapshot.identity
+            self.render_live_status()
+
+    def render_live_status(self):
+        selected = next((item for item in self.live_observations
+                         if item.snapshot.identity == self.live_selected_identity), None)
+        if selected is not None:
+            self.live_selection.set(live_status.session_label(selected.snapshot))
+        else:
+            self.live_selection.set("No active custom live session")
+        self.live_text.set(live_status.describe(selected,
+            stock=self.saved_runtime_selection == runtime_selection.STOCK_LABEL))
+
+    def stop_live_status(self):
+        if self.live_worker is not None:
+            self.live_worker.stop()
+        if self.live_poll_id is not None:
+            self.root.after_cancel(self.live_poll_id)
+            self.live_poll_id = None
+
+    def on_live_destroy(self, event):
+        if event.widget is self.root:
+            self.stop_live_status()
 
     def refresh_profile_choices(self):
         errors = []
@@ -770,6 +852,7 @@ class VDXRRegistryApp:
         self.update_runtime_controls()
 
     def update_runtime_controls(self):
+        self.render_live_status()
         custom = self.saved_runtime_selection == runtime_selection.CUSTOM_LABEL
         for widget, state in ((self.nr_toggle, "normal"), (self.fg_selector, "readonly"),
                               (self.backend_selector, "readonly"), (self.depth_mode_selector, "readonly"),

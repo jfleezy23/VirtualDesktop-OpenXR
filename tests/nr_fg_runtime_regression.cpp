@@ -832,6 +832,11 @@ namespace virtualdesktop_openxr {
                     "D3D12 app writes use the queue supplied in the public OpenXR binding");
         }
 #ifdef VDXR_NATIVE_DELIVERY_PROBE
+        static std::pair<uint64_t, PredictionReservation> nativeSourceReservation() {
+            auto& value = runtime();
+            std::unique_lock lock(value.m_frameMutex);
+            return {value.m_frameBegun, value.m_fgBegunReservation};
+        }
         struct LiveDeliveryGate {
             ComPtr<ID3D12Fence> release;
             ComPtr<ID3D12Fence> futureOutput;

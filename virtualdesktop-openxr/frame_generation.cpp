@@ -75,6 +75,7 @@ namespace virtualdesktop_openxr {
         VDXRFG_ApiV3 api3{};
         VDXRFG_ApiV4 api4{};
         VDXRFG_ApiV5 api5{};
+        VDXRFG_ApiV6 api6{};
         void* context{};
         InitInfo info;
         ComPtr<ID3D11Device5> device11;
@@ -115,11 +116,23 @@ namespace virtualdesktop_openxr {
         uint64_t generation{};
         uint64_t producerValue{}, consumerValue{}, consumedValue{}, previousSerial{};
         uint64_t inputOwnerToken{}, inputOwnerGeneration{};
+        uint64_t lastFullOutputValue{};
+        struct EarlyFlow {
+            ComPtr<ID3D11Texture2D> atlas11;
+            ComPtr<ID3D12Resource> atlas12;
+            ComPtr<ID3D11Fence> producer11;
+            ComPtr<ID3D12Fence> producer12, read12;
+            std::array<ComPtr<ID3D11Texture2D>, 2> sources;
+            VDXRFG_PreparedV6 receipt{};
+            uint64_t producerValue{}, readValue{};
+            bool active{}, failed{};
+        } early;
         std::atomic<bool> poisoned{};
         bool hostCompletionUnknown{};
         bool hostOwnsReal{}, opaqueInput{};
         HANDLE shutdownProducerEvent{};
         uint64_t shutdownRegisteredValue{};
+        ID3D11Fence* shutdownRegisteredFence{};
         HANDLE copyCompletionEvent{};
         HANDLE readyCompletionEvent{};
         std::array<uint64_t, 2> registeredReadyValues{};
@@ -767,6 +780,16 @@ namespace virtualdesktop_openxr {
                     }
                 }
             }
+            const auto getApi6 = reinterpret_cast<VDXRFG_GetApiV6Fn>(GetProcAddress(state->module, "VDXRFG_GetApiV6"));
+            if (getApi6 && api3.Submit && !info.useFidelityFxFull) {
+                auto& api6 = state->api6;
+                api6.struct_size = sizeof(api6);
+                api6.api_version = VDXRFG_API_VERSION_6;
+                hr = getApi6(&api6);
+                if (hr != S_OK || api6.struct_size != sizeof(api6) || api6.api_version != VDXRFG_API_VERSION_6 ||
+                    !api6.Prepare || !api6.CommitPrepared || !api6.Cancel)
+                    api6 = {}; // An optional extension cannot disable the validated ordinary path.
+            }
             const bool extended = getApi3 || getApi4 || state->api5.Create;
             if (info.multiplier == 4 && !extended)
                 return VDXRFG_E_REJECTED;
@@ -977,6 +1000,180 @@ namespace virtualdesktop_openxr {
 #endif
     }
 
+    HRESULT FrameGeneration::prepareFlow(const FinalProjectionInput& input, uint64_t* moduleResult) noexcept {
+        if (!m_state || m_state->poisoned)
+            return VDXRFG_E_REJECTED;
+        auto& state = *m_state;
+        auto& early = state.early;
+        if (early.failed)
+            return VDXRFG_E_POISONED;
+        if (!state.api6.Prepare || !state.previousSerial || !state.ready11 || !state.lastFullOutputValue ||
+            state.info.useFidelityFxFull || (state.api5.Create && state.info.depthMode == 2) || early.active ||
+            !input.contentEpoch || input.serial <= state.previousSerial)
+            return S_FALSE;
+        const auto full = state.ready11->GetCompletedValue();
+        const auto copied = early.producer11 ? early.producer11->GetCompletedValue() : 0;
+        const auto read = early.read12 ? early.read12->GetCompletedValue() : 0;
+        if (full == UINT64_MAX || copied == UINT64_MAX || read == UINT64_MAX) {
+            state.poisoned = state.hostCompletionUnknown = true;
+            return VDXRFG_E_POISONED;
+        }
+        if (copied < early.producerValue || read < early.readValue || early.producerValue >= UINT64_MAX - 1)
+            return S_FALSE;
+        early.sources = {};
+        early.receipt = {};
+        early.readValue = 0;
+        uint32_t bgraMask{};
+        for (unsigned eye = 0; eye < 2; ++eye) {
+            const auto& view = input.views[eye];
+            const auto& rect = view.rect;
+            if (!input.colour[eye] || !sameDevice(state.device11.Get(), input.colour[eye].Get()))
+                return S_FALSE;
+            D3D11_TEXTURE2D_DESC desc{};
+            input.colour[eye]->GetDesc(&desc);
+            const bool bgra = isBgra(desc.Format);
+            if (desc.SampleDesc.Count != 1 || !desc.ArraySize || rect.width != state.info.eyeWidth ||
+                rect.height != state.info.height || uint64_t(rect.x) + rect.width > desc.Width ||
+                uint64_t(rect.y) + rect.height > desc.Height ||
+                (!bgra && desc.Format != DXGI_FORMAT_R8G8B8A8_TYPELESS && desc.Format != state.info.format &&
+                 desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM))
+                return S_FALSE;
+            float norm{};
+            for (const auto component : view.orientation) {
+                if (!std::isfinite(component))
+                    return S_FALSE;
+                norm += component * component;
+            }
+            for (const auto component : view.position)
+                if (!std::isfinite(component))
+                    return S_FALSE;
+            for (const auto component : view.fov)
+                if (!std::isfinite(component))
+                    return S_FALSE;
+            if (std::abs(norm - 1.f) > .02f || view.fov[0] >= view.fov[1] || view.fov[3] >= view.fov[2])
+                return S_FALSE;
+            if (bgra)
+                bgraMask |= 1u << eye;
+        }
+        if (!early.atlas11) {
+            State::EarlyFlow candidate;
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = 2 * state.info.eyeWidth;
+            desc.Height = state.info.height;
+            desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+            desc.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+            desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+            auto hr = state.device11->CreateTexture2D(&desc, nullptr, &candidate.atlas11);
+            if (SUCCEEDED(hr))
+                hr = shareTexture(candidate.atlas11.Get(), state.device12.Get(), &candidate.atlas12, state.pairHook);
+            if (SUCCEEDED(hr))
+                hr = state.device11->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&candidate.producer11));
+            HANDLE handle{};
+            if (SUCCEEDED(hr))
+                hr = candidate.producer11->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &handle);
+            if (SUCCEEDED(hr)) {
+                hr = state.device12->OpenSharedHandle(handle, IID_PPV_ARGS(&candidate.producer12));
+                CloseHandle(handle);
+            }
+            if (FAILED(hr))
+                return S_FALSE; // No GPU operation or ordinary ownership changed.
+            early = std::move(candidate);
+            diagnostic("early-flow-warm",
+                       input.serial,
+                       early.atlas11.Get(),
+                       early.atlas12.Get(),
+                       uint64_t(desc.Width) * desc.Height * 4);
+        }
+        if (bgraMask && FAILED(state.bgra.initialize(state.info)))
+            return S_FALSE;
+        // This producer timeline is deliberately independent of normal capture:
+        // speculative copies cannot introduce a new late CPU BUSY condition.
+        early.sources = input.colour;
+        if (bgraMask)
+            state.bgra.copy(
+                state.context11.Get(), early.atlas11.Get(), state.info.eyeWidth, bgraMask, input.colour, input.views);
+        else
+            copyStereo(state.context11.Get(), early.atlas11.Get(), state.info.eyeWidth, input.colour, input.views);
+        const auto producerValue = ++early.producerValue;
+        auto hr = state.context11->Signal(early.producer11.Get(), producerValue);
+        if (FAILED(hr)) {
+            state.poisoned = state.hostCompletionUnknown = true;
+            return VDXRFG_E_POISONED;
+        }
+        state.context11->Flush();
+        VDXRFG_PrepareInfoV6 prepare{};
+        prepare.struct_size = sizeof(prepare);
+        prepare.api_version = VDXRFG_API_VERSION_6;
+        prepare.previous_serial = state.previousSerial;
+        prepare.current_serial = input.serial;
+        prepare.content_epoch = input.contentEpoch;
+        prepare.current_atlas = early.atlas12.Get();
+        prepare.producer_fence = early.producer12.Get();
+        prepare.producer_value = producerValue;
+        for (unsigned eye = 0; eye < 2; ++eye) {
+            prepare.views[eye] = input.views[eye];
+            prepare.views[eye].rect.x = eye * state.info.eyeWidth;
+            prepare.views[eye].rect.y = 0;
+        }
+        auto& receipt = early.receipt;
+        receipt.struct_size = sizeof(receipt);
+        receipt.api_version = VDXRFG_API_VERSION_6;
+        hr = state.api6.Prepare(state.context, &prepare, &receipt);
+        if (moduleResult)
+            *moduleResult = static_cast<uint32_t>(hr);
+        diagnostic("early-flow-Prepare-result", input.serial, early.atlas12.Get(), nullptr, receipt.token, hr);
+        if (hr == VDXRFG_E_POISONED) {
+            // The host copy has a known signal. The module retains its failed
+            // receipt/atlas and owns settlement of the speculative GPU work.
+            // Old output tickets may still retire before Destroy proves idle.
+            early.failed = true;
+            return hr;
+        }
+        if (hr != S_OK) {
+            if (receipt.context_id || receipt.token || receipt.generation || receipt.previous_serial ||
+                receipt.current_serial || receipt.content_epoch || receipt.input_read_fence ||
+                receipt.input_read_value) {
+                state.poisoned = state.hostCompletionUnknown = true;
+                return VDXRFG_E_POISONED;
+            }
+            return S_FALSE;
+        }
+        if (receipt.struct_size != sizeof(receipt) || receipt.api_version != VDXRFG_API_VERSION_6 ||
+            !receipt.context_id || !receipt.token || !receipt.generation ||
+            receipt.previous_serial != prepare.previous_serial || receipt.current_serial != input.serial ||
+            receipt.content_epoch != input.contentEpoch || !receipt.input_read_fence || !receipt.input_read_value) {
+            state.poisoned = state.hostCompletionUnknown = true;
+            return VDXRFG_E_POISONED;
+        }
+        early.active = true;
+        // Only CPU observation is needed for atlas reuse. Retain the exact
+        // module-owned fence directly, avoiding a fallible post-submit import.
+        early.read12 = static_cast<ID3D12Fence*>(receipt.input_read_fence);
+        early.readValue = receipt.input_read_value;
+        return S_OK;
+    }
+
+    HRESULT FrameGeneration::cancelPreparedFlow() noexcept {
+        if (!m_state || !m_state->early.active)
+            return S_FALSE;
+        auto& state = *m_state;
+        const auto hr = state.api6.Cancel(state.context, &state.early.receipt);
+        diagnostic("early-flow-Cancel-result",
+                   state.early.receipt.current_serial,
+                   nullptr,
+                   nullptr,
+                   state.early.receipt.token,
+                   hr);
+        if (FAILED(hr)) {
+            state.poisoned = state.hostCompletionUnknown = true;
+            return VDXRFG_E_POISONED;
+        }
+        // Keep the atlas, source owners and exact read point until observed.
+        state.early.active = false;
+        return hr;
+    }
+
     HRESULT FrameGeneration::capture(const FinalProjectionInput& input, OwnedFrameTransaction& transaction) noexcept {
         return capture(input, transaction, nullptr);
     }
@@ -990,6 +1187,14 @@ namespace virtualdesktop_openxr {
             return VDXRFG_E_REJECTED;
         }
         auto& state = *m_state;
+        struct CancelOnExit {
+            FrameGeneration& owner;
+            ~CancelOnExit() {
+                owner.cancelPreparedFlow();
+            }
+        } cancelOnExit{*this};
+        if (state.early.failed)
+            return VDXRFG_E_POISONED;
         // Packing can overwrite the shared atlas before Submit rejects. No
         // failed capture may leave an older ticket claiming those pixels.
         if (!state.deliveryDevice11) {
@@ -997,6 +1202,13 @@ namespace virtualdesktop_openxr {
         }
         if (state.poisoned || transaction.ticket.token) {
             return VDXRFG_E_REJECTED;
+        }
+        if (state.early.active && !input.contentEpoch) {
+            // A changed source ledger is not a malformed Commit request. Drop
+            // its exact speculative job, then use the ordinary final path.
+            const auto cancelled = cancelPreparedFlow();
+            if (FAILED(cancelled))
+                return cancelled;
         }
         if (state.deliveryDevice11 && state.inputOwnerToken) {
             for (unsigned bank = 0; bank < state.liveTokens.size(); ++bank) {
@@ -1128,11 +1340,15 @@ namespace virtualdesktop_openxr {
             guideEpoch = state.guideEpoch;
         }
         if (input.slots.count == 1 && state.previousSerial) {
+            const auto cancelled = cancelPreparedFlow();
+            if (FAILED(cancelled))
+                return cancelled;
             const auto resetResult = state.api.Reset(state.context, 0);
             if (FAILED(resetResult)) {
                 return resetResult;
             }
             state.previousSerial = 0;
+            state.lastFullOutputValue = 0;
         }
         // A subsequent producer never overwrites a registered input still read
         // by the FG queue. This is a GPU dependency, not a CPU completion wait.
@@ -1319,7 +1535,47 @@ namespace virtualdesktop_openxr {
         pairPacket.producerValue = submit.producer_value;
         if (state.pairHook)
             state.pairHook(&pairPacket);
-        if (state.api5.Submit) {
+        bool ordinarySubmit = true;
+        if (state.early.active) {
+            VDXRFG_SubmitInfoV5 final{};
+            final.struct_size = sizeof(final);
+            final.api_version = VDXRFG_API_VERSION_5;
+            final.base = submit;
+            if (hasGuide) {
+                final.guide_serial = input.serial;
+                final.guide_epoch = guideEpoch;
+                final.guide_mask = 3;
+                final.guide_encoding = VDXRFG_GUIDE_ENCODING_INVERSE_Z;
+            }
+            hr = state.api6.CommitPrepared(
+                state.context, &state.early.receipt, input.contentEpoch, &final, &transaction.ticket);
+            diagnostic(
+                "early-flow-Commit-result", input.serial, state.input12.Get(), nullptr, state.early.receipt.token, hr);
+            ordinarySubmit = hr == S_FALSE;
+            if (diagnostics) {
+                diagnostics->preparedResult = hr;
+                diagnostics->preparedUsed = hr == S_OK;
+                diagnostics->apiVersion = final.api_version;
+                diagnostics->guideMask = final.guide_mask;
+                diagnostics->guideSerial = final.guide_serial;
+                diagnostics->guideEpoch = final.guide_epoch;
+                diagnostics->guideEncoding = final.guide_encoding;
+            }
+            if (hr == S_OK || hr == S_FALSE || hr == VDXRFG_E_BUSY) {
+                // These exact-receipt outcomes consume the module's job. Its
+                // read point still owns our atlas until physically complete.
+                state.early.active = false;
+            } else if (hr != VDXRFG_E_POISONED) {
+                const auto cancelled = cancelPreparedFlow();
+                if (FAILED(cancelled))
+                    return cancelled;
+            }
+            if (ordinarySubmit && transaction.ticket.token) {
+                state.poisoned = state.hostCompletionUnknown = true;
+                return VDXRFG_E_POISONED;
+            }
+        }
+        if (ordinarySubmit && state.api5.Submit) {
             VDXRFG_SubmitInfoV5 guide{};
             guide.struct_size = sizeof(guide);
             guide.api_version = VDXRFG_API_VERSION_5;
@@ -1345,11 +1601,11 @@ namespace virtualdesktop_openxr {
                 diagnostics->guideEpoch = guide.guide_epoch;
                 diagnostics->guideEncoding = guide.guide_encoding;
             }
-        } else if (state.api3.Submit) {
+        } else if (ordinarySubmit && state.api3.Submit) {
             hr = state.api3.Submit(state.context, &submit, &transaction.ticket);
             if (diagnostics)
                 diagnostics->apiVersion = submit.api_version;
-        } else {
+        } else if (ordinarySubmit) {
             VDXRFG_SubmitInfoV1 legacy{};
             legacy.struct_size = sizeof(legacy);
             legacy.api_version = VDXRFG_API_VERSION;
@@ -1436,6 +1692,7 @@ namespace virtualdesktop_openxr {
         }
         transaction.slots = input.slots;
         state.previousSerial = input.serial;
+        state.lastFullOutputValue = transaction.ticket.output_ready_value;
         state.liveTokens[transaction.ticket.bank] = transaction.ticket.token;
         if (!state.consumed11) {
             hr = importFence(state.device12.Get(),
@@ -2106,12 +2363,18 @@ namespace virtualdesktop_openxr {
         if (!m_state || m_state->poisoned) {
             return VDXRFG_E_REJECTED;
         }
+        if (m_state->early.failed)
+            return VDXRFG_E_POISONED;
+        const auto cancelled = cancelPreparedFlow();
+        if (FAILED(cancelled))
+            return cancelled;
         if (!m_state->deliveryDevice11) {
             m_state->inputOwnerToken = m_state->inputOwnerGeneration = 0;
         }
         const auto hr = m_state->api.Reset(m_state->context, reason);
         if (SUCCEEDED(hr)) {
             m_state->previousSerial = 0;
+            m_state->lastFullOutputValue = 0;
             m_state->inputOwnerToken = m_state->inputOwnerGeneration = 0;
         }
         return hr;
@@ -2126,12 +2389,22 @@ namespace virtualdesktop_openxr {
         if (m_state->hostCompletionUnknown) {
             return VDXRFG_E_POISONED;
         }
+        const auto cancelled = cancelPreparedFlow();
+        if (FAILED(cancelled))
+            return cancelled;
+        ID3D11Fence* pendingFence = m_state->producer11.Get();
+        uint64_t pendingValue = m_state->producerValue;
         const auto produced = m_state->producer11->GetCompletedValue();
-        if (produced == UINT64_MAX) {
+        const auto earlyProduced = m_state->early.producer11 ? m_state->early.producer11->GetCompletedValue() : 0;
+        if (produced == UINT64_MAX || earlyProduced == UINT64_MAX) {
             m_state->poisoned = m_state->hostCompletionUnknown = true;
             return VDXRFG_E_POISONED;
         }
-        if (produced < m_state->producerValue) {
+        if (produced >= pendingValue && earlyProduced < m_state->early.producerValue) {
+            pendingFence = m_state->early.producer11.Get();
+            pendingValue = m_state->early.producerValue;
+        }
+        if (produced < m_state->producerValue || earlyProduced < m_state->early.producerValue) {
             if (pendingProducer) {
                 // Retain this event on timeout or failed teardown. A registration
                 // may still complete after the caller returns.
@@ -2140,12 +2413,13 @@ namespace virtualdesktop_openxr {
                     if (!m_state->shutdownProducerEvent)
                         return HRESULT_FROM_WIN32(GetLastError());
                 }
-                if (m_state->shutdownRegisteredValue != m_state->producerValue) {
-                    const auto hr = m_state->producer11->SetEventOnCompletion(m_state->producerValue,
-                                                                              m_state->shutdownProducerEvent);
+                if (m_state->shutdownRegisteredFence != pendingFence ||
+                    m_state->shutdownRegisteredValue != pendingValue) {
+                    const auto hr = pendingFence->SetEventOnCompletion(pendingValue, m_state->shutdownProducerEvent);
                     if (FAILED(hr))
                         return hr;
-                    m_state->shutdownRegisteredValue = m_state->producerValue;
+                    m_state->shutdownRegisteredValue = pendingValue;
+                    m_state->shutdownRegisteredFence = pendingFence;
                 }
                 *pendingProducer = m_state->shutdownProducerEvent;
             }
@@ -2183,7 +2457,7 @@ namespace virtualdesktop_openxr {
         return true;
     }
     bool FrameGeneration::initialized() const noexcept {
-        return m_state && m_state->context && !m_state->poisoned;
+        return m_state && m_state->context && !m_state->poisoned && !m_state->early.failed;
     }
 
     bool FrameGeneration::depthGuidanceEnabled() const noexcept {
@@ -2213,11 +2487,15 @@ namespace virtualdesktop_openxr {
         if (!depthGuidanceEnabled() || !(state.api5.supported_create_flags & VDXRFG_CREATE_COLOR_OPAQUE) ||
             !(state.api5.supported_depth_capabilities & VDXRFG_DEPTH_OPACITY_RESET) || state.opaqueInput == opaqueInput)
             return S_FALSE;
+        const auto cancelled = cancelPreparedFlow();
+        if (FAILED(cancelled))
+            return cancelled;
         const auto hr =
             state.api5.Reset(state.context, opaqueInput ? VDXRFG_RESET_COLOR_OPAQUE : VDXRFG_RESET_COLOR_ALPHA);
         if (SUCCEEDED(hr)) {
             state.inputOwnerToken = state.inputOwnerGeneration = 0;
             state.previousSerial = 0;
+            state.lastFullOutputValue = 0;
             state.info.opaqueInput = state.opaqueInput = opaqueInput;
             return S_OK;
         }

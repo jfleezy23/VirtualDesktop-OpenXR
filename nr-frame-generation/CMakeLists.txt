@@ -587,6 +587,23 @@ if(BUILD_TESTING)
         set_tests_properties(fg_submit_validation_${SCENARIO} PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE
             FAIL_REGULAR_EXPRESSION "FAIL:")
     endforeach()
+    add_executable(fg_prepared_flow_regression ${CMAKE_CURRENT_SOURCE_DIR}/../tests/fg_prepared_flow_regression.cpp)
+    target_include_directories(fg_prepared_flow_regression PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../packages/Detours.4.0.1/lib/native/include"
+        "${OFXR}/external/NVIDIA-Optical-Flow-SDK-5.0.7/Optical_Flow_SDK_5.0.7/NvOFInterface")
+    target_compile_features(fg_prepared_flow_regression PRIVATE cxx_std_20)
+    target_compile_definitions(fg_prepared_flow_regression PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(fg_prepared_flow_regression PRIVATE d3d12 dxgi
+        "${CMAKE_CURRENT_SOURCE_DIR}/../packages/Detours.4.0.1/lib/native/libs/x64/detours.lib")
+    add_test(NAME fg_prepare_failed_eye
+        COMMAND fg_prepared_flow_regression "$<TARGET_FILE:vdxr_frame_generation>" 3 fault)
+    set_tests_properties(fg_prepare_failed_eye PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+    foreach(MULTIPLIER 2 3 4)
+        add_test(NAME fg_prepare_${MULTIPLIER}x
+            COMMAND fg_prepared_flow_regression "$<TARGET_FILE:vdxr_frame_generation>" ${MULTIPLIER})
+        set_tests_properties(fg_prepare_${MULTIPLIER}x PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+    endforeach()
+
     add_executable(fg_gpu_regression ${CMAKE_CURRENT_SOURCE_DIR}/../tests/fg_gpu_regression.cpp)
     target_include_directories(fg_gpu_regression PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/module-checkpoint/include" "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_compile_features(fg_gpu_regression PRIVATE cxx_std_20)

@@ -125,7 +125,15 @@ namespace virtualdesktop_openxr {
                                                 long long frame,
                                                 const ovrViewScaleDesc* scale,
                                                 const ovrLayerHeader* const* layers,
-                                                unsigned count) const {
-        return nativeRenderingCall([&] { return ::ovr_EndFrame(session, frame, scale, layers, count); }, "End", frame);
+                                                unsigned count,
+                                                uint64_t sourceSerial,
+                                                FrameGenerationRole selectedRole) {
+        const auto result =
+            nativeRenderingCall([&] { return ::ovr_EndFrame(session, frame, scale, layers, count); }, "End", frame);
+        if (OVR_SUCCESS(result) && m_liveStatus.available()) {
+            m_livePresenter.accepted(sourceSerial, static_cast<uint64_t>(selectedRole));
+            m_liveStatus.publishPresenter(m_livePresenter.payload());
+        }
+        return result;
     }
 } // namespace virtualdesktop_openxr

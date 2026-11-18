@@ -98,6 +98,9 @@ namespace virtualdesktop_openxr {
         std::array<VDXRFG_ViewV1, 2> views{};
         std::array<FrameGenerationDepthSource, 2> depth;
         uint64_t serial{};
+        // One finalized colour production under the runtime's source lease.
+        // Resource pointer reuse alone must never reproduce this identity.
+        uint64_t contentEpoch{};
         bool nrEnabled{}; // Private observer qualification; never changes NR configuration.
         vdxrfg::pair_capture::Entry entry{};
         int64_t time{}, period{};
@@ -150,6 +153,8 @@ namespace virtualdesktop_openxr {
             uint64_t guideSerial{}, guideEpoch{}, previousSerial{}, currentSerial{}, ticketToken{};
             HRESULT submitResult{E_PENDING};
             bool submitCalled{};
+            bool preparedUsed{};
+            HRESULT preparedResult{E_PENDING};
         };
 
         FrameGeneration();
@@ -158,6 +163,12 @@ namespace virtualdesktop_openxr {
         FrameGeneration& operator=(const FrameGeneration&) = delete;
 
         HRESULT initialize(const InitInfo& info) noexcept;
+        // Optional non-destructive analysis. Never packs the canonical real-B
+        // atlas or reserves/publishes an output ticket. Caller holds the same
+        // producer-context lease as capture and preserves source contents.
+        // moduleResult receives the raw Prepare HRESULT only if the DLL was called.
+        HRESULT prepareFlow(const FinalProjectionInput& input, uint64_t* moduleResult = nullptr) noexcept;
+        HRESULT cancelPreparedFlow() noexcept;
         HRESULT capture(const FinalProjectionInput& input, OwnedFrameTransaction& transaction) noexcept;
         HRESULT capture(const FinalProjectionInput& input,
                         OwnedFrameTransaction& transaction,

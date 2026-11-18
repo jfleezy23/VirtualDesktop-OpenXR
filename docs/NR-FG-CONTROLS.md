@@ -58,6 +58,37 @@ NR component. **No DLSSNR DLLs or models are included or downloaded.** The contr
 package also contains no VR runtime DLLs or games. FG with NR off does not require the
 NR component.
 
+## Live runtime status
+
+With the matching updated custom runtime, the **Live runtime** card shows what a running
+session is doing alongside the saved settings for its full executable path. Keep Controls
+open, launch a game normally, and allow two samples for rates to appear. If several sessions
+are running, use the card's session selector to choose the game. Selecting an editor profile
+does not change which running session you are observing.
+
+- **NR recent activity** counts successful stereo NR processing. An enabled setting by itself
+  does not establish that the model processed a frame.
+- **App accepted** is the rate of accepted application frames. **PC submissions** counts
+  successful handoffs to Virtual Desktop. **Distinct images** excludes repeated known frame
+  identities; none of these rates measures headset scanout or proves every image was displayed.
+- **Early prepared / used** separates speculative optical-flow preparation from preparations
+  consumed by frame generation. It is not an extra quality mode. Early preparation currently
+  targets D3D11 with NR and NVIDIA FG; other supported routes retain ordinary preparation.
+- **Latest FG route** reports the last accepted application frame's preparation state: ordinary,
+  off, priming, unavailable, ineligible, busy or repriming. It can explain a bypass or recovery;
+  it does not establish that every generated image was delivered or displayed.
+- **Guides provided to FG** reports bound depth-guide inputs. It does not prove finite foreground
+  depth, a visible depth benefit, or a successful depth submission from the game itself.
+- **FG restart pending** means the running game's saved FG request differs from its startup
+  selection. Restart that game to apply it. NR settings can update during play.
+
+Missing, unsupported or inconsistent samples show unavailable rather than zero FPS. Stock VDXR
+does not publish this custom status. The card cannot diagnose loading from a pause in counters;
+it reports only the observed activity. Coverage and processing percentages are effective settings,
+not a measurement of model working dimensions when a native-processing fallback was required.
+Closing Controls leaves gameplay settings intact. Reading this status does not enable detailed
+frame tracing or write frame logs.
+
 ## Automatic game profiles
 
 **Globals** retains the existing immediate-save controls and your saved appearance values.

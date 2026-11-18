@@ -551,22 +551,175 @@ class WindowsStatusTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "Windows PowerShell function fixtures")
 class PowerShellHelperTests(unittest.TestCase):
-    def functions(self, body):
-        # Parse and load function definitions only. Never execute the helper's
-        # Add-Type preamble, action dispatch, process control or scheduled tasks.
+    def functions(self, body, native=False):
+        # Never execute the helper dispatcher. The native lifetime test opts in
+        # to compiling the helper's own P/Invoke class for its disposable child.
         helper = Path(__file__).resolve().parents[1] / "Restart-StreamerInteractive.ps1"
         encoded = base64.b64encode(helper.read_bytes()).decode("ascii")
+        body64 = base64.b64encode(body.encode("utf-8")).decode("ascii")
+        interop = ("$add=$ast.Find({param($n) $n -is [Management.Automation.Language.CommandAst] "
+                   "-and $n.GetCommandName() -eq 'Add-Type'},$false)\n"
+                   ". ([scriptblock]::Create($add.Extent.Text))\n" if native else "")
         script = ("$ErrorActionPreference='Stop'\n"
                   "$source=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encoded + "'))\n"
                   "$ast=[scriptblock]::Create($source).Ast\n"
                   "$definitions=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst]},$false))\n"
-                  "foreach($definition in $definitions){ . ([scriptblock]::Create($definition.Extent.Text)) }\n" + body)
+                  "foreach($definition in $definitions){ . ([scriptblock]::Create($definition.Extent.Text)) }\n" + interop +
+                  "& ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" +
+                  body64 + "'))))\n")
         executable = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
         result = subprocess.run([str(executable), "-NoProfile", "-NonInteractive", "-Command", "-"],
                                 input=script, capture_output=True, encoding="utf-8", timeout=30,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
+
+    def test_streamer_ownership_and_restart_receipts(self):
+        # Invoke production PowerShell functions. All OS observations, process
+        # leases, signing checks and task/launch actions in this fixture are local fakes.
+        fixture = r'''
+$ErrorActionPreference='Stop'
+$identity=@{sid='S-1-5-21-12-34-56-1000';session=1}
+$config=@{streamer_path='C:\Configured\VirtualDesktop.Streamer.exe';game_executables=@('C:\Fixture\game.exe')}
+$system='S-1-5-18'
+$now=Get-Date
+function Get-CimInstance($className,$Filter) {
+    if($className -eq 'Win32_Service'){
+        if($Filter -ne "Name='VirtualDesktop.Service.exe'"){throw 'wrong SCM lookup'}
+        $script:scmReads++
+        if($case -eq 'changed_scm' -and $script:scmReads -gt 1){return $null}
+        return $svc
+    }
+    if($Filter -eq "ProcessId=70"){return $parent}
+    if($Filter -eq "ProcessId=71"){return $child}
+    if($Filter -like "Name='VirtualDesktop.Streamer.exe'*"){return $child}
+    if(-not $Filter){return @($child,$game)}
+    throw 'unexpected OS query'
+}
+function Invoke-CimMethod($InputObject,$MethodName) {
+    if($MethodName -ne 'GetOwnerSid'){throw 'wrong method'}
+    if($InputObject.ProcessId -eq 70){return @{ReturnValue=$parentCode;Sid=$parentSid}}
+    return @{ReturnValue=$ownerCode;Sid=$ownerSid}
+}
+function Open-VDProcessLifetime($process) {
+    if($case -eq 'inaccessible' -or $case -eq 'pid_reused'){throw 'cannot pin original process creation'}
+    $pin=[pscustomobject]@{Creation=$process.CreationDate.ToFileTimeUtc()}
+    $pin | Add-Member ScriptMethod RequireLive {if($case -eq 'exited'){throw 'exited'}}
+    $pin | Add-Member ScriptMethod Dispose {}
+    return $pin
+}
+function Test-VDProcessElevated($processId){return $userElevated}
+function Get-AuthenticodeSignature($LiteralPath) {
+    $service=$LiteralPath -eq $parent.ExecutablePath
+    $cn=if($case -eq 'both_wrong_publisher' -or ($case -eq 'wrong_service_publisher' -and $service)){'Other Company'}else{'Virtual Desktop, Inc'}
+    $cert=[pscustomobject]@{cn=$cn;Subject="CN=$cn"}
+    $cert | Add-Member ScriptMethod GetNameInfo {param($type,$issuer) $this.cn}
+    $valid=if(($case -eq 'service_unsigned' -and $service) -or ($case -eq 'streamer_unsigned' -and !$service)){'NotSigned'}else{'Valid'}
+    return @{Status=$valid;SignerCertificate=$cert}
+}
+function Start-Process {throw 'UNEXPECTED_LAUNCH'}
+function Register-ScheduledTask {throw 'UNEXPECTED_LAUNCH'}
+function Get-Process {return @{Modules=@()}}
+$results=@{}
+foreach($case in @('user','user_elevated','system','foreign','session','image','service_name','service_stopped',
+        'service_account','parent_pid','parent_image','parent_session','parent_owner','parent_owner_unknown',
+        'child_owner_unknown','parent_newer','service_unsigned','streamer_unsigned','both_wrong_publisher',
+        'wrong_service_publisher','inaccessible','pid_reused','exited','changed_scm','known_game','unknown_known_game')){
+    $script:scmReads=0; $ownerSid=$system;$ownerCode=0;$parentSid=$system;$parentCode=0;$userElevated=$false
+    $child=[pscustomobject]@{ProcessId=71;ParentProcessId=70;Name='VirtualDesktop.Streamer.exe';ExecutablePath=$config.streamer_path;SessionId=1;CreationDate=$now}
+    $parent=[pscustomobject]@{ProcessId=70;Name='VirtualDesktop.Service.exe';ExecutablePath='C:\Different Folder\VirtualDesktop.Service.exe';SessionId=0;CreationDate=$now.AddMinutes(-2)}
+    $svc=[pscustomobject]@{Name='VirtualDesktop.Service.exe';ProcessId=70;StartName='LocalSystem';State='Running';PathName='"C:\Different Folder\VirtualDesktop.Service.exe"'}
+    $game=[pscustomobject]@{Name='unrelated.exe';ProcessId=74;ExecutablePath='C:\Fixture\unrelated.exe'}
+    switch($case){
+        'user' {$ownerSid=$identity.sid}
+        'user_elevated' {$ownerSid=$identity.sid;$userElevated=$true}
+        'foreign' {$ownerSid='S-1-5-21-12-34-56-999'}
+        'session' {$child.SessionId=2}
+        'image' {$child.ExecutablePath='C:\Foreign\VirtualDesktop.Streamer.exe'}
+        'service_name' {$svc.Name='Imposter.Service.exe'}
+        'service_stopped' {$svc.State='Stopped'}
+        'service_account' {$svc.StartName='NetworkService'}
+        'parent_pid' {$svc.ProcessId=73}
+        'parent_image' {$parent.ExecutablePath='C:\Elsewhere\VirtualDesktop.Service.exe'}
+        'parent_session' {$parent.SessionId=1}
+        'parent_owner' {$parentSid=$identity.sid}
+        'parent_owner_unknown' {$parentCode=2}
+        'child_owner_unknown' {$ownerCode=2}
+        'parent_newer' {$parent.CreationDate=$now.AddMinutes(1)}
+        'known_game' {$game.Name='game.exe';$game.ExecutablePath=$config.game_executables[0]}
+        'unknown_known_game' {$game.Name='game.exe';$game.ExecutablePath=$null}
+    }
+    if($case -eq 'known_game' -or $case -eq 'unknown_known_game'){
+        try{Stop-Streamer $config $identity;$results[$case]='accepted'}
+        catch{$results[$case]=if($_.Exception.Message -like 'Close the *'){ 'protected' }else{'wrong failure'}}
+    } else {
+        try{$normal=Get-VerifiedStreamerOwner $config $identity $child $false;$results[$case]=$normal}
+        catch{$results[$case]='rejected'}
+        if($case -in @('user','user_elevated','system')){
+            try{$r=Restart-Streamer $config $identity
+                $results["restart_$case"]=@($r.normal_user,$r.launch_requested,$r.streamer_owners[0])}
+            catch{$results["restart_$case"]='rejected'}
+        }
+    }
+}
+# Exercise the newly requested launch branch with every OS task/action mocked.
+$case='system'; $script:taskStarted=$false; $script:taskRemoved=$false; $script:scmReads=0
+function Get-VDProcesses($config) {if($script:taskStarted){return $child}}
+function New-ScheduledTaskAction($Execute,$Argument) {if($Argument -notlike '*-Action Launch*'){throw 'wrong handoff'}; 'action'}
+function New-ScheduledTaskPrincipal($UserId,$LogonType,$RunLevel) {
+    if($UserId -ne $identity.sid -or $LogonType -ne 'Interactive' -or $RunLevel -ne 'Limited'){throw 'wrong task token'}
+    'principal'
+}
+function New-ScheduledTaskSettingsSet([switch]$AllowStartIfOnBatteries,[switch]$DontStopIfGoingOnBatteries,$ExecutionTimeLimit) {'settings'}
+function Register-ScheduledTask($TaskName,$Action,$Principal,$Settings) {}
+function Start-ScheduledTask($TaskName) {$script:taskStarted=$true}
+function Unregister-ScheduledTask($TaskName,$Confirm) {$script:taskRemoved=$true}
+$ConfigPath='fixture-config.json'
+$r=Restart-Streamer $config $identity
+$results['requested_brokered_restart']=@($r.normal_user,$r.launch_requested,$r.streamer_owners[0],$script:taskRemoved)
+$results | ConvertTo-Json -Compress
+'''
+        result = self.functions(fixture)
+        expected = {"user": "interactive_user", "user_elevated": "interactive_user",
+                    "system": "service_brokered_system", "restart_user": [True, False, "interactive_user"],
+                    "restart_user_elevated": "rejected", "restart_system": [False, False, "service_brokered_system"],
+                    "known_game": "protected", "unknown_known_game": "protected",
+                    "requested_brokered_restart": [False, True, "service_brokered_system", True]}
+        for reason in ("foreign", "session", "image", "service_name", "service_stopped", "service_account",
+                       "parent_pid", "parent_image", "parent_session", "parent_owner", "parent_owner_unknown",
+                       "child_owner_unknown", "parent_newer", "service_unsigned", "streamer_unsigned",
+                       "both_wrong_publisher", "wrong_service_publisher", "inaccessible", "pid_reused", "exited", "changed_scm"):
+            expected[reason] = "rejected"
+        self.assertEqual(result, expected)
+
+
+    def test_native_lifetime_rejects_reused_or_exited_process_even_for_exit_code_259(self):
+        result = self.functions(r'''
+$start=New-Object Diagnostics.ProcessStartInfo
+$start.FileName=Join-Path $PSHOME 'powershell.exe'
+$start.Arguments='-NoProfile -NonInteractive -Command "[void][Console]::ReadLine(); exit 259"'
+$start.UseShellExecute=$false; $start.RedirectStandardInput=$true; $start.CreateNoWindow=$true
+$child=[Diagnostics.Process]::Start($start)
+$life=$null
+try {
+    $row=Get-CimInstance Win32_Process -Filter "ProcessId=$($child.Id)"
+    $life=Open-VDProcessLifetime $row
+    $life.RequireLive()
+    $stale=$false
+    try { $other=[VdxrLaunchToken]::Pin($child.Id, $life.Creation-100); $other.Dispose() }
+    catch { $stale=$true }
+    $child.StandardInput.Close()
+    if (!$child.WaitForExit(10000)) {throw 'The disposable child did not exit.'}
+    $exited=$false
+    try { $life.RequireLive() } catch { $exited=$true }
+    @{stale=$stale;exited=$exited;code=$child.ExitCode} | ConvertTo-Json -Compress
+} finally {
+    $child.StandardInput.Close()
+    if ($life) { $life.Dispose() }
+    $child.Dispose()
+}
+''', native=True)
+        self.assertEqual(result, {"stale": True, "exited": True, "code": 259})
 
     def test_configuration_normalizes_streamer_before_wmi_path_matching(self):
         result = self.functions(r'''

@@ -18,6 +18,14 @@ namespace virtualdesktop_openxr {
     using namespace log;
 
     namespace {
+        template <typename Settings>
+        bool sameFrameGenerationSettings(const Settings& a, const Settings& b) {
+            return a.enabled == b.enabled && a.style == b.style && a.intensity == b.intensity &&
+                   a.localToneStrength == b.localToneStrength && a.localStructureStrength == b.localStructureStrength &&
+                   a.skinStructureStrength == b.skinStructureStrength && a.foveationSize == b.foveationSize &&
+                   a.processingResolution == b.processingResolution;
+        }
+
         DXGI_FORMAT depthShaderFormat(DXGI_FORMAT format) {
             switch (format) {
             case DXGI_FORMAT_D16_UNORM:
@@ -38,12 +46,193 @@ namespace virtualdesktop_openxr {
         }
     } // namespace
 
-    bool OpenXrRuntime::prepareFrameGeneration(const XrFrameEndInfo& info) {
+    bool OpenXrRuntime::makeEarlyFrameGenerationViews(const Space& layerSpace,
+                                                      const Space& originSpace,
+                                                      const XrCompositionLayerProjectionView (&appViews)[2],
+                                                      const ovrLayerEyeFov& finalizedColour,
+                                                      std::array<VDXRFG_ViewV1, 2>& result) noexcept {
+        result = {};
+        const auto fixed = [](const Space& space) {
+            return space.action == XR_NULL_HANDLE &&
+                   (space.referenceType == XR_REFERENCE_SPACE_TYPE_LOCAL ||
+                    space.referenceType == XR_REFERENCE_SPACE_TYPE_STAGE ||
+                    space.referenceType == XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR_EXT) &&
+                   xr::math::Quaternion::IsNormalized(space.poseInSpace.orientation);
+        };
+        if (!fixed(layerSpace) || !fixed(originSpace))
+            return false;
+        // These reference-space conversions add only a live translation. The
+        // late Pose pass still obtains that translation, IPD and depth metadata.
+        // Standard/Depth Assist packing uses only this relative orientation.
+        const auto layerPose =
+            xr::math::Pose::Multiply(layerSpace.poseInSpace, xr::math::Pose::Invert(originSpace.poseInSpace));
+        for (unsigned eye = 0; eye < 2; ++eye) {
+            const auto& app = appViews[eye];
+            const auto& rect = finalizedColour.Viewport[eye];
+            if (!xr::math::Quaternion::IsNormalized(app.pose.orientation) || rect.Pos.x < 0 || rect.Pos.y < 0 ||
+                rect.Size.w <= 0 || rect.Size.h <= 0)
+                return false;
+            const auto pose = xr::math::Pose::Multiply(app.pose, layerPose);
+            auto& view = result[eye];
+            view.position[0] = pose.position.x;
+            view.position[1] = pose.position.y;
+            view.position[2] = pose.position.z;
+            view.orientation[0] = pose.orientation.x;
+            view.orientation[1] = pose.orientation.y;
+            view.orientation[2] = pose.orientation.z;
+            view.orientation[3] = pose.orientation.w;
+            // Preserve the late native-FOV round trip, including float storage.
+            ovrFovPort fov{};
+            fov.UpTan = tan(app.fov.angleUp);
+            fov.DownTan = -tan(app.fov.angleDown);
+            fov.LeftTan = -tan(app.fov.angleLeft);
+            fov.RightTan = tan(app.fov.angleRight);
+            view.fov[0] = -std::atan(fov.LeftTan);
+            view.fov[1] = std::atan(fov.RightTan);
+            view.fov[2] = std::atan(fov.UpTan);
+            view.fov[3] = -std::atan(fov.DownTan);
+            for (const auto component : view.position)
+                if (!std::isfinite(component))
+                    return false;
+            for (const auto component : view.fov)
+                if (!std::isfinite(component))
+                    return false;
+            if (view.fov[0] >= view.fov[1] || view.fov[3] >= view.fov[2])
+                return false;
+            view.rect = {static_cast<uint32_t>(rect.Pos.x),
+                         static_cast<uint32_t>(rect.Pos.y),
+                         static_cast<uint32_t>(rect.Size.w),
+                         static_cast<uint32_t>(rect.Size.h)};
+        }
+        return true;
+    }
+
+    HRESULT OpenXrRuntime::prepareEarlyFrameGeneration(const XrFrameEndInfo& info,
+                                                       FrameGenerationSourceLedger& ledger) {
+        ledger = {};
+        const auto& settings = m_precompositor.dlssnrSettings;
+        if (!m_frameGeneration || !m_frameGeneration->initialized() || m_frameGenerationBackend == 1 ||
+            m_frameGeneration->negotiatedDepthMode() == 2 || !m_fgPreviousCapturedTime || m_fgNeedReprime.load() ||
+            !settings.enabled || settings.foveationSize < .90f || m_frameGenerationUnavailable ||
+            !m_useAsyncSubmission || m_useApplicationDeviceForSubmission || !m_d3d11Context || isD3D12Session() ||
+            isVulkanSession() || isOpenGLSession() || !m_fgBegunReservation.valid ||
+            !m_fgBegunReservation.shouldRender || info.displayTime != m_fgBegunReservation.currentTarget ||
+            info.layerCount != 1 || !info.layers || !info.layers[0] ||
+            info.layers[0]->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION || m_layersForFrame.size() != 1 ||
+            !m_precompositor.finalColour[0] || !m_precompositor.finalColour[1] ||
+            m_fgPreviousHistoryEpoch != m_fgBegunReservation.historyEpoch ||
+            m_fgPreviousSpace != info.layers[0]->space ||
+            m_fgPreviousSharpen != std::clamp(m_precompositor.sharpenFactor, 0.f, 1.f) ||
+            !sameFrameGenerationSettings(settings, m_fgPreviousSettings) || m_fgColourEpoch == UINT64_MAX)
+            return S_FALSE;
+        const auto& projection = *reinterpret_cast<const XrCompositionLayerProjection*>(info.layers[0]);
+        if (projection.viewCount != 2 || !projection.views)
+            return S_FALSE;
+        FinalProjectionInput input;
+        {
+            std::shared_lock spacesLock(m_actionsAndSpacesMutex);
+            if (!m_originSpace || !m_spaces.count(projection.space))
+                return S_FALSE;
+            const XrCompositionLayerProjectionView appViews[]{projection.views[0], projection.views[1]};
+            if (!makeEarlyFrameGenerationViews(*reinterpret_cast<const Space*>(projection.space),
+                                               *m_originSpace,
+                                               appViews,
+                                               m_layersForFrame[0].EyeFov,
+                                               input.views))
+                return S_FALSE;
+        }
+        for (unsigned eye = 0; eye < 2; ++eye) {
+            const auto& source = *reinterpret_cast<const Swapchain*>(projection.views[eye].subImage.swapchain);
+            const auto& before = m_fgPreviousFov[eye];
+            const auto& fov = projection.views[eye].fov;
+            if (source.xrDesc.createFlags &
+                    (XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT | XR_SWAPCHAIN_CREATE_PROTECTED_CONTENT_BIT) ||
+                before.UpTan != static_cast<float>(tan(fov.angleUp)) ||
+                before.DownTan != static_cast<float>(-tan(fov.angleDown)) ||
+                before.LeftTan != static_cast<float>(-tan(fov.angleLeft)) ||
+                before.RightTan != static_cast<float>(tan(fov.angleRight)) ||
+                input.views[eye].rect.width != static_cast<uint32_t>(m_fgEyeResolution.w) ||
+                input.views[eye].rect.height != static_cast<uint32_t>(m_fgEyeResolution.h))
+                return S_FALSE;
+            ledger.releasedViews[eye] = projection.views[eye].subImage;
+            ledger.releasedIndices[eye] = source.lastReleasedIndex;
+            ledger.colours[eye] = m_precompositor.finalColour[eye];
+            ledger.colours[eye]->GetDesc(&ledger.descriptions[eye]);
+            ledger.rects[eye] = input.views[eye].rect;
+        }
+        const auto& left = *reinterpret_cast<const Swapchain*>(projection.views[0].subImage.swapchain);
+        const auto& right = *reinterpret_cast<const Swapchain*>(projection.views[1].subImage.swapchain);
+        if (isSRGBFormat(left.dxgiFormatForSubmission) != isSRGBFormat(right.dxgiFormatForSubmission) ||
+            m_fgFormat != (m_precompositor.isProj0SRGB ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM))
+            return S_FALSE;
+        // The swapchain mutex spans Colour, capacity and final Pose. Every
+        // finalized production gets a new epoch even if its COM object repeats.
+        ledger.epoch = ++m_fgColourEpoch;
+        ledger.serial = input.serial = m_frameBegun;
+        ledger.historyEpoch = m_fgBegunReservation.historyEpoch;
+        ledger.owner = m_frameGeneration.get();
+        ledger.space = projection.space;
+        ledger.settings = settings;
+        ledger.sharpen = m_precompositor.sharpenFactor;
+        ledger.srgb = m_precompositor.isProj0SRGB;
+        input.contentEpoch = ledger.epoch;
+        input.colour = ledger.colours;
+        input.time = info.displayTime;
+        input.period = m_fgBegunReservation.period;
+        input.nrEnabled = settings.enabled;
+        const auto hr =
+            m_frameGeneration->prepareFlow(input, m_liveStatus.available() ? &m_liveProducer.prepareResult : nullptr);
+        if (hr == S_OK)
+            ++m_liveProducer.prepares; // Validated, retained Prepare receipt.
+        return hr;
+    }
+
+    bool OpenXrRuntime::frameGenerationSourcesMatch(const XrFrameEndInfo& info,
+                                                    const FinalProjectionInput& input,
+                                                    const FrameGenerationSourceLedger& ledger) const {
+        if (!ledger.epoch || ledger.owner != m_frameGeneration.get() || ledger.serial != input.serial ||
+            ledger.historyEpoch != m_fgBegunReservation.historyEpoch || info.layerCount != 1 || !info.layers ||
+            !info.layers[0] || ledger.space != info.layers[0]->space || ledger.srgb != m_precompositor.isProj0SRGB ||
+            ledger.sharpen != m_precompositor.sharpenFactor ||
+            !sameFrameGenerationSettings(ledger.settings, m_precompositor.dlssnrSettings))
+            return false;
+        const auto& projection = *reinterpret_cast<const XrCompositionLayerProjection*>(info.layers[0]);
+        if (projection.viewCount != 2 || !projection.views)
+            return false;
+        for (unsigned eye = 0; eye < 2; ++eye) {
+            const auto& before = ledger.releasedViews[eye];
+            const auto& after = projection.views[eye].subImage;
+            const auto& a = ledger.rects[eye];
+            const auto& b = input.views[eye].rect;
+            if (before.swapchain != after.swapchain || before.imageArrayIndex != after.imageArrayIndex ||
+                before.imageRect.offset.x != after.imageRect.offset.x ||
+                before.imageRect.offset.y != after.imageRect.offset.y ||
+                before.imageRect.extent.width != after.imageRect.extent.width ||
+                before.imageRect.extent.height != after.imageRect.extent.height ||
+                ledger.releasedIndices[eye] != reinterpret_cast<const Swapchain*>(after.swapchain)->lastReleasedIndex ||
+                ledger.colours[eye] != input.colour[eye] || a.x != b.x || a.y != b.y || a.width != b.width ||
+                a.height != b.height)
+                return false;
+            D3D11_TEXTURE2D_DESC actual{};
+            input.colour[eye]->GetDesc(&actual);
+            const auto& desc = ledger.descriptions[eye];
+            if (desc.Width != actual.Width || desc.Height != actual.Height || desc.Format != actual.Format ||
+                desc.MipLevels != actual.MipLevels || desc.ArraySize != actual.ArraySize ||
+                desc.SampleDesc.Count != actual.SampleDesc.Count ||
+                desc.SampleDesc.Quality != actual.SampleDesc.Quality)
+                return false;
+        }
+        return true;
+    }
+
+    bool OpenXrRuntime::prepareFrameGeneration(const XrFrameEndInfo& info, const FrameGenerationSourceLedger* ledger) {
         CHECK_MSG(!m_fgDepthCompletionUnknown, "FG depth completion unknown; refusing new captures");
         CHECK_MSG(!m_fgTransactionForFrame.ticket.token, "Unpublished FG transaction; refusing new captures");
         m_fgDepthSnapshotForFrame = false;
         const auto& settings = m_precompositor.dlssnrSettings;
-        const auto bypass = [&](bool temporary = false) {
+        using Route = live_status::Route;
+        const auto bypass = [&](bool temporary = false, Route reason = Route::ineligible) {
+            m_liveProducer.route = m_frameGenerationUnavailable ? Route::unavailable : reason;
             // Live history pressure must not shorten the next recovery prime.
             m_fgDesiredMultiplier = temporary ? m_frameGenerationMode : 1;
             m_fgPreviousCapturedTime = 0;
@@ -90,7 +279,8 @@ namespace virtualdesktop_openxr {
         if (isSRGBFormat(leftSource.dxgiFormatForSubmission) != isSRGBFormat(rightSource.dxgiFormatForSubmission)) {
             return bypass();
         }
-        if (!expiredRecovery && m_fgNeedReprime.exchange(false)) {
+        const bool reprime = !expiredRecovery && m_fgNeedReprime.exchange(false);
+        if (reprime) {
             m_fgPreviousCapturedTime = 0;
         }
         const auto& projection = m_layersForFrame[0].EyeFov;
@@ -243,7 +433,7 @@ namespace virtualdesktop_openxr {
                 if (view.fov[0] >= view.fov[1] || view.fov[3] >= view.fov[2])
                     return bypass();
             }
-            return bypass(true);
+            return bypass(true, Route::reprime);
         }
         if (!m_fgDepthGuidanceRequested && m_frameGenerationDepthMode != 0 && m_frameGenerationBackend != 1 &&
             frameGenerationDepthSourceValid(m_ovrSubmissionDevice.Get(), input.depth[0]) &&
@@ -262,7 +452,7 @@ namespace virtualdesktop_openxr {
         if (m_frameGeneration) {
             const auto opacityResult = m_frameGeneration->updateOpaqueInput(opaqueInput);
             if (opacityResult == VDXRFG_E_BUSY)
-                return bypass(true);
+                return bypass(true, Route::busy);
             CHECK_HRCMD(opacityResult);
             if (opacityResult == S_OK)
                 m_fgPreviousCapturedTime = 0;
@@ -273,7 +463,7 @@ namespace virtualdesktop_openxr {
             // the legacy path, which makes the following producer await drain.
             std::unique_lock lock(m_asyncSubmissionMutex);
             if (m_fgActiveSubmission) {
-                return bypass(guideUpgrade);
+                return bypass(guideUpgrade, Route::busy);
             }
             lock.unlock();
             // Alignment has already queued reads for this frame. Keep its
@@ -288,7 +478,7 @@ namespace virtualdesktop_openxr {
             // An upgrade reparses a fresh input next frame. Ordinary resize
             // keeps the existing same-frame recreation path and owned sources.
             if (guideUpgrade)
-                return bypass(true);
+                return bypass(true, Route::reprime);
         }
         if (!m_frameGeneration) {
             // Each synthetic role has its own chain, shared across ticket banks:
@@ -404,14 +594,16 @@ namespace virtualdesktop_openxr {
              settings.processingResolution != previous.processingResolution)) {
             const auto result = m_frameGeneration->reset(1);
             if (result == VDXRFG_E_BUSY) {
-                return bypass(true);
+                return bypass(true, Route::busy);
             }
             CHECK_HRCMD(result);
             m_fgPreviousCapturedTime = 0;
         }
         input.slots = m_frameGenerationCadence.plan(
             m_fgBegunReservation, m_fgPreviousCapturedTime, m_fgPreviousCapturedTime != 0);
-        const bool collectDepthDiagnostics = IsTraceEnabled();
+        if (ledger && frameGenerationSourcesMatch(info, input, *ledger))
+            input.contentEpoch = ledger->epoch;
+        const bool collectDepthDiagnostics = IsTraceEnabled() || m_liveStatus.available();
         FrameGeneration::CaptureDiagnostics depthDiagnostics{};
         const auto result = m_frameGeneration->capture(
             input, m_fgTransactionForFrame, collectDepthDiagnostics ? &depthDiagnostics : nullptr);
@@ -429,6 +621,8 @@ namespace virtualdesktop_openxr {
             TLArg(depthDiagnostics.apiVersion, "SubmitEnvelopeVersion"),
             TLArg(depthDiagnostics.submitCalled, "ApiSubmitCalled"),
             TLArg(static_cast<int>(depthDiagnostics.submitResult), "ApiSubmitResult"),
+            TLArg(depthDiagnostics.preparedUsed, "PreparedFlowUsed"),
+            TLArg(static_cast<int>(depthDiagnostics.preparedResult), "PreparedFlowResult"),
             TLArg(depthDiagnostics.guideMask, "GuideMask"),
             TLArg(depthDiagnostics.guideSerial, "GuideSerial"),
             TLArg(depthDiagnostics.guideEpoch, "GuideEpoch"),
@@ -446,8 +640,13 @@ namespace virtualdesktop_openxr {
             TLArg((frameGenerationDepthSourceValid(m_ovrSubmissionDevice.Get(), input.depth[0]) ? 1u : 0u) |
                       (frameGenerationDepthSourceValid(m_ovrSubmissionDevice.Get(), input.depth[1]) ? 2u : 0u),
                   "DepthSourceValidMask"));
+        m_liveProducer.captureResult = static_cast<uint32_t>(result);
+        m_liveProducer.consumes += depthDiagnostics.preparedUsed;
+        // Only the actual accepted submit envelope can provide a guide.
+        if (depthDiagnostics.submitCalled && depthDiagnostics.submitResult == S_OK)
+            m_liveProducer.guides = depthDiagnostics.guideMask;
         if (result == VDXRFG_E_BUSY || result == VDXRFG_E_REJECTED) {
-            return bypass(result == VDXRFG_E_BUSY);
+            return bypass(result == VDXRFG_E_BUSY, result == VDXRFG_E_BUSY ? Route::busy : Route::ineligible);
         }
         CHECK_HRCMD(result);
         if (hasDepth) {
@@ -490,6 +689,9 @@ namespace virtualdesktop_openxr {
         }
         m_fgPreviousSettings = settings;
         m_fgDesiredMultiplier = m_frameGenerationMode;
+        m_liveProducer.route = reprime                                ? Route::reprime
+                               : m_fgTransactionForFrame.ticket.prime ? Route::priming
+                                                                      : Route::ordinary;
         return true;
     }
 
@@ -886,6 +1088,7 @@ namespace virtualdesktop_openxr {
                     started = true;
                 }
                 PredictionReservation reservation;
+                uint64_t sourceSerial{};
                 {
                     std::unique_lock lock(m_asyncSubmissionMutex);
                     if (m_layersForAsyncSubmission.empty()) {
@@ -898,6 +1101,8 @@ namespace virtualdesktop_openxr {
                         break;
                     }
                     ownedLayers.swap(m_layersForAsyncSubmission);
+                    if (ownedLayers.front().Header.Type != ovrLayerType_Disabled)
+                        sourceSerial = m_asyncNextFrameId; // Published with these layers under the mailbox lock.
                     ownedDelivery = std::move(m_deliveryForSubmission);
                     m_deliveryForSubmission = {};
                     transaction = std::move(m_fgTransactionForSubmission);
@@ -1607,7 +1812,14 @@ namespace virtualdesktop_openxr {
                     const auto selectedContentSlot =
                         selectedRole == FrameGenerationRole::real ? cycles - 1 : contentSlot;
                     const auto endEnter = timingNow(timing.enabled);
-                    const auto result = endSubmissionFrame(m_ovrSession, nativeId, &scale, pointers.data(), layerCount);
+                    const auto result =
+                        endSubmissionFrame(m_ovrSession,
+                                           nativeId,
+                                           &scale,
+                                           pointers.data(),
+                                           layerCount,
+                                           hasGpuOutput ? transaction.ticket.current_serial : sourceSerial,
+                                           selectedRole);
                     const auto endReturn = timingNow(timing.enabled);
                     TraceLoggingWrite(log::g_traceProvider,
                                       "FG_Present",

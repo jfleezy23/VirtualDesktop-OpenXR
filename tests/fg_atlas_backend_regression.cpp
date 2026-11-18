@@ -256,6 +256,10 @@ namespace {
         const std::optional<xrfg::OverlayPlacement> marker =
             markerEnabled ? std::optional<xrfg::OverlayPlacement>(xrfg::OverlayPlacement{.07f, .03f, -2.0f, .23f, .17f})
                           : std::nullopt;
+        // The first NVIDIA cycle exercises admission before and after the actual
+        // deferred copy is submitted, with the exact same source, views and producer.
+        bool verifyDeferredAdmission =
+            atlas && deferred && !hostOwned && backend == xrfg::D3D12OpticalFlowBackend::nvidia;
         const auto cycle = [&] {
             if (hostOwned || deferred)
                 gpu.transfer(current[1].Get(), &arraySeed, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -292,6 +296,18 @@ namespace {
                 ComPtr<ID3D12Fence> fence;
                 success(synthesizer.completion_fence(&fence), "deferred completion fence");
                 gpu.wait(fence.Get(), pair.synthetic_fence_value);
+                ComPtr<ID3D12Resource> future;
+                ID3D12Fence* read = nullptr;
+                uint64_t readValue = 0;
+                if (verifyDeferredAdmission) {
+                    future = gpu.texture(monoWidth * 2, monoHeight);
+                    gpu.transfer(future.Get(), &atlasSeed);
+                    check(synthesizer.prepare_flow(
+                              future.Get(), fence.Get(), pair.synthetic_fence_value, views, &read, &readValue) ==
+                                  S_FALSE &&
+                              !read && !readValue,
+                          "unsubmitted real copy prevents early analysis");
+                }
                 if (!hostOwned) {
                     check(pair.synthetic_fence_value < pair.fence_value &&
                               fence->GetCompletedValue() < pair.fence_value,
@@ -304,6 +320,17 @@ namespace {
                 }
                 success(synthesizer.wait_for_previous_submission(10000),
                         "bounded nonzero wait flushes deferred real copy and waits for full completion");
+                if (verifyDeferredAdmission) {
+                    check(synthesizer.prepare_flow(
+                              future.Get(), fence.Get(), pair.synthetic_fence_value, views, &read, &readValue) ==
+                                  S_OK &&
+                              read && readValue,
+                          "same analysis admits after the deferred copy is published");
+                    gpu.wait(read, readValue);
+                    synthesizer.cancel_prepared_flow();
+                    verifyDeferredAdmission = false;
+                    std::puts("PASS unissued deferred copy declined, published copy admitted");
+                }
             }
             completed(pair);
             if (hostOwned || deferred)

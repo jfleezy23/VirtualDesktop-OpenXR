@@ -111,6 +111,12 @@ Controls component can coordinate the launch routes and runtime selection. Close
 follow the resulting restart/reconnect status. Keep the whole Controls package, including its helper
 and source folders. Runtime selection alone does not establish that this optional setup exists.
 
+Use Controls from the same Windows account that prepared the launch libraries, accepting its
+administrator prompt in that account. Streamer can run either under your account or through
+Virtual Desktop's verified SYSTEM service in your desktop session. Process checks support both
+arrangements. A restart starts from your normal desktop session; Virtual Desktop may then broker
+the resulting process through its service. A different account or an unverified process is rejected.
+
 The packaged metadata has schema `1`, `self_redirect_guard: true`, the exact host
 `host_sha256`, `fg_sha256`, and `source_revision`. It binds the guarded DLL to the supplied
 metadata; it is not a digital signature. Do not manufacture this marker for an

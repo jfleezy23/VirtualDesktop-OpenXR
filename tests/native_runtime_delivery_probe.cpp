@@ -6,11 +6,42 @@
 #include <set>
 
 namespace {
+    constexpr bool followsNativeId(unsigned multiplier, long long previous, long long current) {
+        return previous >= 0 && current > previous && (multiplier == 4 || current - previous == 1);
+    }
+    static_assert(followsNativeId(4, 7, 11) && !followsNativeId(4, 7, 7) && !followsNativeId(4, 7, 6));
+    static_assert(!followsNativeId(2, 7, 11) && !followsNativeId(3, 7, 11) && followsNativeId(3, 7, 8));
+
+    constexpr bool isReservedSyntheticSlot(uint64_t id, const virtualdesktop_openxr::PredictionReservation& r) {
+        return r.valid && r.multiplier == 4 && id >= r.nativeId && id - r.nativeId < r.multiplier - 1;
+    }
+
     struct NativeEndObserver {
         inline static decltype(&ovr_EndFrame) original{};
         inline static decltype(&ovr_WaitToBeginFrame) originalWait{};
         inline static decltype(&ovr_BeginFrame) originalBegin{};
         inline static decltype(&ovr_CommitTextureSwapChain) originalCommit{};
+        inline static decltype(&ovr_SetFloat) originalSetFloat{};
+        inline static thread_local uint64_t sourceSerialForHint{};
+        struct Hint {
+            uint64_t serial;
+            float value;
+            ovrBool result;
+            LONGLONG enter, returned;
+        };
+        inline static std::vector<Hint> hints;
+        static ovrBool OVR_CDECL setFloat(ovrSession session, const char* name, float value) {
+            if (!name || std::strcmp(name, "AppGpuTime") != 0)
+                return originalSetFloat(session, name, value);
+            LARGE_INTEGER enter{}, returned{};
+            QueryPerformanceCounter(&enter);
+            const auto result = originalSetFloat(session, name, value);
+            QueryPerformanceCounter(&returned);
+            std::lock_guard lock(mutex);
+            hints.push_back({sourceSerialForHint, value, result, enter.QuadPart, returned.QuadPart});
+            return result;
+        }
+        static_assert(std::is_same_v<decltype(&setFloat), decltype(&ovr_SetFloat)>);
         struct Call {
             char phase;
             long long id;
@@ -81,6 +112,15 @@ namespace {
             int result;
         };
         inline static std::vector<Entry> ends;
+        struct AppEnd {
+            uint64_t serial;
+            virtualdesktop_openxr::PredictionReservation reservation;
+            XrTime displayTime;
+            double sample, enter, returned;
+            XrResult result;
+            bool qualifying;
+        };
+        inline static std::vector<AppEnd> appEnds;
         inline static std::atomic<unsigned> failures{};
         static ovrResult OVR_CDECL end(ovrSession session,
                                        long long id,
@@ -145,6 +185,77 @@ namespace {
             }
             return result;
         }
+        // The worker starts at native ID zero and consumes the begun reservation's cycle count for each source.
+        // Even a skipped prefix ends with that source's B. Passthrough startup layers use the original chain (role 4).
+        static std::optional<unsigned> verifyFourCycleSources(const std::vector<AppEnd>& apps,
+                                                              const std::vector<Entry>& native,
+                                                              const std::set<long long>& observedIds) {
+            size_t next{};
+            long long nativeId{};
+            uint64_t lastSerial{};
+            unsigned skipped{};
+            for (const auto& app : apps) {
+                const auto& reservation = app.reservation;
+                if (app.result != XR_SUCCESS || app.serial <= lastSerial ||
+                    reservation.returnedDisplayTime != app.displayTime)
+                    return {};
+                lastSerial = app.serial;
+                const auto firstId = nativeId;
+                const auto cycles = std::clamp(reservation.multiplier, 1u, 4u);
+                bool bankOutput{};
+                bool omitted{};
+                for (unsigned slot = 0; slot < cycles; ++slot, ++nativeId) {
+                    if (next == native.size() || native[next].id != nativeId) {
+                        if (slot + 1 == cycles || !reservation.shouldRender ||
+                            reservation.nativeId != static_cast<uint64_t>(firstId) ||
+                            !isReservedSyntheticSlot(nativeId, reservation) || observedIds.count(nativeId))
+                            return {};
+                        ++skipped;
+                        omitted = true;
+                        continue;
+                    }
+                    const auto& end = native[next++];
+                    if (end.result < 0 || end.sample != app.sample || end.role > 4)
+                        return {};
+                    bankOutput |= end.role != 4;
+                    if (slot + 1 == cycles && end.role != ((bankOutput || omitted) ? 2u : 4u))
+                        return {};
+                }
+            }
+            return next == native.size() ? std::optional<unsigned>(skipped) : std::nullopt;
+        }
+        static void writeEvidence(const std::filesystem::path& path) {
+            std::ofstream lifecycle(path / "native-lifecycle.csv"), native(path / "native-ends.csv"),
+                app(path / "native-app-ends.csv"), hint(path / "native-app-gpu-time.csv");
+            lifecycle << "phase,id,chain,result,enter_seconds,return_seconds\n" << std::setprecision(17);
+            for (const auto& call : calls)
+                lifecycle << call.phase << ',' << call.id << ',' << call.chain << ',' << call.result << ','
+                          << call.enter << ',' << call.returned << '\n';
+            native << "id,return_seconds,sensor_seconds,role,result\n" << std::setprecision(17);
+            for (const auto& entry : ends)
+                native << entry.id << ',' << entry.returned << ',' << entry.sample << ',' << entry.role << ','
+                       << entry.result << '\n';
+            app << "source_serial,display_time,sensor_target_seconds,reservation_native_id,reservation_multiplier,"
+                   "reservation_valid,qualifying,result,enter_seconds,return_seconds\n"
+                << std::setprecision(17);
+            for (const auto& entry : appEnds)
+                app << entry.serial << ',' << entry.displayTime << ',' << entry.sample << ','
+                    << entry.reservation.nativeId << ',' << entry.reservation.multiplier << ','
+                    << entry.reservation.valid << ',' << entry.qualifying << ',' << entry.result << ',' << entry.enter
+                    << ',' << entry.returned << '\n';
+            LARGE_INTEGER frequency{};
+            require(QueryPerformanceFrequency(&frequency), "QPC frequency for native AppGpuTime calls");
+            hint << "source_serial,value_seconds,ovr_bool,enter_qpc,return_qpc,frequency_hz\n" << std::setprecision(9);
+            for (const auto& entry : hints)
+                hint << entry.serial << ',' << entry.value << ',' << static_cast<int>(entry.result) << ','
+                     << entry.enter << ',' << entry.returned << ',' << frequency.QuadPart << '\n';
+            hint.close();
+            lifecycle.close();
+            native.close();
+            app.close();
+            require(lifecycle.good() && native.good() && app.good() && hint.good(),
+                    "write all raw native and app observations");
+        }
         explicit NativeEndObserver(bool depth) {
             wantsDepth = depth;
 #ifdef VDXR_NATIVE_CONTROLLED_SDK
@@ -162,6 +273,10 @@ namespace {
             originalBegin = reinterpret_cast<decltype(originalBegin)>(GetProcAddress(module, "ovr_BeginFrame"));
             originalCommit =
                 reinterpret_cast<decltype(originalCommit)>(GetProcAddress(module, "ovr_CommitTextureSwapChain"));
+#ifndef VDXR_NATIVE_CONTROLLED_SDK
+            originalSetFloat = reinterpret_cast<decltype(originalSetFloat)>(GetProcAddress(module, "ovr_SetFloat"));
+            require(originalSetFloat, "real native SetFloat export");
+#endif
             require(original && originalWait && originalBegin && originalCommit, "real native lifecycle exports");
             require(DetourTransactionBegin() == NO_ERROR, "begin native lifecycle observation");
             auto abort = MakeScopeGuard([&] { DetourTransactionAbort(); });
@@ -171,6 +286,9 @@ namespace {
                         DetourAttach(reinterpret_cast<PVOID*>(&originalBegin), begin) == NO_ERROR &&
                         DetourAttach(reinterpret_cast<PVOID*>(&originalCommit), commit) == NO_ERROR,
                     "attach forwarding-only lifecycle observers");
+            if (originalSetFloat)
+                require(DetourAttach(reinterpret_cast<PVOID*>(&originalSetFloat), setFloat) == NO_ERROR,
+                        "attach forwarding-only SDK hint observer");
             require(DetourTransactionCommit() == NO_ERROR, "commit native lifecycle observation");
             abort.Deactivate();
             attached = true;
@@ -183,7 +301,9 @@ namespace {
                 DetourDetach(reinterpret_cast<PVOID*>(&original), end) ||
                 DetourDetach(reinterpret_cast<PVOID*>(&originalWait), wait) ||
                 DetourDetach(reinterpret_cast<PVOID*>(&originalBegin), begin) ||
-                DetourDetach(reinterpret_cast<PVOID*>(&originalCommit), commit) || DetourTransactionCommit())
+                DetourDetach(reinterpret_cast<PVOID*>(&originalCommit), commit) ||
+                (originalSetFloat && DetourDetach(reinterpret_cast<PVOID*>(&originalSetFloat), setFloat)) ||
+                DetourTransactionCommit())
                 std::_Exit(3);
             attached = false;
         }
@@ -296,6 +416,13 @@ int main(int argc, char** argv) {
         begin.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         XR_CHECK(xrBeginSession(session, &begin));
         NativeEndObserver observer(depth);
+        auto saveOnFailure = MakeScopeGuard([&] {
+            try {
+                observer.writeEvidence(argv[2]);
+            } catch (const std::exception& error) {
+                std::cerr << "FAIL: saving native evidence: " << error.what() << '\n';
+            }
+        });
 #ifdef VDXR_PREBEGIN_OVERLAP_REGRESSION
         require(!depth, "pre-Begin overlap fixture uses the real V4 colour FG path");
         Regression::PrebeginFixture prebeginFixture(argv[1], nr);
@@ -539,7 +666,22 @@ int main(int argc, char** argv) {
 #ifdef VDXR_PREBEGIN_OVERLAP_REGRESSION
                 Regression::prebeginBeforeEnd(frame);
 #endif
-                XR_CHECK(xrEndFrame(session, &finish));
+                const auto [sourceSerial, reservation] = Regression::nativeSourceReservation();
+                const auto sample = Regression::nativeSampleTime(finish.displayTime);
+                NativeEndObserver::sourceSerialForHint = sourceSerial;
+                const auto enter = ovr_GetTimeInSeconds();
+                const auto appResult = xrEndFrame(session, &finish);
+                const auto returned = ovr_GetTimeInSeconds();
+                NativeEndObserver::sourceSerialForHint = 0;
+                observer.appEnds.push_back({sourceSerial,
+                                            reservation,
+                                            finish.displayTime,
+                                            sample,
+                                            enter,
+                                            returned,
+                                            appResult,
+                                            qualifyingFrame});
+                checkXr(appResult, "xrEndFrame(session, &finish)");
 #ifdef VDXR_PREBEGIN_OVERLAP_REGRESSION
                 Regression::prebeginAfterEnd(frame);
 #endif
@@ -606,6 +748,11 @@ int main(int argc, char** argv) {
             require(overlapArmed > 0, "native trial must arm the overlapping producer gate at least once");
             require(overlapVerified, "native trial must exercise a real overlapping blocked producer");
 #endif
+            std::cout << "NATIVE_NR post_warmup=1 successful_left=" << Regression::successfulNrEvaluations[0]
+                      << " successful_right=" << Regression::successfulNrEvaluations[1]
+                      << " failed_left=" << Regression::failedNrEvaluations[0]
+                      << " failed_right=" << Regression::failedNrEvaluations[1]
+                      << " invalid=" << Regression::invalidNrParameters << '\n';
             Regression::verifyNativeDelivery(nr);
             if (nr)
                 require(Regression::successfulNrEvaluations[0] >= 30 && Regression::successfulNrEvaluations[1] >= 30 &&
@@ -624,15 +771,16 @@ int main(int argc, char** argv) {
 #endif
         XR_CHECK(xrDestroyInstance(instance));
         instance = XR_NULL_HANDLE;
+        observer.writeEvidence(argv[2]);
+        saveOnFailure.Deactivate();
         require(!observer.failures && observer.ends.size() >= 40,
                 "native End results, selected-chain commits and layer metadata pass");
-        std::ofstream lifecycle(std::filesystem::path(argv[2]) / "native-lifecycle.csv");
-        lifecycle << "phase,id,chain,result,enter_seconds,return_seconds\n";
         std::map<long long, unsigned> stages;
+        std::set<long long> observedNativeIds;
         unsigned commits{};
         for (const auto& call : observer.calls) {
-            lifecycle << call.phase << ',' << call.id << ',' << call.chain << ',' << call.result << ','
-                      << std::setprecision(17) << call.enter << ',' << call.returned << '\n';
+            if (call.phase != 'C')
+                observedNativeIds.insert(call.id);
             if (call.phase == 'W') {
                 if (call.result == ovrError_NotInitialized)
                     continue;
@@ -651,9 +799,15 @@ int main(int argc, char** argv) {
                 ++commits;
             }
         }
-        require(lifecycle.good() && commits >= 40, "real native lifecycle and Commit evidence is complete");
-        std::ofstream csv(std::filesystem::path(argv[2]) / "native-ends.csv");
-        csv << "id,return_seconds,sensor_seconds,role,result\n";
+        require(commits >= 40 && stages.size() == observer.ends.size() &&
+                    std::all_of(stages.begin(), stages.end(), [](const auto& item) { return item.second == 3; }),
+                "each accepted native Wait and Begin has exactly one End");
+        unsigned skippedSyntheticSlots{};
+        if (requestedFrameGeneration == 4) {
+            const auto skipped = observer.verifyFourCycleSources(observer.appEnds, observer.ends, observedNativeIds);
+            require(skipped.has_value(), "each accepted source has its own native slots, target and final real End");
+            skippedSyntheticSlots = *skipped;
+        }
         std::array<unsigned, 5> roles{};
         unsigned complete{};
         std::set<double> distinctGroups;
@@ -663,26 +817,28 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < observer.ends.size(); ++i) {
             const auto& entry = observer.ends[i];
             ++roles.at(entry.role);
-            csv << entry.id << ',' << std::setprecision(17) << entry.returned << ',' << entry.sample << ','
-                << entry.role << ',' << entry.result << '\n';
-            if (i)
-                require(entry.id == observer.ends[i - 1].id + 1, "native frame IDs are consecutive");
+            require(entry.id >= 0 && stages.at(entry.id) == 3, "native End has a matching completed lifecycle");
+            if (i) {
+                const auto previous = observer.ends[i - 1].id;
+                require(followsNativeId(requestedFrameGeneration, previous, entry.id), "native frame ID order");
+            }
             if (i + 1 >= expected.size()) {
                 const auto start = i + 1 - expected.size();
                 bool matches = true;
                 for (size_t j = 0; j < expected.size(); ++j)
-                    matches &=
-                        observer.ends[start + j].role == expected[j] && observer.ends[start + j].sample == entry.sample;
+                    matches &= observer.ends[start + j].role == expected[j] &&
+                               observer.ends[start + j].sample == entry.sample &&
+                               observer.ends[start + j].id - observer.ends[start].id == static_cast<long long>(j);
                 matches &= entry.sample > 0 && std::isfinite(entry.sample);
                 complete += matches;
                 if (matches)
                     distinctGroups.insert(entry.sample);
             }
         }
-        require(csv.good() && complete >= 4 && distinctGroups.size() >= 4,
+        require(complete >= 4 && distinctGroups.size() >= 4,
                 "real native End receives complete consecutive requested S/B groups");
         std::cout << "NATIVE_ROLES S1=" << roles[0] << " S2=" << roles[1] << " S3=" << roles[3] << " B=" << roles[2]
-                  << " complete=" << complete << '\n';
+                  << " complete=" << complete << " skipped_synthetic_slots=" << skippedSyntheticSlots << '\n';
 #ifdef VDXR_NATIVE_CONTROLLED_SDK
         std::cout << "PASS: controlled SDK full frame lifecycle, presentation, ownership and teardown; Ends="
 #else

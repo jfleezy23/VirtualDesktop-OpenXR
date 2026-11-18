@@ -268,6 +268,7 @@ namespace virtualdesktop_openxr {
             m_needStartAsyncSubmissionThread = true;
         }
 
+        m_liveStatus.stop(); // All presentation owners have joined.
         if (m_deliveryTransport)
             m_deliveryTransport->drain();
         // The worker is joined before releasing either retained frame payload.
@@ -458,6 +459,23 @@ namespace virtualdesktop_openxr {
         m_sessionBegun = true;
         updateSessionState();
 
+        // xrBeginSession owns the startup request snapshot. The first Wait
+        // starts the worker later; no frame call creates or opens a mapping.
+        m_liveProducer = {};
+        m_livePresenter = {};
+        const uint64_t api = m_isHeadless        ? 0u
+                             : isVulkanSession() ? 13u
+                             : isOpenGLSession() ? 14u
+                             : isD3D12Session()  ? 12u
+                                                 : 11u;
+        m_liveConfiguration = {static_cast<uint64_t>(requestedFrameGeneration),
+                               m_frameGenerationBackend,
+                               m_frameGenerationDepthMode,
+                               api,
+                               m_displayRefreshRate > 0 ? static_cast<uint64_t>(m_displayRefreshRate * 1000.f + .5f)
+                                                        : 0};
+        m_liveStatus.start(m_liveConfiguration);
+
         return XR_SUCCESS;
     }
 
@@ -481,6 +499,9 @@ namespace virtualdesktop_openxr {
 
         m_sessionExiting = true;
         updateSessionState();
+        // An End may still be returning on the presentation worker. Readers
+        // reject this session immediately; cleanup unmaps only after join.
+        m_liveStatus.markEnded();
 
         return XR_SUCCESS;
     }

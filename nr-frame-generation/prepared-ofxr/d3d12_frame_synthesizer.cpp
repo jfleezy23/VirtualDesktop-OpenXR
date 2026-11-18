@@ -254,6 +254,7 @@ namespace xrfg {
             std::array<float, 4> target_tangents{};
             std::array<float, 4> source_rect{};
             std::array<float, 4> target_rect{};
+            bool operator==(const CameraMapping&) const = default;
         };
 
         struct SynthesisParameters {
@@ -667,6 +668,18 @@ namespace xrfg {
             bool timing_cached{};
         };
 
+        struct PreparedFlow {
+            WorkSlot recording; // A separate heap and pack list; NVIDIA resources belong to work_slots[slot].
+            ComPtr<ID3D12Resource> snapshot, source_a, atlas;
+            ComPtr<ID3D12Fence> producer, read_fence;
+            uint64_t read_value{}, engine_value{}, attempted_eye{}, history_serial{};
+            uint32_t slot{UINT32_MAX};
+            std::array<CameraMapping, 2> mappings{};
+            bool cancelled{}, unknown{};
+        };
+        std::unique_ptr<PreparedFlow> prepared;
+        bool use_prepared_flow{};
+
         struct RollingSource {
             D3D12HistoryCaptureTicket ticket{};
             D3D12HistoryConsumerLease lease{};
@@ -848,6 +861,9 @@ namespace xrfg {
             if (nvidia_fence != nullptr && last_nvidia_fence_value != 0) {
                 static_cast<void>(wait_for_fence(nvidia_fence.Get(), last_nvidia_fence_value));
             }
+            // The private pack list also references registered NVIDIA inputs.
+            // Release these views while the original slots and engine are alive.
+            prepared.reset();
             if (nvidia_api.nvOFUnregisterResourceD3D12 != nullptr) {
                 for (WorkSlot& slot : work_slots) {
                     for (NvidiaEyeResources& eye : slot.nvidia_eyes) {
@@ -2362,12 +2378,215 @@ namespace xrfg {
             return status;
         }
 
+        HRESULT prepared_status() const noexcept {
+            if (!prepared || prepared->slot == UINT32_MAX)
+                return S_OK;
+            if (prepared->unknown && !prepared->attempted_eye)
+                return E_FAIL;
+            const HRESULT read = fence_status(prepared->read_fence.Get(), prepared->read_value);
+            // A driver failure may occur after enqueue. Only its actual unique
+            // output signal can prove that uncertain eye finished. Never wait
+            // on it, reuse its value, or submit further work on this context.
+            const auto engine = prepared->unknown ? prepared->attempted_eye : prepared->engine_value;
+            return read == S_OK ? fence_status(nvidia_fence.Get(), engine) : read;
+        }
+
+        void cancel_prepared_flow() noexcept {
+            use_prepared_flow = false;
+            if (!prepared)
+                return;
+            prepared->cancelled = true;
+            if (prepared_status() == S_OK) {
+                prepared->slot = UINT32_MAX;
+                prepared->source_a.Reset();
+                prepared->atlas.Reset();
+                prepared->producer.Reset();
+            }
+        }
+
+        HRESULT initialize_preparation() {
+            if (prepared)
+                return S_OK;
+            auto stage = std::make_unique<PreparedFlow>();
+            auto& slot = stage->recording;
+            const auto node = queue->GetDesc().NodeMask;
+            const auto heap = default_heap_properties(node);
+            auto desc = previous.resource->GetDesc();
+            desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+            HRESULT hr = device->CreateCommittedResource(&heap,
+                                                         D3D12_HEAP_FLAG_NONE,
+                                                         &desc,
+                                                         D3D12_RESOURCE_STATE_COMMON,
+                                                         nullptr,
+                                                         IID_PPV_ARGS(&stage->snapshot));
+            if (SUCCEEDED(hr))
+                hr = device->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&stage->read_fence));
+            if (SUCCEEDED(hr))
+                hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.allocator));
+            if (SUCCEEDED(hr))
+                hr = device->CreateCommandList(node,
+                                               D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                               slot.allocator.Get(),
+                                               nullptr,
+                                               IID_PPV_ARGS(&slot.command_list));
+            if (SUCCEEDED(hr))
+                hr = slot.command_list->Close();
+            const auto descriptors = work_slots[0].descriptor_heap->GetDesc();
+            if (SUCCEEDED(hr))
+                hr = device->CreateDescriptorHeap(&descriptors, IID_PPV_ARGS(&slot.descriptor_heap));
+            if (SUCCEEDED(hr))
+                prepared = std::move(stage);
+            return hr;
+        }
+
+        HRESULT prepare_flow(ID3D12Resource* atlas,
+                             ID3D12Fence* producer,
+                             uint64_t producer_value,
+                             std::span<const D3D12ReprojectionView> views,
+                             ID3D12Fence** input_read,
+                             uint64_t* input_read_value) {
+            if (!synthesis_enabled || backend != D3D12OpticalFlowBackend::nvidia || require_depth_reconstruction ||
+                !previous.active() || image_description.DepthOrArraySize != 2 || views.size() != 2 ||
+                previous.view_count != 2 || previous.motion_vectors)
+                return S_FALSE;
+            const HRESULT prior = fence_status(fence.Get(), last_submitted_fence_value);
+            if (FAILED(prior))
+                return prior;
+            // History and packing use this same direct queue. A published pair may still be
+            // executing, but an unissued deferred copy cannot order its final state for us.
+            if (!last_submitted_fence_value || pending_copy_slot != kNoPendingCopy || completion_unknown ||
+                untracked_source.active())
+                return S_FALSE;
+            if (prepared && prepared->cancelled)
+                cancel_prepared_flow();
+            if (prepared && prepared->slot != UINT32_MAX)
+                return S_FALSE;
+            if (next_nvidia_fence_value == 0 || next_nvidia_fence_value >= UINT64_MAX - 1 ||
+                (prepared && prepared->read_value >= UINT64_MAX - 1))
+                return E_INVALIDARG;
+            UINT available = 0, index = 0;
+            for (UINT i = 0; i < work_slots.size(); ++i) {
+                const UINT slot = (next_work_slot + i) % static_cast<UINT>(work_slots.size());
+                const HRESULT status = fence_status(fence.Get(), work_slots[slot].fence_value);
+                if (FAILED(status))
+                    return status;
+                if (status == S_OK && ++available == 1)
+                    index = slot;
+            }
+            // Leave at least one independent normal slot for a late mismatch.
+            if (available < 2)
+                return S_FALSE;
+            HRESULT hr = initialize_preparation();
+            if (FAILED(hr))
+                return device->GetDeviceRemovedReason() == S_OK ? S_FALSE : hr;
+            auto& stage = *prepared;
+            auto& slot = stage.recording;
+            auto& engine_slot = work_slots[index];
+            auto* list = slot.command_list.Get();
+            hr = slot.allocator->Reset();
+            if (SUCCEEDED(hr))
+                hr = list->Reset(slot.allocator.Get(), nullptr);
+            if (FAILED(hr))
+                return hr;
+            const UINT w = static_cast<UINT>(image_description.Width), h = image_description.Height;
+            auto* isolated = stage.snapshot.Get();
+            std::array<D3D12_RESOURCE_BARRIER, 2> barriers{
+                transition_barrier(atlas, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                transition_barrier(isolated, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST)};
+            list->ResourceBarrier(2, barriers.data());
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+            uav.Format = nvidia_input_format;
+            uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+            for (UINT eye = 0; eye < 2; ++eye) {
+                D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+                src.pResource = atlas;
+                dst.pResource = isolated;
+                src.Type = dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                dst.SubresourceIndex = eye;
+                const D3D12_BOX rect{eye * w, 0, 0, (eye + 1) * w, h, 1};
+                list->CopyTextureRegion(&dst, 0, 0, 0, &src, &rect);
+                const auto base = slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+                const UINT uav_base = eye * kDescriptorBlockSize + kSrvDescriptorCount;
+                const auto& resources = engine_slot.nvidia_eyes[eye];
+                ID3D12Resource* const outputs[]{nullptr, resources.previous_input.Get(), resources.current_input.Get()};
+                for (UINT i = 0; i < 3; ++i)
+                    device->CreateUnorderedAccessView(
+                        outputs[i], nullptr, &uav, offset_cpu_handle(base, uav_base + i, descriptor_increment));
+                stage.mappings[eye] = make_camera_mapping(previous.views[eye], views[eye], w, h);
+            }
+            for (auto& b : barriers)
+                std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+            list->ResourceBarrier(2, barriers.data());
+            RollingSource candidate{};
+            candidate.resource = isolated;
+            create_source_views(slot, previous.resource.Get(), isolated, false);
+            record_nvidia_pack(
+                slot, engine_slot.nvidia_eyes, previous, candidate, views, nvidia_parameters(previous, views), false);
+            hr = list->Close();
+            if (FAILED(hr))
+                return hr;
+            // Preserve the previous completed ordinary sample before this slot
+            // is reserved. Speculative and discarded work publishes no timings.
+            if (FAILED(harvest_nvidia_gpu_timing(engine_slot)))
+                engine_slot.timing_pending = false;
+
+            stage.cancelled = false;
+            stage.unknown = true;
+            stage.attempted_eye = 0;
+            stage.slot = index;
+            stage.history_serial = previous.ticket.serial;
+            stage.source_a = previous.resource;
+            stage.atlas = atlas;
+            stage.producer = producer;
+            // These are distinct from normal output admission and history values.
+            hr = queue->Wait(producer, producer_value);
+            if (SUCCEEDED(hr))
+                hr = queue->Wait(nvidia_fence.Get(), last_nvidia_fence_value);
+            if (FAILED(hr))
+                return hr;
+            ID3D12CommandList* lists[]{list};
+            queue->ExecuteCommandLists(1, lists);
+            hr = queue->Signal(stage.read_fence.Get(), ++stage.read_value);
+            if (FAILED(hr))
+                return hr;
+            *input_read = stage.read_fence.Get();
+            *input_read_value = stage.read_value;
+            hr = execute_nvidia_eyes(
+                engine_slot, stage.read_fence.Get(), stage.read_value, false, &candidate, &stage.attempted_eye);
+            stage.engine_value = last_nvidia_fence_value; // excludes a failed eye's proposed value
+            if (FAILED(hr))
+                return hr;
+            stage.unknown = false;
+            return S_OK;
+        }
+
+        bool select_prepared_flow(std::span<const D3D12ReprojectionView> views) noexcept {
+            if (!prepared || prepared->slot == UINT32_MAX || prepared->cancelled || prepared->unknown ||
+                prepared->source_a.Get() != previous.resource.Get() ||
+                prepared->history_serial != previous.ticket.serial || views.size() != 2)
+                return false;
+            for (UINT eye = 0; eye < 2; ++eye) {
+                if (resolved_array_slice(views[eye], eye, views.size(), 2) != eye ||
+                    prepared->mappings[eye] != make_camera_mapping(previous.views[eye],
+                                                                   views[eye],
+                                                                   static_cast<UINT>(image_description.Width),
+                                                                   image_description.Height))
+                    return false;
+            }
+            use_prepared_flow = true;
+            return true;
+        }
+
         [[nodiscard]] HRESULT acquire_work_slot(std::uint32_t* output_index) noexcept {
             if (output_index == nullptr) {
                 return E_POINTER;
             }
+            if (prepared && prepared->cancelled)
+                cancel_prepared_flow();
             for (std::uint32_t offset = 0; offset < work_slots.size(); ++offset) {
                 const std::uint32_t index = (next_work_slot + offset) % static_cast<std::uint32_t>(work_slots.size());
+                if (prepared && prepared->slot == index)
+                    continue;
                 const HRESULT status = fence_status(fence.Get(), work_slots[index].fence_value);
                 if (status == S_OK) {
                     const HRESULT timing_result = harvest_nvidia_gpu_timing(work_slots[index]);
@@ -3325,7 +3544,7 @@ namespace xrfg {
             }
             result = slot.command_list->Reset(slot.allocator.Get(), nullptr);
             vdxrfg::pair_capture::nr::fgReset(slot.command_list.Get(), slot.allocator.Get(), result);
-            if (SUCCEEDED(result) && nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
+            if (SUCCEEDED(result) && nvidia_gpu_timing_enabled && !use_prepared_flow && nvidia_timestamp_heap) {
                 // First mark on the list both backends record into, so the span
                 // starts where the GPU starts this pair's work.
                 slot.command_list->EndQuery(
@@ -3505,35 +3724,44 @@ namespace xrfg {
             return ffx_result(ffxOpticalflowContextDispatch(&ffx_context, &dispatch));
         }
 
-        [[nodiscard]] HRESULT record_nvidia_pair(WorkSlot& slot,
-                                                 const RollingSource& previous_source,
-                                                 const RollingSource& current_source,
-                                                 std::span<const D3D12ReprojectionView> target_views,
-                                                 std::uint32_t synthetic_destination_index,
-                                                 std::uint32_t current_destination_index,
-                                                 const std::optional<OverlayPlacement>& debug_marker) noexcept {
-            if (slot.synthesis_command_list == nullptr) {
-                return E_UNEXPECTED;
+        [[nodiscard]] SynthesisParameters nvidia_parameters(
+            const RollingSource& previous_source, std::span<const D3D12ReprojectionView> target_views) const noexcept {
+            SynthesisParameters parameters{};
+            parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
+                                         packed_flow_input_scale(nvidia_options.input_scale) |
+                                         pack_input_flags(view_format);
+            parameters.width = static_cast<UINT>(image_description.Width);
+            parameters.height = image_description.Height;
+            parameters.array_size = image_description.DepthOrArraySize;
+            parameters.packed_width = packed_width;
+            parameters.packed_height = packed_height;
+            parameters.packed_eye_stride = packed_eye_stride;
+            parameters.flow_width = flow_width;
+            parameters.flow_height = flow_height;
+            parameters.flow_block_size = flow_block_size;
+            for (UINT view_index = 0; view_index < static_cast<UINT>(target_views.size()); ++view_index) {
+                parameters.previous_mappings[view_index] =
+                    make_camera_mapping(previous_source.views[view_index],
+                                        target_views[view_index],
+                                        static_cast<UINT>(image_description.Width),
+                                        image_description.Height);
             }
+            return parameters;
+        }
+
+        void record_nvidia_pack(WorkSlot& slot,
+                                const std::array<NvidiaEyeResources, kMaxReprojectionViews>& engine_eyes,
+                                const RollingSource& previous_source,
+                                const RollingSource& current_source,
+                                std::span<const D3D12ReprojectionView> target_views,
+                                SynthesisParameters parameters,
+                                bool time_pack) noexcept {
+            auto* previous_resource = previous_source.resource.Get();
+            auto* current_resource = current_source.resource.Get();
             dred_marker(slot.command_list.Get(), "OFXR NVIDIA pack begin");
-            ID3D12Resource* const previous_resource = previous_source.resource.Get();
-            ID3D12Resource* const current_resource = current_source.resource.Get();
-            ID3D12Resource* const current_destination = current_destinations[current_destination_index].resource.Get();
-#ifdef VDXR_FG_DEPTH_RECONSTRUCTION
-            if (depth_guidance && depth_guidance->reconstructCamera) {
-                configure_reconstruction_slot(
-                    slot,
-                    std::span<const D3D12ReprojectionView>(previous_source.views.data(), previous_source.view_count),
-                    std::span<const D3D12ReprojectionView>(current_source.views.data(), current_source.view_count),
-                    target_views);
-            } else
-#endif
-            {
-                // Every path configures (or clears) the slot exactly once.
-                configure_depth_slot(slot);
-            }
-            create_source_views(slot, previous_resource, current_resource, false);
-            if (nvidia_gpu_timing_enabled) {
+            ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
+            const D3D12_GPU_DESCRIPTOR_HANDLE gpu_start = slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+            if (time_pack) {
                 slot.timing_metadata = {};
                 slot.timing_metadata.previous_serial = previous_source.ticket.serial;
                 slot.timing_metadata.current_serial = current_source.ticket.serial;
@@ -3562,7 +3790,7 @@ namespace xrfg {
             }
 #endif
             for (UINT eye_index = 0; eye_index < image_description.DepthOrArraySize; ++eye_index) {
-                NvidiaEyeResources& eye = slot.nvidia_eyes[eye_index];
+                const auto& eye = engine_eyes[eye_index];
                 before_pack[before_pack_count++] = transition_barrier(
                     eye.previous_input.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 before_pack[before_pack_count++] = transition_barrier(
@@ -3571,10 +3799,8 @@ namespace xrfg {
             slot.command_list->ResourceBarrier(before_pack_count, before_pack.data());
             vdxrfg::pair_capture::barriers(slot.command_list.Get(), before_pack_count, before_pack.data());
 
-            ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
             slot.command_list->SetDescriptorHeaps(1, heaps);
             slot.command_list->SetComputeRootSignature(root_signature.Get());
-            const D3D12_GPU_DESCRIPTOR_HANDLE gpu_start = slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart();
             slot.command_list->SetPipelineState(
 #ifdef VDXR_FG_DEPTH_RECONSTRUCTION
                 nvidia_pack_pipeline_for(slot));
@@ -3590,26 +3816,6 @@ namespace xrfg {
                                                             : nvidia_pack_pipeline.Get());
 #endif
 
-            SynthesisParameters parameters{};
-            parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
-                                         packed_flow_input_scale(nvidia_options.input_scale) |
-                                         pack_input_flags(view_format);
-            parameters.width = static_cast<UINT>(image_description.Width);
-            parameters.height = image_description.Height;
-            parameters.array_size = image_description.DepthOrArraySize;
-            parameters.packed_width = packed_width;
-            parameters.packed_height = packed_height;
-            parameters.packed_eye_stride = packed_eye_stride;
-            parameters.flow_width = flow_width;
-            parameters.flow_height = flow_height;
-            parameters.flow_block_size = flow_block_size;
-            for (UINT view_index = 0; view_index < static_cast<UINT>(target_views.size()); ++view_index) {
-                parameters.previous_mappings[view_index] =
-                    make_camera_mapping(previous_source.views[view_index],
-                                        target_views[view_index],
-                                        static_cast<UINT>(image_description.Width),
-                                        image_description.Height);
-            }
             for (UINT eye_index = 0; eye_index < image_description.DepthOrArraySize; ++eye_index) {
                 parameters.slice = eye_index;
                 if (image_description.DepthOrArraySize > 1) {
@@ -3635,7 +3841,7 @@ namespace xrfg {
             std::array<D3D12_RESOURCE_BARRIER, 2U * kMaxReprojectionViews> uav_barriers{};
             UINT uav_barrier_count = 0;
             for (UINT eye_index = 0; eye_index < image_description.DepthOrArraySize; ++eye_index) {
-                NvidiaEyeResources& eye = slot.nvidia_eyes[eye_index];
+                const auto& eye = engine_eyes[eye_index];
                 uav_barriers[uav_barrier_count++] = uav_barrier(eye.previous_input.Get());
                 uav_barriers[uav_barrier_count++] = uav_barrier(eye.current_input.Get());
             }
@@ -3649,7 +3855,7 @@ namespace xrfg {
             after_pack[after_pack_count++] =
                 transition_barrier(current_resource, kShaderReadState, D3D12_RESOURCE_STATE_COMMON);
             for (UINT eye_index = 0; eye_index < image_description.DepthOrArraySize; ++eye_index) {
-                NvidiaEyeResources& eye = slot.nvidia_eyes[eye_index];
+                const auto& eye = engine_eyes[eye_index];
                 after_pack[after_pack_count++] = transition_barrier(
                     eye.previous_input.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
                 after_pack[after_pack_count++] = transition_barrier(
@@ -3658,15 +3864,54 @@ namespace xrfg {
             slot.command_list->ResourceBarrier(after_pack_count, after_pack.data());
             vdxrfg::pair_capture::barriers(slot.command_list.Get(), after_pack_count, after_pack.data());
             dred_marker(slot.command_list.Get(), "OFXR NVIDIA pack complete");
-            if (nvidia_gpu_timing_enabled) {
+            if (time_pack) {
                 slot.command_list->EndQuery(nvidia_timestamp_heap.Get(),
                                             D3D12_QUERY_TYPE_TIMESTAMP,
                                             slot.timing_query_base + kNvidiaTimestampPackEnd);
             }
+        }
 
+        [[nodiscard]] HRESULT record_nvidia_pair(WorkSlot& slot,
+                                                 const RollingSource& previous_source,
+                                                 const RollingSource& current_source,
+                                                 std::span<const D3D12ReprojectionView> target_views,
+                                                 std::uint32_t synthetic_destination_index,
+                                                 std::uint32_t current_destination_index,
+                                                 const std::optional<OverlayPlacement>& debug_marker) noexcept {
+            if (slot.synthesis_command_list == nullptr) {
+                return E_UNEXPECTED;
+            }
+            ID3D12Resource* const previous_resource = previous_source.resource.Get();
+            ID3D12Resource* const current_resource = current_source.resource.Get();
+            ID3D12Resource* const current_destination = current_destinations[current_destination_index].resource.Get();
+#ifdef VDXR_FG_DEPTH_RECONSTRUCTION
+            if (depth_guidance && depth_guidance->reconstructCamera) {
+                configure_reconstruction_slot(
+                    slot,
+                    std::span<const D3D12ReprojectionView>(previous_source.views.data(), previous_source.view_count),
+                    std::span<const D3D12ReprojectionView>(current_source.views.data(), current_source.view_count),
+                    target_views);
+            } else
+#endif
+            {
+                // Every path configures (or clears) the slot exactly once.
+                configure_depth_slot(slot);
+            }
+            create_source_views(slot, previous_resource, current_resource, false);
+            auto parameters = nvidia_parameters(previous_source, target_views);
+            if (!use_prepared_flow)
+                record_nvidia_pack(slot,
+                                   slot.nvidia_eyes,
+                                   previous_source,
+                                   current_source,
+                                   target_views,
+                                   parameters,
+                                   nvidia_gpu_timing_enabled);
+            ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
+            const D3D12_GPU_DESCRIPTOR_HANDLE gpu_start = slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart();
             ID3D12GraphicsCommandList* synthesis = slot.synthesis_command_list.Get();
             dred_marker(synthesis, "OFXR NVIDIA composition begin");
-            if (nvidia_gpu_timing_enabled) {
+            if (nvidia_gpu_timing_enabled && !use_prepared_flow) {
                 synthesis->EndQuery(nvidia_timestamp_heap.Get(),
                                     D3D12_QUERY_TYPE_TIMESTAMP,
                                     slot.timing_query_base + kNvidiaTimestampCompositionBegin);
@@ -3995,7 +4240,7 @@ namespace xrfg {
 #endif
             synthesis->ResourceBarrier(before_current_copy_count, before_current_copy.data());
             vdxrfg::pair_capture::barriers(synthesis, before_current_copy_count, before_current_copy.data());
-            if (nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
+            if (!use_prepared_flow && nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
                 // Last mark of the pair's synthesis, before the current copy
                 // that is submitted separately. The span therefore covers
                 // exactly the work the synthetic frame is waiting on.
@@ -4059,7 +4304,7 @@ namespace xrfg {
                 synthesis->ResourceBarrier(1, &restore_current);
                 vdxrfg::pair_capture::barriers(synthesis, 1, &restore_current);
             }
-            if (nvidia_gpu_timing_enabled) {
+            if (nvidia_gpu_timing_enabled && !use_prepared_flow) {
                 synthesis->EndQuery(nvidia_timestamp_heap.Get(),
                                     D3D12_QUERY_TYPE_TIMESTAMP,
                                     slot.timing_query_base + kNvidiaTimestampCompositionEnd);
@@ -4767,49 +5012,116 @@ namespace xrfg {
             return result;
         }
 
-        [[nodiscard]] HRESULT execute_nvidia_and_signal(WorkSlot& slot,
-                                                        std::uint32_t slot_index,
-                                                        RollingSource* newly_acquired,
-                                                        std::uint64_t* output_fence_value,
-                                                        bool defer_current_copy) noexcept {
-            if (newly_acquired == nullptr || output_fence_value == nullptr || slot.synthesis_command_list == nullptr ||
-                slot.current_copy_command_list == nullptr || next_fence_value == 0 ||
-                next_fence_value >= std::numeric_limits<std::uint64_t>::max() - 1U || next_nvidia_fence_value == 0 ||
-                next_nvidia_fence_value >
-                    std::numeric_limits<std::uint64_t>::max() - image_description.DepthOrArraySize) {
-                synthesis_enabled = false;
-                return E_FAIL;
-            }
-
-            HRESULT result = slot.command_list->Close();
-
-            vdxrfg::pair_capture::nr::fgClosed(slot.command_list.Get(), result);
-            if (FAILED(result)) {
-                synthesis_enabled = false;
-                return result;
-            }
-            result = slot.synthesis_command_list->Close();
-            vdxrfg::pair_capture::nr::fgClosed(slot.synthesis_command_list.Get(), result);
-            if (FAILED(result)) {
-                synthesis_enabled = false;
-                return result;
-            }
-            if (slot.tail_recorded) {
-                result = slot.tail_command_list->Close();
-                vdxrfg::pair_capture::nr::fgClosed(slot.tail_command_list.Get(), result);
+        [[nodiscard]] HRESULT execute_nvidia_eyes(WorkSlot& slot,
+                                                  ID3D12Fence* input_fence,
+                                                  uint64_t pack_ready_value,
+                                                  bool time_eyes,
+                                                  RollingSource* newly_acquired,
+                                                  uint64_t* attempted = nullptr) noexcept {
+            HRESULT result;
+            if (time_eyes) {
+                result = slot.timing_marker_allocator->Reset();
+                vdxrfg::pair_capture::nr::fgAllocatorReset(slot.timing_marker_allocator.Get(), result);
                 if (FAILED(result)) {
                     synthesis_enabled = false;
+                    untracked_source = std::move(*newly_acquired);
+                    return result;
+                }
+                result = slot.timing_marker_command_list->Reset(slot.timing_marker_allocator.Get(), nullptr);
+                vdxrfg::pair_capture::nr::fgReset(
+                    slot.timing_marker_command_list.Get(), slot.timing_marker_allocator.Get(), result);
+                if (FAILED(result)) {
+                    synthesis_enabled = false;
+                    untracked_source = std::move(*newly_acquired);
+                    return result;
+                }
+                slot.timing_marker_command_list->EndQuery(nvidia_timestamp_heap.Get(),
+                                                          D3D12_QUERY_TYPE_TIMESTAMP,
+                                                          slot.timing_query_base + kNvidiaTimestampEye0End);
+                result = slot.timing_marker_command_list->Close();
+                vdxrfg::pair_capture::nr::fgClosed(slot.timing_marker_command_list.Get(), result);
+                if (FAILED(result)) {
+                    synthesis_enabled = false;
+                    untracked_source = std::move(*newly_acquired);
                     return result;
                 }
             }
-            if (slot.current_copy_recorded) {
-                result = slot.current_copy_command_list->Close();
-                vdxrfg::pair_capture::nr::fgClosed(slot.current_copy_command_list.Get(), result);
+
+            std::uint64_t preceding_eye_value = 0;
+            std::uint64_t eye0_fence_value = 0;
+            for (UINT eye_index = 0; eye_index < image_description.DepthOrArraySize; ++eye_index) {
+                NvidiaEyeResources& eye = slot.nvidia_eyes[eye_index];
+                std::array<NV_OF_FENCE_POINT, 2> input_fence_points{};
+                input_fence_points[0].fence = input_fence;
+                input_fence_points[0].value = pack_ready_value;
+                UINT input_fence_count = 1;
+                if (preceding_eye_value != 0) {
+                    input_fence_points[input_fence_count].fence = nvidia_fence.Get();
+                    input_fence_points[input_fence_count].value = preceding_eye_value;
+                    ++input_fence_count;
+                }
+
+                NV_OF_EXECUTE_INPUT_PARAMS_D3D12 input{};
+                input.inputFrame = eye.current_input_handle;
+                input.referenceFrame = eye.previous_input_handle;
+                input.disableTemporalHints = NV_OF_TRUE;
+                input.numFencePoints = input_fence_count;
+                input.fencePoint = input_fence_points.data();
+
+                NV_OF_FENCE_POINT output_fence_point{};
+                output_fence_point.fence = nvidia_fence.Get();
+                output_fence_point.value = next_nvidia_fence_value;
+                NV_OF_EXECUTE_OUTPUT_PARAMS_D3D12 output{};
+                output.outputBuffer = eye.flow_handle;
+                output.outputCostBuffer = eye.cost_handle;
+                if (nvidia_options.bidirectional) {
+                    output.bwdOutputBuffer = eye.backward_flow_handle;
+                    output.bwdOutputCostBuffer = eye.backward_cost_handle;
+                }
+                output.fencePoint = &output_fence_point;
+                if (attempted)
+                    *attempted = output_fence_point.value;
+                result = nvidia_result(nvidia_api.nvOFExecuteD3D12(nvidia_contexts[eye_index], &input, &output));
                 if (FAILED(result)) {
                     synthesis_enabled = false;
+                    untracked_source = std::move(*newly_acquired);
                     return result;
                 }
+                preceding_eye_value = next_nvidia_fence_value++;
+                last_nvidia_fence_value = preceding_eye_value;
+                if (eye_index == 0) {
+                    eye0_fence_value = preceding_eye_value;
+                    if (time_eyes) {
+                        result = queue->Wait(nvidia_fence.Get(), eye0_fence_value);
+                        if (FAILED(result)) {
+                            synthesis_enabled = false;
+                            untracked_source = std::move(*newly_acquired);
+                            return result;
+                        }
+                        ID3D12CommandList* timing_lists[] = {slot.timing_marker_command_list.Get()};
+                        queue->ExecuteCommandLists(1, timing_lists);
+                        vdxrfg::pair_capture::queued(queue.Get(), 1, timing_lists);
+                        VDXR_FG_DEPTH_TRACE(
+                            "DepthCommandListQueued",
+                            TraceLoggingPointer(this, "Synthesizer"),
+                            TraceLoggingPointer(&slot, "WorkSlot"),
+                            TraceLoggingUInt64(slot.depth_guidance ? slot.depth_guidance->serialA : 0,
+                                               "PreviousGuideSerial"),
+                            TraceLoggingUInt64(slot.depth_guidance ? slot.depth_guidance->serialB : 0,
+                                               "CurrentGuideSerial"),
+                            TraceLoggingUInt64(slot.depth_guidance ? slot.depth_guidance->epoch : 0, "GuideEpoch"),
+                            TraceLoggingPointer(queue.Get(), "Queue"),
+                            TraceLoggingPointer(timing_lists[0], "CommandList"),
+                            TraceLoggingString("timing_lists", "ListRole"),
+                            TraceLoggingBool(false, "GpuCompletionObserved"));
+                    }
+                }
             }
+            return S_OK;
+        }
+
+        [[nodiscard]] HRESULT submit_nvidia_pack(WorkSlot& slot, RollingSource* newly_acquired) noexcept {
+            HRESULT result;
             result = queue->Wait(nvidia_fence.Get(), last_nvidia_fence_value);
             if (FAILED(result)) {
                 synthesis_enabled = false;
@@ -4854,102 +5166,56 @@ namespace xrfg {
             }
             ++next_fence_value;
 
-            if (nvidia_gpu_timing_enabled) {
-                result = slot.timing_marker_allocator->Reset();
-                vdxrfg::pair_capture::nr::fgAllocatorReset(slot.timing_marker_allocator.Get(), result);
+            return execute_nvidia_eyes(slot, fence.Get(), pack_ready_value, nvidia_gpu_timing_enabled, newly_acquired);
+        }
+
+        [[nodiscard]] HRESULT execute_nvidia_and_signal(WorkSlot& slot,
+                                                        std::uint32_t slot_index,
+                                                        RollingSource* newly_acquired,
+                                                        std::uint64_t* output_fence_value,
+                                                        bool defer_current_copy) noexcept {
+            if (newly_acquired == nullptr || output_fence_value == nullptr || slot.synthesis_command_list == nullptr ||
+                slot.current_copy_command_list == nullptr || next_fence_value == 0 ||
+                next_fence_value >= std::numeric_limits<std::uint64_t>::max() - 1U || next_nvidia_fence_value == 0 ||
+                next_nvidia_fence_value >
+                    std::numeric_limits<std::uint64_t>::max() - image_description.DepthOrArraySize) {
+                synthesis_enabled = false;
+                return E_FAIL;
+            }
+
+            HRESULT result = slot.command_list->Close();
+
+            vdxrfg::pair_capture::nr::fgClosed(slot.command_list.Get(), result);
+            if (FAILED(result)) {
+                synthesis_enabled = false;
+                return result;
+            }
+            result = slot.synthesis_command_list->Close();
+            vdxrfg::pair_capture::nr::fgClosed(slot.synthesis_command_list.Get(), result);
+            if (FAILED(result)) {
+                synthesis_enabled = false;
+                return result;
+            }
+            if (slot.tail_recorded) {
+                result = slot.tail_command_list->Close();
+                vdxrfg::pair_capture::nr::fgClosed(slot.tail_command_list.Get(), result);
                 if (FAILED(result)) {
                     synthesis_enabled = false;
-                    untracked_source = std::move(*newly_acquired);
-                    return result;
-                }
-                result = slot.timing_marker_command_list->Reset(slot.timing_marker_allocator.Get(), nullptr);
-                vdxrfg::pair_capture::nr::fgReset(
-                    slot.timing_marker_command_list.Get(), slot.timing_marker_allocator.Get(), result);
-                if (FAILED(result)) {
-                    synthesis_enabled = false;
-                    untracked_source = std::move(*newly_acquired);
-                    return result;
-                }
-                slot.timing_marker_command_list->EndQuery(nvidia_timestamp_heap.Get(),
-                                                          D3D12_QUERY_TYPE_TIMESTAMP,
-                                                          slot.timing_query_base + kNvidiaTimestampEye0End);
-                result = slot.timing_marker_command_list->Close();
-                vdxrfg::pair_capture::nr::fgClosed(slot.timing_marker_command_list.Get(), result);
-                if (FAILED(result)) {
-                    synthesis_enabled = false;
-                    untracked_source = std::move(*newly_acquired);
                     return result;
                 }
             }
-
-            std::uint64_t preceding_eye_value = 0;
-            std::uint64_t eye0_fence_value = 0;
-            for (UINT eye_index = 0; eye_index < image_description.DepthOrArraySize; ++eye_index) {
-                NvidiaEyeResources& eye = slot.nvidia_eyes[eye_index];
-                std::array<NV_OF_FENCE_POINT, 2> input_fence_points{};
-                input_fence_points[0].fence = fence.Get();
-                input_fence_points[0].value = pack_ready_value;
-                UINT input_fence_count = 1;
-                if (preceding_eye_value != 0) {
-                    input_fence_points[input_fence_count].fence = nvidia_fence.Get();
-                    input_fence_points[input_fence_count].value = preceding_eye_value;
-                    ++input_fence_count;
-                }
-
-                NV_OF_EXECUTE_INPUT_PARAMS_D3D12 input{};
-                input.inputFrame = eye.current_input_handle;
-                input.referenceFrame = eye.previous_input_handle;
-                input.disableTemporalHints = NV_OF_TRUE;
-                input.numFencePoints = input_fence_count;
-                input.fencePoint = input_fence_points.data();
-
-                NV_OF_FENCE_POINT output_fence_point{};
-                output_fence_point.fence = nvidia_fence.Get();
-                output_fence_point.value = next_nvidia_fence_value;
-                NV_OF_EXECUTE_OUTPUT_PARAMS_D3D12 output{};
-                output.outputBuffer = eye.flow_handle;
-                output.outputCostBuffer = eye.cost_handle;
-                if (nvidia_options.bidirectional) {
-                    output.bwdOutputBuffer = eye.backward_flow_handle;
-                    output.bwdOutputCostBuffer = eye.backward_cost_handle;
-                }
-                output.fencePoint = &output_fence_point;
-                result = nvidia_result(nvidia_api.nvOFExecuteD3D12(nvidia_contexts[eye_index], &input, &output));
+            if (slot.current_copy_recorded) {
+                result = slot.current_copy_command_list->Close();
+                vdxrfg::pair_capture::nr::fgClosed(slot.current_copy_command_list.Get(), result);
                 if (FAILED(result)) {
                     synthesis_enabled = false;
-                    untracked_source = std::move(*newly_acquired);
                     return result;
                 }
-                preceding_eye_value = next_nvidia_fence_value;
-                if (eye_index == 0) {
-                    eye0_fence_value = next_nvidia_fence_value;
-                    if (nvidia_gpu_timing_enabled) {
-                        result = queue->Wait(nvidia_fence.Get(), eye0_fence_value);
-                        if (FAILED(result)) {
-                            synthesis_enabled = false;
-                            untracked_source = std::move(*newly_acquired);
-                            return result;
-                        }
-                        ID3D12CommandList* timing_lists[] = {slot.timing_marker_command_list.Get()};
-                        queue->ExecuteCommandLists(1, timing_lists);
-                        vdxrfg::pair_capture::queued(queue.Get(), 1, timing_lists);
-                        VDXR_FG_DEPTH_TRACE(
-                            "DepthCommandListQueued",
-                            TraceLoggingPointer(this, "Synthesizer"),
-                            TraceLoggingPointer(&slot, "WorkSlot"),
-                            TraceLoggingUInt64(slot.depth_guidance ? slot.depth_guidance->serialA : 0,
-                                               "PreviousGuideSerial"),
-                            TraceLoggingUInt64(slot.depth_guidance ? slot.depth_guidance->serialB : 0,
-                                               "CurrentGuideSerial"),
-                            TraceLoggingUInt64(slot.depth_guidance ? slot.depth_guidance->epoch : 0, "GuideEpoch"),
-                            TraceLoggingPointer(queue.Get(), "Queue"),
-                            TraceLoggingPointer(timing_lists[0], "CommandList"),
-                            TraceLoggingString("timing_lists", "ListRole"),
-                            TraceLoggingBool(false, "GpuCompletionObserved"));
-                    }
-                }
-                last_nvidia_fence_value = next_nvidia_fence_value;
-                ++next_nvidia_fence_value;
+            }
+            if (!use_prepared_flow) {
+                result = submit_nvidia_pack(slot, newly_acquired);
+                if (FAILED(result))
+                    return result;
             }
             result = queue->Wait(nvidia_fence.Get(), last_nvidia_fence_value);
             if (FAILED(result)) {
@@ -5057,7 +5323,8 @@ namespace xrfg {
 
             completion_unknown = false;
             slot.fence_value = completion_value;
-            slot.timing_pending = nvidia_gpu_timing_enabled && slot.timing_metadata.previous_serial != 0;
+            slot.timing_pending =
+                !use_prepared_flow && nvidia_gpu_timing_enabled && slot.timing_metadata.previous_serial != 0;
             last_submitted_fence_value = completion_value;
             *output_fence_value = completion_value;
             return S_OK;
@@ -5262,7 +5529,10 @@ namespace xrfg {
                 return false;
             };
             std::uint32_t work_slot_index = 0;
-            result = acquire_work_slot(&work_slot_index);
+            if (use_prepared_flow)
+                work_slot_index = prepared->slot;
+            else
+                result = acquire_work_slot(&work_slot_index);
             if (FAILED(result)) {
                 return result;
             }
@@ -5686,6 +5956,36 @@ namespace xrfg {
                                    defer_current_copy,
                                    interpolation_fraction,
                                    extras);
+    }
+
+    HRESULT D3D12FrameSynthesizer::prepare_flow(ID3D12Resource* atlas,
+                                                ID3D12Fence* producer,
+                                                uint64_t value,
+                                                std::span<const D3D12ReprojectionView> views,
+                                                ID3D12Fence** read_fence,
+                                                uint64_t* read_value) noexcept {
+        try {
+            std::scoped_lock lock(mutex_);
+            return impl_ ? impl_->prepare_flow(atlas, producer, value, views, read_fence, read_value) : E_UNEXPECTED;
+        } catch (const std::bad_alloc&) {
+            return S_FALSE;
+        }
+    }
+
+    bool D3D12FrameSynthesizer::select_prepared_flow(std::span<const D3D12ReprojectionView> views) noexcept {
+        std::scoped_lock lock(mutex_);
+        return impl_ && impl_->select_prepared_flow(views);
+    }
+
+    void D3D12FrameSynthesizer::cancel_prepared_flow() noexcept {
+        std::scoped_lock lock(mutex_);
+        if (impl_)
+            impl_->cancel_prepared_flow();
+    }
+
+    HRESULT D3D12FrameSynthesizer::prepared_teardown_status() noexcept {
+        std::scoped_lock lock(mutex_);
+        return impl_ ? impl_->prepared_status() : S_OK;
     }
 
     void D3D12FrameSynthesizer::set_depth_guidance(std::shared_ptr<const D3D12DepthGuidance> guides) noexcept {

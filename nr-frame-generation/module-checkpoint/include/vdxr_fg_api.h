@@ -258,6 +258,39 @@ typedef struct VDXRFG_ApiV5 {
 
 typedef HRESULT(WINAPI* VDXRFG_GetApiV5Fn)(VDXRFG_ApiV5*) VDXRFG_NOEXCEPT;
 
+/* Optional preparation on an existing V3/V4/V5 context. S_FALSE is a
+ * clean decline. Only a matching CommitPrepared S_FALSE authorizes one
+ * ordinary Submit fallback. No output bank is borrowed by Prepare. */
+#define VDXRFG_API_VERSION_6 6u
+typedef struct VDXRFG_PrepareInfoV6 {
+    uint32_t struct_size, api_version;
+    uint64_t previous_serial, current_serial, content_epoch;
+    void* current_atlas;
+    void* producer_fence;
+    uint64_t producer_value;
+    VDXRFG_ViewV1 views[2];
+} VDXRFG_PrepareInfoV6;
+
+typedef struct VDXRFG_PreparedV6 {
+    uint32_t struct_size, api_version;
+    uint64_t context_id, token, generation, previous_serial, current_serial, content_epoch;
+    void* input_read_fence; /* Borrowed until Destroy. AddRef when retaining independently. */
+    uint64_t input_read_value;
+} VDXRFG_PreparedV6;
+
+typedef struct VDXRFG_ApiV6 {
+    uint32_t struct_size, api_version;
+    HRESULT(WINAPI* Prepare)(void*, const VDXRFG_PrepareInfoV6*, VDXRFG_PreparedV6*) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* CommitPrepared)(void*,
+                                    const VDXRFG_PreparedV6*,
+                                    uint64_t final_content_epoch,
+                                    const VDXRFG_SubmitInfoV5*,
+                                    VDXRFG_TicketV1*) VDXRFG_NOEXCEPT;
+    HRESULT(WINAPI* Cancel)(void*, const VDXRFG_PreparedV6*) VDXRFG_NOEXCEPT;
+} VDXRFG_ApiV6;
+
+typedef HRESULT(WINAPI* VDXRFG_GetApiV6Fn)(VDXRFG_ApiV6*) VDXRFG_NOEXCEPT;
+
 #ifdef __cplusplus
 }
 #endif

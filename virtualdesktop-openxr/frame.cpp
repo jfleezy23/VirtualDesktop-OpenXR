@@ -495,6 +495,9 @@ namespace virtualdesktop_openxr {
                 return XR_ERROR_CALL_ORDER_INVALID;
             }
 
+            m_liveProducer.guides = 0;
+            m_liveProducer.route =
+                m_liveConfiguration.fgMode ? live_status::Route::unavailable : live_status::Route::off;
             CHECK_MSG(!m_fgDepthCompletionUnknown, "FG depth completion unknown; refusing frame processing");
             CHECK_MSG(!m_fgTransactionForFrame.ticket.token, "Unpublished FG transaction; refusing frame processing");
 
@@ -659,6 +662,8 @@ namespace virtualdesktop_openxr {
                                        frameEndInfo->layers[i]->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION;
             }
             const bool stagedEarlyNr = frameNrSettings && frameNrSettings->enabled && hasNrProjection;
+            FrameGenerationSourceLedger earlyFlowSources;
+            bool earlyFlowAttempted{};
             bool earlySourcesPending{};
             auto protectUnpublishedSources = MakeScopeGuard([&] {
                 if (!earlySourcesPending)
@@ -679,6 +684,22 @@ namespace virtualdesktop_openxr {
                         m_asyncSubmissionCondVar.notify_all();
                     }
                     ErrorLog("Failed to protect unpublished NR source reads; stopping submission.\n");
+                }
+            });
+            auto cancelEarlyFlow = MakeScopeGuard([&] {
+                if (!earlyFlowAttempted || !m_frameGeneration)
+                    return;
+                try {
+                    if (!contextLease.owns_lock())
+                        lockFrameGenerationProducerContext(contextLease);
+                    CHECK_HRCMD(m_frameGeneration->cancelPreparedFlow());
+                } catch (...) {
+                    const auto failure = std::current_exception();
+                    std::unique_lock stateLock(m_asyncSubmissionMutex);
+                    if (!m_asyncSubmissionError)
+                        m_asyncSubmissionError = failure;
+                    m_asyncSubmissionCondVar.notify_all();
+                    ErrorLog("Failed to cancel unpublished optical flow; retaining submission owners.\n");
                 }
             });
             if (stagedEarlyNr) {
@@ -713,6 +734,11 @@ namespace virtualdesktop_openxr {
                     return result;
                 colourComplete = true;
                 m_precompositor.earlyNrPermission = false;
+                // Final colours are immutable under this frame's source lease.
+                // This CPU-only view snapshot does not run the late Pose/depth
+                // stage, consume reprime or plan cadence.
+                earlyFlowAttempted = true;
+                CHECK_HRCMD(prepareEarlyFrameGeneration(*frameEndInfo, earlyFlowSources));
                 if (trace)
                     TraceLoggingWrite(g_traceProvider,
                                       "NR_EarlyPreparation",
@@ -839,7 +865,16 @@ namespace virtualdesktop_openxr {
                 layersAllocator.push_back({});
                 layersAllocator.back().Header.Type = ovrLayerType_Disabled;
             }
-            const bool captured = m_frameGenerationMode && prepareFrameGeneration(*frameEndInfo);
+            const bool captured = m_frameGenerationMode && prepareFrameGeneration(*frameEndInfo, &earlyFlowSources);
+            if (m_liveStatus.available()) {
+                // Read context state under the existing producer lease. Publishing
+                // the packet below can already let the worker use that state.
+                const bool active = m_frameGeneration && m_frameGeneration->initialized();
+                m_liveProducer.context = active;
+                m_liveProducer.mode = active ? m_frameGenerationMode : 0;
+                m_liveProducer.backend = active ? m_frameGenerationBackend : live_status::Unknown;
+                m_liveProducer.depth = active ? m_frameGeneration->negotiatedDepthMode() : live_status::Unknown;
+            }
             if (!captured) {
                 const auto submitted = [&](ovrTextureSwapChain chain) {
                     return std::any_of(layersAllocator.begin(), layersAllocator.end(), [&](const auto& layer) {
@@ -964,7 +999,12 @@ namespace virtualdesktop_openxr {
                 scaleDesc.HmdToEyePose[xr::StereoView::Left] = m_cachedEyeInfo[xr::StereoView::Left].HmdToEyePose;
                 scaleDesc.HmdToEyePose[xr::StereoView::Right] = m_cachedEyeInfo[xr::StereoView::Right].HmdToEyePose;
                 scaleDesc.HmdSpaceToWorldScaleInMeters = 1.f;
-                CHECK_OVRCMD(endSubmissionFrame(m_ovrSession, ovrFrameId, &scaleDesc, layers.data(), layerCount));
+                CHECK_OVRCMD(endSubmissionFrame(m_ovrSession,
+                                                ovrFrameId,
+                                                &scaleDesc,
+                                                layers.data(),
+                                                layerCount,
+                                                frameEndInfo->layerCount ? m_frameBegun : 0));
                 TraceLoggingWriteStop(endFrame, "OVR_EndFrame");
             }
 
@@ -1032,6 +1072,21 @@ namespace virtualdesktop_openxr {
             m_currentTimerIndex = (m_currentTimerIndex + 1) % k_numGpuTimers;
 
             m_sessionTotalFrameCount++;
+            if (m_liveStatus.available()) {
+                const auto& settings = m_precompositor.dlssnrSettings;
+                const auto percent = [](float value) { return static_cast<uint64_t>(value * 100.f + .5f); };
+                ++m_liveProducer.baseFrames;
+                m_liveProducer.serial = m_frameCompleted;
+                m_liveProducer.nrEnabled = settings.enabled;
+                m_liveProducer.coverage = percent(settings.foveationSize);
+                m_liveProducer.processing = settings.processingResolution;
+                m_liveProducer.style = settings.style;
+                m_liveProducer.intensity = percent(settings.intensity);
+                m_liveProducer.tone = percent(settings.localToneStrength);
+                m_liveProducer.structure = percent(settings.localStructureStrength);
+                m_liveProducer.skin = percent(settings.skinStructureStrength);
+                m_liveStatus.publishProducer(m_liveProducer.payload());
+            }
 
             // Signal xrBeginFrame().
             TraceLoggingWrite(g_traceProvider,
@@ -1338,6 +1393,9 @@ namespace virtualdesktop_openxr {
         // Run Neural Rendering if needed.
         if (colour && needUplifting) {
             upliftLayer(subImages, depthSubImages, depthInverted, layer.EyeFov, !needUpscaling, producerLease);
+            // Both NGX evaluations and submission/output ordering succeeded on
+            // either the native or spatial path. Pose-only staging skips this.
+            ++m_liveProducer.nrPairs;
         }
 
         // Run the upscaler or sharpening if needed.
@@ -1811,6 +1869,7 @@ namespace virtualdesktop_openxr {
                 }
 
                 bool stoppingWithoutFrame = false;
+                uint64_t sourceSerial{};
                 {
                     std::unique_lock lock(m_asyncSubmissionMutex);
 
@@ -1825,6 +1884,9 @@ namespace virtualdesktop_openxr {
                         lock, [&] { return m_terminateAsyncThread || !m_layersForAsyncSubmission.empty(); });
                     // A published packet still owns this begun frame when shutdown wins the wakeup.
                     stoppingWithoutFrame = m_terminateAsyncThread && m_layersForAsyncSubmission.empty();
+                    if (!stoppingWithoutFrame &&
+                        m_layersForAsyncSubmission.front().Header.Type != ovrLayerType_Disabled)
+                        sourceSerial = m_asyncNextFrameId;
                 }
                 if (stoppingWithoutFrame) {
                     ovrLayerHeader disabled{};
@@ -1859,7 +1921,8 @@ namespace virtualdesktop_openxr {
                     scaleDesc.HmdToEyePose[xr::StereoView::Left] = m_cachedEyeInfo[xr::StereoView::Left].HmdToEyePose;
                     scaleDesc.HmdToEyePose[xr::StereoView::Right] = m_cachedEyeInfo[xr::StereoView::Right].HmdToEyePose;
                     scaleDesc.HmdSpaceToWorldScaleInMeters = 1.f;
-                    CHECK_OVRCMD(endSubmissionFrame(m_ovrSession, ovrFrameId, &scaleDesc, layers.data(), layerCount));
+                    CHECK_OVRCMD(endSubmissionFrame(
+                        m_ovrSession, ovrFrameId, &scaleDesc, layers.data(), layerCount, sourceSerial));
                     TraceLoggingWriteStop(endFrame, "OVR_EndFrame");
                 }
             }

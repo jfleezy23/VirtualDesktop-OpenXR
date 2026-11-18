@@ -15,6 +15,7 @@
 #include <wrl/client.h>
 
 #include <array>
+#include <atomic>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -67,10 +68,13 @@ namespace {
         std::array<Lease, 2> leases;
         VDXRFG_StatisticsV1 statistics{};
         uint64_t nextToken{1}, generation{1}, previousSerial{};
+        uint64_t preparationContext{}, nextPreparation{1};
+        VDXRFG_PreparedV6 prepared{};
         uint64_t lastTimingSerial{};
         int64_t previousTime{};
         uint32_t multiplier{};
         bool poisoned{};
+        bool preparationFailed{};
         bool initializationPoisoned{};
         bool hostOwnsReal{};
         bool colorOpaque{};
@@ -717,29 +721,43 @@ namespace {
         }
     }
 
-    HRESULT submitImpl(void* handle,
-                       const VDXRFG_SubmitInfoV3* info,
-                       VDXRFG_TicketV1* output,
-                       const VDXRFG_SubmitInfoV5* depth = nullptr) noexcept {
-        if (!output) {
-            return E_POINTER;
+    auto normalizedViews(const Context& context, const VDXRFG_SubmitInfoV3& info) noexcept {
+        std::array<xrfg::D3D12ReprojectionView, 2> views{};
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            const auto& input = info.views[eye];
+            auto& view = views[eye];
+            view.pose.position = {input.position[0], input.position[1], input.position[2]};
+            view.pose.orientation = {
+                input.orientation[0], input.orientation[1], input.orientation[2], input.orientation[3]};
+            view.fov = {input.fov[0], input.fov[1], input.fov[2], input.fov[3]};
+            view.image_rect = {input.rect.x - eye * static_cast<uint32_t>(context.input->GetDesc().Width / 2),
+                               input.rect.y,
+                               input.rect.width,
+                               input.rect.height};
+            view.array_slice = eye;
         }
-        *output = {};
-        auto context = static_cast<Context*>(handle);
-        if (!context || !info || info->input != context->input.Get() || !info->serial ||
-            info->serial <= context->previousSerial || info->display_time_ns <= 0 || info->display_period_ns <= 0 ||
-            !viewsValid(*context, *info) || (info->producer_value && !info->producer_fence) ||
-            (info->producer_fence &&
-             !sameDevice(context->device.Get(), static_cast<ID3D12Fence*>(info->producer_fence)))) {
-            return VDXRFG_E_REJECTED;
+        return views;
+    }
+
+    void discardPrepared(Context& context) noexcept {
+        if (context.prepared.token) {
+            context.synthesizer.cancel_prepared_flow();
+            context.prepared = {};
         }
-        pollDepthPixelProbe(*context);
-        if (context->poisoned) {
-            return VDXRFG_E_POISONED;
-        }
+    }
+
+    bool invalidSubmitInput(const Context* context, const VDXRFG_SubmitInfoV3* info) noexcept {
+        return !context || !info || info->input != context->input.Get() || !info->serial ||
+               info->serial <= context->previousSerial || info->display_time_ns <= 0 || info->display_period_ns <= 0 ||
+               !viewsValid(*context, *info) || (info->producer_value && !info->producer_fence) ||
+               (info->producer_fence &&
+                !sameDevice(context->device.Get(), static_cast<ID3D12Fence*>(info->producer_fence)));
+    }
+
+    bool validCadence(const Context* context, const VDXRFG_SubmitInfoV3* info) noexcept {
         if (context->previousSerial) {
             if (info->display_time_ns <= context->previousTime) {
-                return VDXRFG_E_REJECTED;
+                return false;
             }
             const auto interval = info->display_time_ns - context->previousTime;
             for (uint32_t i = 0; i < context->multiplier - 1; ++i) {
@@ -751,10 +769,33 @@ namespace {
                              fraction) > 0.00001 ||
                     (i &&
                      (info->target_time_ns[i] <= info->target_time_ns[i - 1] || fraction <= info->fractions[i - 1]))) {
-                    return VDXRFG_E_REJECTED;
+                    return false;
                 }
             }
         }
+        return true;
+    }
+
+    HRESULT submitImpl(void* handle,
+                       const VDXRFG_SubmitInfoV3* info,
+                       VDXRFG_TicketV1* output,
+                       const VDXRFG_SubmitInfoV5* depth = nullptr,
+                       bool prepared = false) noexcept {
+        if (!output) {
+            return E_POINTER;
+        }
+        *output = {};
+        auto context = static_cast<Context*>(handle);
+        if (invalidSubmitInput(context, info))
+            return VDXRFG_E_REJECTED;
+        pollDepthPixelProbe(*context);
+        if (context->poisoned) {
+            return VDXRFG_E_POISONED;
+        }
+        if (!validCadence(context, info) || context->nextToken == std::numeric_limits<uint64_t>::max())
+            return VDXRFG_E_REJECTED;
+        if (!prepared)
+            discardPrepared(*context);
         Lease* lease = nullptr;
         uint32_t bank = 0;
         for (; bank < 2; ++bank) {
@@ -771,9 +812,6 @@ namespace {
         if (FAILED(previousStatus)) {
             context->poisoned = true;
             return VDXRFG_E_POISONED;
-        }
-        if (context->nextToken == std::numeric_limits<uint64_t>::max()) {
-            return VDXRFG_E_REJECTED;
         }
         // Ownership identity precedes the first GPU operation, even a queue Wait.
         lease->ticket.token = context->nextToken++;
@@ -896,20 +934,7 @@ namespace {
             if (FAILED(hr)) {
                 return poison();
             }
-            std::array<xrfg::D3D12ReprojectionView, 2> views{};
-            for (uint32_t eye = 0; eye < 2; ++eye) {
-                const auto& input = info->views[eye];
-                auto& view = views[eye];
-                view.pose.position = {input.position[0], input.position[1], input.position[2]};
-                view.pose.orientation = {
-                    input.orientation[0], input.orientation[1], input.orientation[2], input.orientation[3]};
-                view.fov = {input.fov[0], input.fov[1], input.fov[2], input.fov[3]};
-                view.image_rect = {input.rect.x - eye * static_cast<uint32_t>(context->input->GetDesc().Width / 2),
-                                   input.rect.y,
-                                   input.rect.width,
-                                   input.rect.height};
-                view.array_slice = eye;
-            }
+            const auto views = normalizedViews(*context, *info);
 #ifdef VDXR_FG_DEPTH_ENDPOINT_PREFERENCE
             std::shared_ptr<const xrfg::D3D12DepthGuidance> guidance;
             if (pairAccepted) {
@@ -1051,6 +1076,13 @@ namespace {
                                                                                                       : 1u);
             context->previousSerial = info->serial;
             context->previousTime = info->display_time_ns;
+            if (prepared) {
+                // A split pair's old aggregate timestamp span would include
+                // host capacity/admission time. Zero is unavailable in V1.
+                context->lastTimingSerial = std::max(context->lastTimingSerial, synthesis.current_serial);
+                context->statistics.last_gpu_us = context->statistics.pack_gpu_us = context->statistics.flow_gpu_us =
+                    context->statistics.composition_gpu_us = 0;
+            }
             // Publish B even when A was absent. Publication follows successful
             // full-output signaling; failed/unknown work cannot advance identity.
             context->previousGuideSerial = hasGuide ? info->serial : 0;
@@ -1130,7 +1162,7 @@ namespace {
         const auto context = static_cast<Context*>(handle);
         if (!context || !context->version4 || !token || role >= 4)
             return VDXRFG_E_REJECTED;
-        if (context->poisoned)
+        if (context->poisoned && !context->preparationFailed)
             return VDXRFG_E_POISONED;
         for (const auto& lease : context->leases) {
             if (lease.ticket.token != token)
@@ -1154,7 +1186,7 @@ namespace {
         if (vdxrfg::pair_capture::holdRetire(context, token))
             return VDXRFG_E_BUSY;
         pollDepthPixelProbe(*context);
-        if (context->poisoned) {
+        if (context->poisoned && !context->preparationFailed) {
             return VDXRFG_E_POISONED;
         }
         for (auto& lease : context->leases) {
@@ -1202,6 +1234,9 @@ namespace {
                 return VDXRFG_E_BUSY;
             }
         }
+        if (context->generation == UINT64_MAX)
+            return VDXRFG_E_REJECTED;
+        discardPrepared(*context);
         HRESULT hr = context->synthesizer.retire_previous();
         if (SUCCEEDED(hr)) {
             hr = context->history->invalidate();
@@ -1279,8 +1314,153 @@ namespace {
         return S_OK;
     }
 
+    uint64_t preparationContextId() noexcept {
+        static std::atomic<uint64_t> next{1};
+        auto id = next.load(std::memory_order_relaxed);
+        while (id != UINT64_MAX) {
+            if (next.compare_exchange_weak(id, id + 1, std::memory_order_relaxed))
+                return id;
+        }
+        return 0;
+    }
+
+    HRESULT WINAPI prepare(void* handle, const VDXRFG_PrepareInfoV6* info, VDXRFG_PreparedV6* output) noexcept {
+        if (!output || output->struct_size < sizeof(*output) || output->api_version != VDXRFG_API_VERSION_6)
+            return VDXRFG_E_REJECTED;
+        *output = {};
+        auto* c = static_cast<Context*>(handle);
+        if (!c || !c->version3 || !info || info->struct_size < sizeof(*info) ||
+            info->api_version != VDXRFG_API_VERSION_6 || !info->current_atlas || !info->producer_fence ||
+            !info->producer_value || info->producer_value == UINT64_MAX || !info->previous_serial ||
+            info->current_serial <= info->previous_serial || !info->content_epoch)
+            return VDXRFG_E_REJECTED;
+        if (c->poisoned)
+            return VDXRFG_E_POISONED;
+        auto* atlas = static_cast<ID3D12Resource*>(info->current_atlas);
+        auto* producer = static_cast<ID3D12Fence*>(info->producer_fence);
+        if (atlas == c->input.Get() || atlas == c->guideInput.Get() || !sameDevice(c->device.Get(), atlas) ||
+            !sameDevice(c->device.Get(), producer))
+            return VDXRFG_E_REJECTED;
+        for (const auto& bank : c->outputs)
+            for (const auto& outputImage : bank)
+                if (atlas == outputImage.Get())
+                    return VDXRFG_E_REJECTED;
+        const auto source = atlas->GetDesc(), normal = c->input->GetDesc();
+        if (source.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || source.Width != normal.Width ||
+            source.Height != normal.Height || source.Format != normal.Format || source.DepthOrArraySize != 1 ||
+            source.MipLevels != 1 || source.SampleDesc.Count != 1)
+            return VDXRFG_E_REJECTED;
+        VDXRFG_SubmitInfoV3 provisional{};
+        std::copy_n(info->views, 2, provisional.views);
+        if (!viewsValid(*c, provisional))
+            return VDXRFG_E_REJECTED;
+        if (c->previousSerial != info->previous_serial || c->prepared.token || c->depthReconstruction ||
+            vdxrfg::pair_capture::nr::requested())
+            return S_FALSE;
+        const uint64_t full = c->ready->GetCompletedValue();
+        if (full == UINT64_MAX || producer->GetCompletedValue() == UINT64_MAX) {
+            c->poisoned = true;
+            return VDXRFG_E_POISONED;
+        }
+        if (!c->preparationContext)
+            c->preparationContext = preparationContextId();
+        if (!c->preparationContext || c->nextPreparation == UINT64_MAX)
+            return VDXRFG_E_REJECTED;
+        VDXRFG_PreparedV6 owned{sizeof(owned),
+                                VDXRFG_API_VERSION_6,
+                                c->preparationContext,
+                                c->nextPreparation,
+                                c->generation,
+                                info->previous_serial,
+                                info->current_serial,
+                                info->content_epoch};
+        ID3D12Fence* read = nullptr;
+        const HRESULT hr = c->synthesizer.prepare_flow(
+            atlas, producer, info->producer_value, normalizedViews(*c, provisional), &read, &owned.input_read_value);
+        if (hr == S_FALSE)
+            return S_FALSE;
+        if (hr == E_INVALIDARG)
+            return VDXRFG_E_REJECTED;
+        ++c->nextPreparation;
+        owned.input_read_fence = read;
+        *output = c->prepared = owned;
+        if (FAILED(hr)) {
+            c->poisoned = true;
+            c->preparationFailed = true;
+            return VDXRFG_E_POISONED;
+        }
+        return S_OK;
+    }
+
+    bool ownsPreparation(const Context* c, const VDXRFG_PreparedV6* r) noexcept {
+        if (!c || !r || r->struct_size < sizeof(*r) || r->api_version != VDXRFG_API_VERSION_6 || !r->token)
+            return false;
+        const auto& p = c->prepared;
+        return p.token == r->token && p.context_id == r->context_id && p.generation == r->generation &&
+               c->generation == r->generation && p.current_serial == r->current_serial &&
+               p.previous_serial == r->previous_serial && p.content_epoch == r->content_epoch &&
+               p.input_read_fence == r->input_read_fence && p.input_read_value == r->input_read_value;
+    }
+
+    HRESULT WINAPI cancel(void* handle, const VDXRFG_PreparedV6* receipt) noexcept {
+        auto* c = static_cast<Context*>(handle);
+        if (!ownsPreparation(c, receipt))
+            return VDXRFG_E_REJECTED;
+        if (c->poisoned)
+            return VDXRFG_E_POISONED;
+        discardPrepared(*c);
+        return S_OK;
+    }
+
+    HRESULT WINAPI commitPrepared(void* handle,
+                                  const VDXRFG_PreparedV6* receipt,
+                                  uint64_t epoch,
+                                  const VDXRFG_SubmitInfoV5* info,
+                                  VDXRFG_TicketV1* output) noexcept {
+        if (!output)
+            return E_POINTER;
+        *output = {};
+        auto* c = static_cast<Context*>(handle);
+        if (!ownsPreparation(c, receipt) || !info || !epoch ||
+            !vdxrfg::validDepthEnvelope(*info, c->version5 && c->guideInput) || invalidSubmitInput(c, &info->base) ||
+            !validCadence(c, &info->base) || c->nextToken == UINT64_MAX)
+            return VDXRFG_E_REJECTED;
+        if (c->poisoned)
+            return VDXRFG_E_POISONED;
+        if (epoch != receipt->content_epoch || info->base.serial != receipt->current_serial ||
+            c->previousSerial != receipt->previous_serial ||
+            !c->synthesizer.select_prepared_flow(normalizedViews(*c, info->base))) {
+            discardPrepared(*c);
+            return S_FALSE;
+        }
+        const HRESULT hr = submitImpl(c, &info->base, output, c->version5 ? info : nullptr, true);
+        if (!c->poisoned && hr != VDXRFG_E_REJECTED)
+            discardPrepared(*c);
+        return hr;
+    }
+
     HRESULT WINAPI destroy(void* handle) noexcept {
         auto context = static_cast<Context*>(handle);
+        if (context && context->preparationFailed) {
+            // A failed speculative call cannot invalidate already delivered
+            // ordinary tickets. Keep both owners until their true fences pass.
+            if (context->synthesizer.prepared_teardown_status() != S_OK)
+                return VDXRFG_E_POISONED;
+            for (const auto& lease : context->leases)
+                if (lease.ticket.token)
+                    return VDXRFG_E_BUSY;
+            if (FAILED(context->synthesizer.wait_for_idle()))
+                return VDXRFG_E_POISONED;
+            delete context;
+            return S_OK;
+        }
+        if (context && context->preparationContext && !context->poisoned) {
+            const auto status = context->synthesizer.prepared_teardown_status();
+            if (status == S_FALSE)
+                return VDXRFG_E_BUSY;
+            if (FAILED(status))
+                return VDXRFG_E_POISONED;
+        }
         if (context && context->initializationPoisoned) {
             if (FAILED(context->synthesizer.wait_for_idle())) {
                 return VDXRFG_E_POISONED;
@@ -1390,5 +1570,12 @@ extern "C" __declspec(dllexport) HRESULT WINAPI VDXRFG_GetApiV5(VDXRFG_ApiV5* ou
                            destroy,
                            outputReadiness};
     *output = api;
+    return S_OK;
+}
+
+extern "C" __declspec(dllexport) HRESULT WINAPI VDXRFG_GetApiV6(VDXRFG_ApiV6* output) noexcept {
+    if (!output || output->struct_size < sizeof(*output) || output->api_version != VDXRFG_API_VERSION_6)
+        return VDXRFG_E_REJECTED;
+    *output = {sizeof(*output), VDXRFG_API_VERSION_6, prepare, commitPrepared, cancel};
     return S_OK;
 }
