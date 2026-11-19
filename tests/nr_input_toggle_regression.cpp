@@ -20,6 +20,7 @@ namespace {
     DWORD requestedFrameGenerationBackend{};
     std::optional<DWORD> requestedFrameGenerationDepthMode;
     std::optional<DWORD> asyncSubmissionDisabledOverride;
+    bool forceSlowPathSwapchains{};
     bool preserveNrAppearance{};
     DWORD nrDepthSubmissionSetting{1};
     bool includeDepthInput = true;
@@ -28,6 +29,7 @@ namespace {
     unsigned colourTolerance{};
     std::array<std::array<unsigned, 4>, 2> observedColour{};
     bool expectDepth[2] = {true, true};
+    bool complementReadbackDepth[2]{};
     bool readSubmittedColour = true;
     bool checkOffColourEdges = false;
     bool allowQuadOnly = false;
@@ -42,6 +44,7 @@ namespace {
     // Optional bounded fixture extensions; retained tests use their original schedule.
     std::function<void(int)> beforeInputFrame;
     std::function<void(int)> afterInputFrame;
+    std::function<bool(int, XrResult)> acceptInputFrameFailure;
     std::function<void()> beforeFailureCleanup;
     std::function<void(XrResult)> afterFailureCleanup;
     std::function<bool(int)> inputFrameNrEnabled;
@@ -102,6 +105,8 @@ namespace {
             value = nrDepthSubmissionSetting;
         else if (setting == L"quirk_allow_static_swapchains_reuse")
             value = staticDepthReuse;
+        else if (setting == L"quirk_force_slowpath_swapchains" && forceSlowPathSwapchains)
+            value = 1;
         else
             return ERROR_FILE_NOT_FOUND;
         if (type)
@@ -244,7 +249,10 @@ namespace {
                             "Unexpected native projection depth type");
                     for (unsigned eye = 0; eye < 2; ++eye) {
                         if (expectDepth[eye])
-                            checkDepth(session, *reinterpret_cast<const ovrLayerEyeFovDepth*>(layers[i]), eye);
+                            checkDepth(session,
+                                       *reinterpret_cast<const ovrLayerEyeFovDepth*>(layers[i]),
+                                       eye,
+                                       complementReadbackDepth[eye]);
                         if (readSubmittedColour) {
                             readColor(session, *reinterpret_cast<const ovrLayerEyeFov*>(layers[i]), eye);
                         }
@@ -736,6 +744,7 @@ int VDXR_NR_TEST_ENTRYPOINT(int argc, char** argv) {
                                     "depth-left-only",
                                     "depth-restored"};
             const int frameCount = (mode == "toggle" ? 7 : 12) + additionalSteadyFrames;
+            int rejectedFrames = 0;
             for (int frame = 0; frame < frameCount; ++frame) {
                 if (beforeInputFrame)
                     beforeInputFrame(frame);
@@ -844,12 +853,17 @@ int VDXR_NR_TEST_ENTRYPOINT(int argc, char** argv) {
                 if (adjustFrameLayers) {
                     adjustFrameLayers(end, layer);
                 }
-                XR_CHECK(xrEndFrame(session, &end));
+                const auto endResult = xrEndFrame(session, &end);
+                if (XR_FAILED(endResult) && acceptInputFrameFailure && acceptInputFrameFailure(frame, endResult)) {
+                    ++rejectedFrames;
+                    continue;
+                }
+                checkXr(endResult, "xrEndFrame(session, &end)");
                 {
                     std::unique_lock lock(captureMutex);
                     require(ready.wait_for(lock,
                                            std::chrono::seconds(30),
-                                           [&] { return captured > frame || !captureFailure.empty(); }),
+                                            [&] { return captured > frame - rejectedFrames || !captureFailure.empty(); }),
                             "Native compositor readback timed out");
                     if (!captureFailure.empty())
                         throw std::runtime_error(captureFailure);

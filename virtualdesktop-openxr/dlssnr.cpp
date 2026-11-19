@@ -348,27 +348,32 @@ namespace virtualdesktop_openxr {
         m_nrSpatialSourceChains = {};
     }
 
+    void OpenXrRuntime::recoverNeuralRendering() {
+        if (!m_nrNativeNeedsDrain && !m_nrNativeNeedsFeatureReset && !m_nrSpatialNeedsDrain &&
+            !m_nrSpatialNeedsFeatureReset)
+            return;
+
+        // Dispatch the earlier input signal before draining the NR queue. The
+        // failed handoff may have left NR reading the private layer sources.
+        m_ovrSubmissionContext->Flush();
+        m_dlssnrContext->Flush();
+        if (m_nrNativePipeline)
+            m_nrNativePipeline->DiscardRecording();
+        if (m_nrSpatialPipeline)
+            m_nrSpatialPipeline->DiscardRecording();
+        releaseDlssnrFeatures();
+        m_nrNativeNeedsDrain = false;
+        m_nrNativeNeedsFeatureReset = false;
+        m_nrSpatialNeedsDrain = false;
+        m_nrSpatialNeedsFeatureReset = false;
+    }
+
     void OpenXrRuntime::upliftLayer(const XrSwapchainSubImage** views,
-                                    const XrSwapchainSubImage** depth,
-                                    const bool* depthInverted,
-                                    ovrLayerEyeFov& layer,
-                                    bool finalColour,
-                                    std::unique_lock<std::mutex>* producerLease) {
-        // Recovery precedes route selection: changing processing/format must not
-        // bypass an uncertain submission's retained descriptors and resources.
-        if (m_nrNativeNeedsDrain || m_nrNativeNeedsFeatureReset || m_nrSpatialNeedsDrain ||
-            m_nrSpatialNeedsFeatureReset) {
-            m_dlssnrContext->Flush();
-            if (m_nrNativePipeline)
-                m_nrNativePipeline->DiscardRecording();
-            if (m_nrSpatialPipeline)
-                m_nrSpatialPipeline->DiscardRecording();
-            releaseDlssnrFeatures();
-            m_nrNativeNeedsDrain = false;
-            m_nrNativeNeedsFeatureReset = false;
-            m_nrSpatialNeedsDrain = false;
-            m_nrSpatialNeedsFeatureReset = false;
-        }
+                                     const XrSwapchainSubImage** depth,
+                                     const bool* depthInverted,
+                                     ovrLayerEyeFov& layer,
+                                     bool finalColour,
+                                     std::unique_lock<std::mutex>* producerLease) {
         if (m_precompositor.dlssnrSettings.processingResolution < 100 &&
             upliftSpatialLayer(views, depth, depthInverted, layer, finalColour, producerLease)) {
             // Entering spatial mode already drained the previous native features

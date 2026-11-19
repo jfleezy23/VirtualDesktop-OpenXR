@@ -628,17 +628,21 @@ namespace virtualdesktop_openxr {
         XrResult xrLocateSpacesCommon(XrSession session,
                                       const XrSpacesLocateInfoKHR* locateInfo,
                                       XrSpaceLocationsKHR* spaceLocations);
+        XrResult locateSpaceAtPrediction(
+            XrSpace space, XrSpace baseSpace, XrTime time, XrSpaceLocation* location, XrTime prediction);
         XrSpaceLocationFlags locateSpace(const Space& xrSpace,
                                          const Space& xrBaseSpace,
                                          XrTime time,
                                          XrPosef& pose,
                                          XrSpaceVelocity* velocity = nullptr,
-                                         XrEyeGazeSampleTimeEXT* gazeSampleTime = nullptr) const;
+                                         XrEyeGazeSampleTimeEXT* gazeSampleTime = nullptr,
+                                         std::optional<XrTime> prediction = std::nullopt) const;
         XrSpaceLocationFlags locateSpaceToOrigin(const Space& xrSpace,
                                                  XrTime time,
                                                  XrPosef& pose,
                                                  XrSpaceVelocity* velocity,
-                                                 XrEyeGazeSampleTimeEXT* gazeSampleTime) const;
+                                                 XrEyeGazeSampleTimeEXT* gazeSampleTime,
+                                                 std::optional<XrTime> prediction = std::nullopt) const;
         XrSpaceLocationFlags getHmdPose(XrTime time, XrPosef& pose, XrSpaceVelocity* velocity) const;
         XrSpaceLocationFlags getControllerPose(int side, XrTime time, XrPosef& pose, XrSpaceVelocity* velocity) const;
         XrSpaceLocationFlags getEyeTrackerPose(XrTime time, XrPosef& pose, XrEyeGazeSampleTimeEXT* sampleTime) const;
@@ -807,6 +811,7 @@ namespace virtualdesktop_openxr {
                                 std::unique_lock<std::mutex>* producerLease = nullptr);
         void ensureDlssnrSwapchainResources(ovrTextureFormat format, const ovrSizei& resolution);
         void ensureSwapchainDlssnrResources(Swapchain& xrSwapchain, uint32_t slice);
+        void recoverNeuralRendering();
         void upliftLayer(const XrSwapchainSubImage** views,
                          const XrSwapchainSubImage** depth,
                          const bool* depthInverted,
@@ -831,7 +836,7 @@ namespace virtualdesktop_openxr {
         double m_predictedFrameDuration{0};
         ovrHmdDesc m_cachedHmdInfo{};
         ovrEyeRenderDesc m_cachedEyeInfo[xr::StereoView::Count]{};
-        mutable std::optional<float> m_lastKnownFloorHeight;
+        mutable std::optional<float> m_lastKnownFloorHeight; // protected by m_trackingCacheMutex
         LARGE_INTEGER m_qpcFrequency{};
         double m_ovrTimeFromQpcTimeOffset{0};
         double m_ovrTimeFromTimeSpecTimeOffset{0};
@@ -957,6 +962,9 @@ namespace virtualdesktop_openxr {
         // Swapchains and other graphics stuff.
         std::mutex m_swapchainsMutex;
         std::set<XrSwapchain> m_swapchains;
+        // Protected by m_swapchainsMutex. Unknown source-read completion cannot
+        // grant the application image ownership again before session teardown.
+        bool m_sourceReturnFailed{false};
 
         // Mirror window.
         std::atomic<bool> m_useMirrorWindow{false};
@@ -1135,12 +1143,18 @@ namespace virtualdesktop_openxr {
         std::vector<XrActionSet> m_activeActionSets;
         uint32_t m_actionSourcePriority[(xr::Side::Count + 1) * (size_t)ActionSourceIndex::Count]{};
         BodyTracking::BodyStateV2 m_cachedBodyState{};
-        XrTime m_lastPredictedDisplayTime{0};
+        std::atomic<XrTime> m_lastPredictedDisplayTime{0};
+        // Leaf lock: SDK/helper calls and other mutex acquisition stay outside it.
+        mutable std::mutex m_trackingCacheMutex;
         XrTime m_lastRequestedViewDisplayTime{0};
         std::chrono::high_resolution_clock::time_point m_lastControllerSeenTime[xr::Side::Count]{};
         mutable std::optional<XrPosef> m_lastValidHmdPose;
+        mutable XrSpaceLocationFlags m_lastValidHmdPoseFlags{};
+        mutable std::optional<XrTime> m_lastValidHmdPoseTime;
         mutable std::optional<XrPosef> m_lastValidControllerPose[xr::Side::Count];
+        mutable XrSpaceLocationFlags m_lastValidControllerPoseFlags[xr::Side::Count]{};
         mutable std::optional<XrView> m_lastValidViews;
+        std::mt19937_64 m_viewJiggleRandom{0};
         std::optional<float> m_lastSeenIpd{};
 
         // DLSS-NR

@@ -180,13 +180,33 @@ namespace virtualdesktop_openxr {
                 m_needStartAsyncSubmissionThread = false;
             }
 
-            // Wait for OVR to be ready for the next frame.
-            if (m_frameGenerationMode && m_fgTimelineReanchor.exchange(false)) {
-                m_fgNextReservedNativeId = std::max(m_fgWorkerGroupNativeId.load(), m_fgPublishedEndNativeId.load());
-                if (m_frameBegun > m_frameCompleted) {
-                    m_fgNextReservedNativeId += std::clamp(m_fgBegunReservation.multiplier, 1u, 4u);
+            // Capacity can release the frame lock while the worker advances
+            // its native frontier. Reconcile only after reacquiring that lock.
+            if (m_useAsyncSubmission && !m_useDeferredFrameWait.load(std::memory_order_relaxed)) {
+                const bool doRunningStart = m_useRunningStart.load(std::memory_order_relaxed);
+                const double predictedFrameDuration = m_predictedFrameDuration;
+                lock.unlock();
+                if (m_frameGenerationMode) {
+                    waitForFrameGenerationCapacity();
+                } else {
+                    waitForAsyncSubmissionIdle(doRunningStart, predictedFrameDuration);
                 }
-                m_fgLastReservedTime = 0;
+                lock.lock();
+            }
+            if (m_frameGenerationMode) {
+                const bool reanchor = m_fgTimelineReanchor.exchange(false);
+                auto unissuedNativeId = std::max(m_fgWorkerGroupNativeId.load(), m_fgPublishedEndNativeId.load());
+                if (m_frameBegun > m_frameCompleted) {
+                    // Even a rejected reservation will publish one fallback
+                    // cycle if this begun frame ends instead of being discarded.
+                    unissuedNativeId += std::clamp(m_fgBegunReservation.multiplier, 1u, 4u);
+                }
+                const auto nextNativeId =
+                    reanchor ? unissuedNativeId : std::max(m_fgNextReservedNativeId, unissuedNativeId);
+                if (reanchor || nextNativeId != m_fgNextReservedNativeId) {
+                    m_fgNextReservedNativeId = nextNativeId;
+                    m_fgLastReservedTime = 0;
+                }
             }
             const long long ovrFrameId =
                 m_frameGenerationMode ? static_cast<long long>(m_fgNextReservedNativeId) : m_frameWaited;
@@ -198,17 +218,6 @@ namespace virtualdesktop_openxr {
                 lock.lock();
                 TraceLoggingWriteStop(waitToBeginFrame, "OVR_WaitToBeginFrame");
             } else {
-                if (!m_useDeferredFrameWait.load(std::memory_order_relaxed)) {
-                    const bool doRunningStart = m_useRunningStart.load(std::memory_order_relaxed);
-                    const double predictedFrameDuration = m_predictedFrameDuration;
-                    lock.unlock();
-                    if (m_frameGenerationMode) {
-                        waitForFrameGenerationCapacity();
-                    } else {
-                        waitForAsyncSubmissionIdle(doRunningStart, predictedFrameDuration);
-                    }
-                    lock.lock();
-                }
                 TraceLoggingWrite(g_traceProvider, "AcquiredFrame", TLArg(ovrFrameId, "FrameId"));
             }
 
@@ -259,12 +268,13 @@ namespace virtualdesktop_openxr {
                     : ovrTimeToXrTime(predictedDisplayTime);
 
             // Workaround: during early calls, OVR times might violate OpenXR rules.
-            if (frameState->predictedDisplayTime <= m_lastPredictedDisplayTime) {
-                frameState->predictedDisplayTime = m_lastPredictedDisplayTime + 1;
+            const auto lastPredictedDisplayTime = m_lastPredictedDisplayTime.load(std::memory_order_relaxed);
+            if (frameState->predictedDisplayTime <= lastPredictedDisplayTime) {
+                frameState->predictedDisplayTime = lastPredictedDisplayTime + 1;
                 m_fgWaitedReservation.valid = false;
                 m_fgWaitedReservation.reason = PredictionReservationReason::monotonic;
             }
-            m_lastPredictedDisplayTime = frameState->predictedDisplayTime;
+            m_lastPredictedDisplayTime.store(frameState->predictedDisplayTime, std::memory_order_relaxed);
             m_fgWaitedReservation.returnedDisplayTime = frameState->predictedDisplayTime;
 
             // We always use the native frame duration, regardless of Smart Smoothing.
@@ -546,6 +556,9 @@ namespace virtualdesktop_openxr {
             });
             std::optional<nr_capture::SourceReturnGuard> nrSourceReturnGuard;
             const auto initializePrecompositor = [&](const DlssnrSettings* acceptedSettings) {
+                // A prior failed NR handoff must settle before any new source
+                // resolves, even if NR is now disabled for this frame.
+                recoverNeuralRendering();
                 m_precompositor.displayTime = frameEndInfo->displayTime;
                 m_precompositor.isFirstProjectionLayer = true;
                 m_precompositor.layerIndex = 0;
@@ -669,13 +682,14 @@ namespace virtualdesktop_openxr {
                 if (!earlySourcesPending)
                     return;
                 try {
-                    if (!contextLease.owns_lock())
+                    if (m_frameGenerationMode && !contextLease.owns_lock())
                         lockFrameGenerationProducerContext(contextLease);
                     // Error-only protection includes trailing overlay reads,
                     // not just the first projection's NR input copy.
                     protectFrameGenerationSources(true);
                     earlySourcesPending = false;
                 } catch (...) {
+                    m_sourceReturnFailed = true; // xrEndFrame still owns m_swapchainsMutex.
                     const auto failure = std::current_exception();
                     {
                         std::unique_lock stateLock(m_asyncSubmissionMutex);
@@ -683,7 +697,7 @@ namespace virtualdesktop_openxr {
                             m_asyncSubmissionError = failure;
                         m_asyncSubmissionCondVar.notify_all();
                     }
-                    ErrorLog("Failed to protect unpublished NR source reads; stopping submission.\n");
+                    ErrorLog("Failed to protect unpublished source reads; stopping submission.\n");
                 }
             });
             auto cancelEarlyFlow = MakeScopeGuard([&] {
@@ -853,8 +867,10 @@ namespace virtualdesktop_openxr {
                 !stagedEarlyNr && tracePrecomposition && m_gpuTimerPrecomposition[m_currentTimerIndex];
             if (recordPrecomposition)
                 m_gpuTimerPrecomposition[m_currentTimerIndex]->start();
-            if (!stagedEarlyNr)
+            if (!stagedEarlyNr) {
                 initializePrecompositor(frameNrSettings ? &*frameNrSettings : nullptr);
+                earlySourcesPending = m_frameGenerationMode || m_deliveryTransport != nullptr;
+            }
 
             const auto layerResult = processLayers(stagedEarlyNr ? LayerStage::Pose : LayerStage::Complete);
             if (XR_FAILED(layerResult))
@@ -1137,6 +1153,14 @@ namespace virtualdesktop_openxr {
         const bool needUpscaling = m_precompositor.isFirstProjectionLayer && (canUpscale || canSharpen);
         const bool needUplifting = m_precompositor.isFirstProjectionLayer && m_precompositor.dlssnrSettings.enabled;
 
+        // Guide camera eligibility and compositor restoration must use the same
+        // IPD sample even if a concurrent locate publishes another view.
+        std::optional<float> lastSeenIpd;
+        if (writePose) {
+            std::lock_guard cacheLock(m_trackingCacheMutex);
+            lastSeenIpd = m_lastSeenIpd;
+        }
+
         // FG-only and ordinary sessions do not need NGX or an NR device. Keep
         // live NR toggling by initializing before the first NR resource import.
         if (colour && needUplifting && !m_dlssnrResourcesInitialized) {
@@ -1343,7 +1367,7 @@ namespace virtualdesktop_openxr {
                                 // coordinates, including reduced working grids and
                                 // coverage crops. FSR then resizes the complete rect.
                                 // Altered IPD changes the camera rays and is declined.
-                                guide.affineVerified = !m_lastSeenIpd;
+                                guide.affineVerified = !lastSeenIpd;
                             }
                         }
 
@@ -1385,9 +1409,9 @@ namespace virtualdesktop_openxr {
 
         // Restore the original IPD, otherwise the compositor will reproject the altered IPD
         // into the real IPD.
-        if (writePose && m_lastSeenIpd) {
+        if (writePose && lastSeenIpd) {
             overrideIpd(
-                layer.EyeFov.RenderPose[ovrEye_Left], layer.EyeFov.RenderPose[ovrEye_Right], m_lastSeenIpd.value());
+                layer.EyeFov.RenderPose[ovrEye_Left], layer.EyeFov.RenderPose[ovrEye_Right], lastSeenIpd.value());
         }
 
         // Run Neural Rendering if needed.

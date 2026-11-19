@@ -47,6 +47,8 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_FUNCTION_UNSUPPORTED;
         }
 
+        std::lock_guard lock(m_frameMutex);
+
         if (!m_sessionCreated || session != (XrSession)1) {
             return XR_ERROR_HANDLE_INVALID;
         }
@@ -77,6 +79,8 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_FUNCTION_UNSUPPORTED;
         }
 
+        std::lock_guard lock(m_frameMutex);
+
         if (!m_sessionCreated || session != (XrSession)1) {
             return XR_ERROR_HANDLE_INVALID;
         }
@@ -99,11 +103,15 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_FUNCTION_UNSUPPORTED;
         }
 
+        std::lock_guard lock(m_frameMutex);
+
         if (!m_sessionCreated || session != (XrSession)1) {
             return XR_ERROR_HANDLE_INVALID;
         }
 
-        if (std::abs(displayRefreshRate - m_displayRefreshRate) > FLT_EPSILON) {
+        // Zero means no preference. All other requests must name a supported rate.
+        if (displayRefreshRate != 0.f &&
+            (!std::isfinite(displayRefreshRate) || std::abs(displayRefreshRate - m_displayRefreshRate) > FLT_EPSILON)) {
             return XR_ERROR_DISPLAY_REFRESH_RATE_UNSUPPORTED_FB;
         }
 

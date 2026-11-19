@@ -373,6 +373,10 @@ namespace virtualdesktop_openxr {
             ovr_Destroy(m_ovrSession);
             m_ovrSession = nullptr;
         }
+        {
+            std::lock_guard swapchainLock(m_swapchainsMutex);
+            m_sourceReturnFailed = false;
+        }
         m_sessionResourcesRequireCleanup = false;
     }
 

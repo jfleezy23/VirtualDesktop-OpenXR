@@ -101,7 +101,7 @@ namespace virtualdesktop_openxr {
         // One finalized colour production under the runtime's source lease.
         // Resource pointer reuse alone must never reproduce this identity.
         uint64_t contentEpoch{};
-        bool nrEnabled{}; // Private observer qualification; never changes NR configuration.
+        bool nrEnabled{}; // NR state of this finalized projection.
         vdxrfg::pair_capture::Entry entry{};
         int64_t time{}, period{};
         FrameGenerationSlotPlan slots;
@@ -113,6 +113,7 @@ namespace virtualdesktop_openxr {
         uint64_t consumerValue{};
         uint64_t ownerGeneration{};
         std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, 4> destinations;
+        bool nrEnabled{};
     };
 
     // The caller serializes methods and owns the submission-context lease.
@@ -186,6 +187,9 @@ namespace virtualdesktop_openxr {
         HRESULT shutdown(HANDLE* pendingProducer = nullptr) noexcept;
         HRESULT getStatistics(VDXRFG_StatisticsV1& statistics) const noexcept;
         bool ready(const OwnedFrameTransaction& transaction) const noexcept;
+        // Exact atlas handoff for the real delivery copy. A pending value does
+        // not enqueue a wait or require full synthetic output completion.
+        HRESULT realInputReady(const OwnedFrameTransaction& transaction) noexcept;
         // Call under the context lease. BUSY borrows a State-owned event;
         // wait outside the lease, then recheck here. A wake alone proves nothing.
         // registerPending=false observes readiness without registering an event.

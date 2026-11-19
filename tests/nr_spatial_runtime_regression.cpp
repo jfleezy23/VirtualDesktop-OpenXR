@@ -15,13 +15,15 @@ namespace virtualdesktop_openxr::log {
 namespace {
 #ifdef VDXR_NR_SPATIAL_CANDIDATE
     // Actual queue/consumer failure boundaries. A real queue gate keeps submitted
-    // spatial work pending until teardown enters its native completion drain.
+    // spatial work pending until teardown or retry enters its native completion drain.
     struct SpatialSubmissionFailure {
         using Boundary = virtualdesktop_openxr::RuntimeInputRegression::SpatialSubmissionBoundary;
         using Execute = void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
         using Signal = HRESULT(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, ID3D12Fence*, UINT64);
         using Wait = HRESULT(STDMETHODCALLTYPE*)(ID3D11DeviceContext4*, ID3D11Fence*, UINT64);
         using Event = HRESULT(STDMETHODCALLTYPE*)(ID3D12Fence*, UINT64, HANDLE);
+        using Copy = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext4*, ID3D11Resource*, UINT, UINT, UINT, UINT,
+                                              ID3D11Resource*, UINT, const D3D11_BOX*);
         struct Retired {
             std::atomic<unsigned> resources{}, lists{};
         };
@@ -64,16 +66,19 @@ namespace {
         Signal originalSignal{};
         Wait originalWait{};
         Event originalEvent{};
+        Copy originalCopy{};
         ComPtr<ID3D12Fence> gate;
+        ComPtr<ID3D12Fence> retryBoundary;
         std::shared_ptr<Retired> retired = std::make_shared<Retired>();
         std::set<ID3D12Object*> watchedResources, watchedLists;
         std::thread releaseThread;
-        std::atomic<bool> injected{}, enteredDrain{}, cleanupStarted{}, gateReleased{}, timedOut{}, retainedAtDrain{};
-        bool signalFailure{}, native{}, installed{}, retainedAtFailure{}, cleanupSucceeded{};
+        std::atomic<bool> injected{}, enteredDrain{}, recoveryExpected{}, gateReleased{}, timedOut{}, retainedAtDrain{};
+        bool signalFailure{}, native{}, retry{}, retryStarted{}, retryCopied{}, installed{}, retainedAtFailure{},
+            cleanupSucceeded{};
         unsigned executions{}, acceptedSignals{}, consumerWaits{}, failures{};
         UINT64 lastAcceptedSignal{}, rejectedSignal{};
-        explicit SpatialSubmissionFailure(bool failSignal, bool nativeRoute = false)
-            : signalFailure(failSignal), native(nativeRoute) {
+        SpatialSubmissionFailure(bool failSignal, bool nativeRoute, bool retryFrame)
+            : signalFailure(failSignal), native(nativeRoute), retry(retryFrame) {
         }
         void check(bool condition, const char* message) {
             if (!condition) {
@@ -86,6 +91,9 @@ namespace {
             if (queue == self.target.queue)
                 ++self.executions;
             self.originalExecute(queue, count, lists);
+            if (queue == self.target.queue && self.retry && self.executions == 1)
+                self.check(SUCCEEDED(self.originalSignal(queue, self.retryBoundary.Get(), 1)),
+                           "must record a private test completion marker after the first Execute");
         }
         static HRESULT STDMETHODCALLTYPE signal(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64 value) {
             auto& self = *active;
@@ -119,9 +127,36 @@ namespace {
         }
         static HRESULT STDMETHODCALLTYPE event(ID3D12Fence* fence, UINT64 value, HANDLE handle) {
             auto& self = *active;
-            if (fence == self.target.completion && self.injected && self.cleanupStarted)
+            if (fence == self.target.completion && self.injected && self.recoveryExpected)
                 self.enteredDrain = true;
             return self.originalEvent(fence, value, handle);
+        }
+        static void STDMETHODCALLTYPE copy(ID3D11DeviceContext4* context,
+                                           ID3D11Resource* destination,
+                                           UINT dstSubresource,
+                                           UINT x,
+                                           UINT y,
+                                           UINT z,
+                                           ID3D11Resource* source,
+                                           UINT srcSubresource,
+                                           const D3D11_BOX* box) {
+            auto& self = *active;
+            if (context == self.target.consumer && self.retryStarted && !self.retryCopied) {
+                self.retryCopied = true;
+                const bool safe = self.enteredDrain && self.retryBoundary->GetCompletedValue() == 1;
+                self.check(safe, "retry attempted a source resolve before draining the rejected NR handoff");
+                // A failing control must not write an in-use resource. It can
+                // still finish readback and teardown after its gated NR work.
+                if (!safe) {
+                    context->Flush();
+                    wil::unique_handle complete(CreateEventW(nullptr, FALSE, FALSE, nullptr));
+                    if (!complete || FAILED(self.gate->Signal(1)) ||
+                        FAILED(self.retryBoundary->SetEventOnCompletion(1, complete.get())) ||
+                        WaitForSingleObject(complete.get(), 5000) != WAIT_OBJECT_0)
+                        std::_Exit(2);
+                }
+            }
+            self.originalCopy(context, destination, dstSubresource, x, y, z, source, srcSubresource, box);
         }
         void observe(ID3D12Object* object, bool list) {
             auto& set = list ? watchedLists : watchedResources;
@@ -139,6 +174,8 @@ namespace {
             // ID3D11DeviceContext4 vtable slots147/148 are Signal/Wait in the retained Windows SDK.
             originalWait = reinterpret_cast<Wait>((*reinterpret_cast<void***>(target.consumer))[148]);
             originalEvent = reinterpret_cast<Event>((*reinterpret_cast<void***>(target.completion))[9]);
+            // The retained Windows SDK places CopySubresourceRegion at slot 46.
+            originalCopy = reinterpret_cast<Copy>((*reinterpret_cast<void***>(target.consumer))[46]);
             active = this;
             require(DetourTransactionBegin() == NO_ERROR, "native boundary hook transaction begin failed");
             LONG status = DetourUpdateThread(GetCurrentThread());
@@ -150,6 +187,8 @@ namespace {
                 status = DetourAttach(reinterpret_cast<PVOID*>(&originalWait), wait);
             if (status == NO_ERROR)
                 status = DetourAttach(reinterpret_cast<PVOID*>(&originalEvent), event);
+            if (status == NO_ERROR && retry)
+                status = DetourAttach(reinterpret_cast<PVOID*>(&originalCopy), copy);
             if (status == NO_ERROR)
                 status = DetourTransactionCommit();
             else
@@ -159,6 +198,8 @@ namespace {
             ComPtr<ID3D12Device> device;
             checkHr(target.completion->GetDevice(IID_PPV_ARGS(&device)));
             checkHr(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)));
+            if (retry)
+                checkHr(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&retryBoundary)));
             checkHr(target.queue->Wait(gate.Get(), 1));
             releaseThread = std::thread([this] {
                 const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -170,15 +211,21 @@ namespace {
                 gateReleased = SUCCEEDED(gate->Signal(1));
             });
         }
-        void beforeCleanup() {
+        void beforeRecovery() {
             retainedAtFailure =
                 virtualdesktop_openxr::RuntimeInputRegression::spatialFailureOwnsResources(signalFailure, native) &&
                 !retired->resources && !retired->lists;
-            cleanupStarted = true;
+            recoveryExpected = true;
         }
         void finish() {
             if (releaseThread.joinable())
                 releaseThread.join();
+            if (retry) {
+                check(retryStarted && retryCopied && retainedAtFailure && enteredDrain && retainedAtDrain &&
+                          gateReleased && !timedOut,
+                      "retry must preserve the failed submission through an observed drain before copying sources");
+                return;
+            }
             check(injected && executions == 1, "fault must be injected into exactly one actual NR submission");
             check(cleanupSucceeded && retainedAtFailure,
                   "failed frame must retain resources and correct recovery flags");
@@ -216,6 +263,8 @@ namespace {
                 status = DetourDetach(reinterpret_cast<PVOID*>(&originalWait), wait);
             if (status == NO_ERROR)
                 status = DetourDetach(reinterpret_cast<PVOID*>(&originalEvent), event);
+            if (status == NO_ERROR && retry)
+                status = DetourDetach(reinterpret_cast<PVOID*>(&originalCopy), copy);
             if (status == NO_ERROR)
                 status = DetourTransactionCommit();
             else
@@ -521,12 +570,14 @@ int main(int argc, char** argv) {
     try {
         require(argc == 4,
                 "Usage: nr_spatial_runtime_regression <private-backend-folder> <state> "
-                "<native100|sequence|evaluate-failure|create-failure|signal-failure|wait-failure|"
-                "native-create-failure|native-evaluate-failure|native-signal-failure|native-wait-failure>");
+                "<native100|sequence|evaluate-failure|create-failure|[native-]signal-failure|[native-]wait-failure|"
+                "[native-]wait-retry-off|[native-]signal-retry-off|native-create-failure|native-evaluate-failure>");
         const std::string mode = argv[3];
         const bool nativeFault = mode.rfind("native-", 0) == 0;
         const std::string fault = nativeFault ? mode.substr(7) : mode;
-        const bool failSubmission = fault == "signal-failure" || fault == "wait-failure";
+        const bool retryFrame = fault == "wait-retry-off" || fault == "signal-retry-off";
+        const bool signalFailure = fault == "signal-failure" || fault == "signal-retry-off";
+        const bool failSubmission = signalFailure || fault == "wait-failure" || retryFrame;
         require(mode == "native100" || mode == "sequence" || mode == "evaluate-failure" || mode == "create-failure" ||
                     failSubmission || mode == "native-create-failure" || mode == "native-evaluate-failure",
                 "Unknown spatial runtime mode");
@@ -538,9 +589,28 @@ int main(int argc, char** argv) {
         std::unique_ptr<SpatialSubmissionFailure> submission;
         std::unique_ptr<NativePreparationFailure> preparation;
         if (failSubmission) {
-            submission = std::make_unique<SpatialSubmissionFailure>(fault == "signal-failure", nativeFault);
-            beforeFailureCleanup = [&] { submission->beforeCleanup(); };
-            afterFailureCleanup = [&](XrResult result) { submission->cleanupSucceeded = result == XR_SUCCESS; };
+            submission = std::make_unique<SpatialSubmissionFailure>(signalFailure, nativeFault, retryFrame);
+            if (retryFrame) {
+                asyncSubmissionDisabledOverride = 0;
+                nrDepthSubmissionSetting = 0;
+                // Test recovery of private resolve textures. Do not expose the
+                // failed reader to an application write through a fast-path alias.
+                forceSlowPathSwapchains = true;
+                acceptInputFrameFailure = [&](int frame, XrResult result) {
+                    if (frame != 8 || result != XR_ERROR_RUNTIME_FAILURE || !submission->injected)
+                        return false;
+                    {
+                        std::lock_guard lock(captureMutex);
+                        require(captured == 8, "failed NR frame must not present a partial image");
+                    }
+                    submission->beforeRecovery();
+                    submission->retryStarted = true;
+                    return true;
+                };
+            } else {
+                beforeFailureCleanup = [&] { submission->beforeRecovery(); };
+                afterFailureCleanup = [&](XrResult result) { submission->cleanupSucceeded = result == XR_SUCCESS; };
+            }
         } else if (nativeFault) {
             preparation = std::make_unique<NativePreparationFailure>();
             beforeFailureCleanup = [&] { preparation->beforeCleanup(); };
@@ -551,12 +621,18 @@ int main(int argc, char** argv) {
 #endif
         additionalSteadyFrames = 12;
         checkOffColourEdges = checkEnabledColourIdentity = true;
+#ifdef VDXR_NR_SPATIAL_CANDIDATE
+        // Both inputs cover .1 to 100 units, in opposite depth encodings.
+        // The compositor's one reversed encoding complements the left eye.
+        complementReadbackDepth[0] = true;
+#endif
         refreshColourEachFrame = true;
         expectedOffColour = {{{29, 61, 101, 255}, {173, 83, 37, 255}}};
-        inputFrameNrEnabled = [](int) { return true; };
+        inputFrameNrEnabled = [&](int frame) { return !retryFrame || frame != 9; };
         beforeInputFrame = [&](int frame) { probe.before(frame); };
         afterInputFrame = [&](int frame) {
-            probe.after(frame);
+            if (!retryFrame || frame != 9)
+                probe.after(frame);
 #ifdef VDXR_NR_SPATIAL_CANDIDATE
             if (submission && frame == 7)
                 submission->arm();
@@ -584,6 +660,16 @@ int main(int argc, char** argv) {
             end.layers = &header;
         };
         observeProjection = [&](const auto& layer) {
+            if (!enabled.load())
+                return;
+            if (complementReadbackDepth[0] && layer.Header.Type == ovrLayerType_EyeFovDepth) {
+                const auto& projection = reinterpret_cast<const ovrLayerEyeFovDepth&>(layer).ProjectionDesc;
+                const auto closeDepth = projection.Projection23 / .1 - projection.Projection22;
+                const auto farDepth = projection.Projection23 / 100. - projection.Projection22;
+                require(projection.Projection32 == -1.f && std::abs(closeDepth - 1.) < .0001 &&
+                            std::abs(farDepth) < .0001,
+                        "combined compositor depth must encode .1 to 100 in reversed order");
+            }
             for (unsigned eye = 0; eye < 2; ++eye) {
                 require(layer.Viewport[eye].Size.w == (eye ? 480 : 512) &&
                             layer.Viewport[eye].Size.h == (eye ? 496 : 512),
@@ -593,6 +679,8 @@ int main(int argc, char** argv) {
             }
         };
         observeSubmittedColour = [](const auto& desc, unsigned) {
+            if (!enabled.load())
+                return;
             require(desc.Width == 1024 && desc.Height == 512,
                     "final compositor resource must remain the native double-wide bank");
         };
@@ -601,6 +689,7 @@ int main(int argc, char** argv) {
         const auto result = retainedInputMain(5, arguments);
         beforeInputFrame = afterInputFrame = {};
         inputFrameNrEnabled = {};
+        acceptInputFrameFailure = {};
         observeProjection = {};
         observeSubmittedColour = {};
         adjustFrameLayers = {};
@@ -614,12 +703,13 @@ int main(int argc, char** argv) {
         if (preparation)
             preparation->finish();
 #endif
-        require(result == (probe.failEvaluation || probe.failCreation || failSubmission ? 1 : 0),
+        require(result == (probe.failEvaluation || probe.failCreation || (failSubmission && !retryFrame) ? 1 : 0),
                 "public spatial runtime fixture returned unexpected status");
         require(probe.features.empty() && probe.creations == probe.releases,
                 "normal teardown must release every created feature exactly once");
         require(probe.evaluations == (probe.failEvaluation ? 16
                                       : probe.failCreation ? (nativeFault ? 0 : 10)
+                                       : retryFrame         ? 36
                                       : failSubmission     ? 18
                                                            : 38),
                 "bounded run must observe the exact expected stereo evaluation count");
@@ -631,7 +721,9 @@ int main(int argc, char** argv) {
             require(probe.injectedFailure && captured == (nativeFault ? 0 : 5),
                     "failed feature creation must propagate without publishing a stale native output");
         }
-        if (failSubmission) {
+        if (retryFrame) {
+            require(captured == 18, "retry must continue submitting fresh stereo images after the rejected frame");
+        } else if (failSubmission) {
             require(captured == 8, "failed native submission must not publish partial or stale final output");
         }
         if (!(nativeFault && probe.failCreation)) {

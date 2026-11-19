@@ -80,6 +80,13 @@ run each executable with `<assets> <new-state-directory> 4 nr-off colour d3d11`.
 image from a pending selected image while later GPU work is gated. Fence completion is observed after releasing
 the GPU gate with the producer lease still held; these tests do not establish headset display timing.
 
+Build `nr_fg_retained_stereo_regression` with `build-fg-runtime-fixtures.py`, then run it in a bounded process with
+`<OVRNull-directory> <FG-DLL> <mode> [2|3|4]`. Modes are `colour`, `depth`, `consecutive`, `catch-up`,
+`pre-deadline`, `history-change`, `nr-off`, `steady`, `warmup`, and `slow-end` (4x). A fixture-owned GPU fence holds the next real input
+while the actual presenter submits the retained colour, depth and pose through rotating OVRNull swapchains.
+Check the independent presentation queue, native slot order and fresh-image recovery. This fixture needs the
+NVIDIA FG module and GPU. NR readiness is simulated by gating input, so it does not exercise vendor NR inference.
+
 `nr_fg_early_dispatch_regression` checks the actual `xrEndFrame` ordering with software D3D11/D3D12 devices.
 It covers 96 cases across 2X/3X/4X, NR enabled/disabled, error/cancellation, and excluded API/device paths.
 While producer admission is closed, only an eligible D3D11 application's context may flush; submission operations,

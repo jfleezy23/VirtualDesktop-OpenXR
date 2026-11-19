@@ -59,7 +59,9 @@ namespace {
         decltype(&ovr_GetDevicePoses) poses{};
         decltype(&ovr_GetTrackingOriginType) origin{};
         decltype(&ovr_GetFloat) configFloat{};
-        PoseProvider(const wchar_t* backendDirectory) {
+        decltype(&ovr_GetDevicePoses) replacementPoses;
+        PoseProvider(const wchar_t* backendDirectory, decltype(&ovr_GetDevicePoses) replacement = fixtureDevicePoses)
+            : replacementPoses(replacement) {
             ovrInitParams init{};
             init.Flags = ovrInit_RequestVersion;
             init.RequestedMinorVersion = OVR_MINOR_VERSION;
@@ -75,7 +77,7 @@ namespace {
             require(poses && origin && configFloat, "OVR backend pose/origin/config exports missing");
             require(DetourTransactionBegin() == NO_ERROR, "Pose detour begin failed");
             const auto updated = DetourUpdateThread(GetCurrentThread());
-            const auto attachedPoses = DetourAttach(reinterpret_cast<PVOID*>(&poses), fixtureDevicePoses);
+            const auto attachedPoses = DetourAttach(reinterpret_cast<PVOID*>(&poses), replacementPoses);
             const auto attachedOrigin = DetourAttach(reinterpret_cast<PVOID*>(&origin), fixtureTrackingOrigin);
             const auto attachedConfig = DetourAttach(reinterpret_cast<PVOID*>(&configFloat), fixtureFloat);
             if (updated || attachedPoses || attachedOrigin || attachedConfig) {
@@ -87,7 +89,7 @@ namespace {
         ~PoseProvider() {
             const auto begun = DetourTransactionBegin();
             const auto updated = DetourUpdateThread(GetCurrentThread());
-            const auto detachedPoses = DetourDetach(reinterpret_cast<PVOID*>(&poses), fixtureDevicePoses);
+            const auto detachedPoses = DetourDetach(reinterpret_cast<PVOID*>(&poses), replacementPoses);
             const auto detachedOrigin = DetourDetach(reinterpret_cast<PVOID*>(&origin), fixtureTrackingOrigin);
             const auto detachedConfig = DetourDetach(reinterpret_cast<PVOID*>(&configFloat), fixtureFloat);
             const auto committed = DetourTransactionCommit();
@@ -1787,6 +1789,97 @@ namespace virtualdesktop_openxr {
             require(runtime.xrDestroySession(session()) == XR_SUCCESS, "Velocity-offset session cleanup failed");
         }
 
+        static void predictionPoseTime(const wchar_t* backendDirectory) {
+            OpenXrRuntime runtime;
+            seed(runtime);
+            static OpenXrRuntime* publishingRuntime;
+            static std::array<double, 2> queryTimes;
+            static unsigned queries;
+            publishingRuntime = &runtime;
+            auto clearRuntime = MakeScopeGuard([&] { publishingRuntime = nullptr; });
+            const auto timedPoses = [](ovrSession session,
+                                       ovrTrackedDeviceType* devices,
+                                       int count,
+                                       double time,
+                                       ovrPoseStatef* poses) -> ovrResult {
+                if (queries < queryTimes.size())
+                    queryTimes[queries] = time;
+                if (++queries == 1) {
+                    // Model the next Wait publishing its timestamp between the two backend reads.
+                    publishingRuntime->m_lastPredictedDisplayTime = 20'000'000'000;
+                }
+                const auto result = fixtureDevicePoses(session, devices, count, time, poses);
+                if (OVR_SUCCESS(result))
+                    for (int i = 0; i < count; ++i)
+                        poses[i].ThePose.Position.y = static_cast<float>(time);
+                return result;
+            };
+            PoseProvider provider(backendDirectory, timedPoses);
+            XrReferenceSpaceCreateInfo info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+            info.poseInReferenceSpace.orientation.w = 1.f;
+            XrSpace view{}, local{};
+            info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+            require(runtime.xrCreateReferenceSpace(session(), &info, &view) == XR_SUCCESS, "Create VIEW");
+            info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
+            require(runtime.xrCreateReferenceSpace(session(), &info, &local) == XR_SUCCESS, "Create LOCAL");
+            const auto check = [&](XrTime published,
+                                   XrTime requested,
+                                   double expectedTime,
+                                   unsigned expectedQueries,
+                                   float expectedHeight,
+                                   const char* label) {
+                runtime.m_lastPredictedDisplayTime = published;
+                runtime.m_lastKnownFloorHeight.reset(); // LOCAL infers eye height from a second HMD query.
+                queryTimes = {};
+                queries = 0;
+                XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+                require(runtime.xrLocateSpace(view, local, requested, &location) == XR_SUCCESS, "Locate VIEW in LOCAL");
+                std::cout << label << " queries=" << queries << " times=" << queryTimes[0] << ',' << queryTimes[1]
+                          << " relativeHeight=" << location.pose.position.y << '\n';
+                expect((location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) && queries == expectedQueries &&
+                           queryTimes[0] == expectedTime && (queries == 1 || queryTimes[1] == expectedTime) &&
+                           location.pose.position.y == expectedHeight,
+                       label);
+            };
+            check(10'000'000'000, 4'000'000'000, 9., 2, 0.f, "relative pose uses one clamped time");
+            check(0, 4'000'000'000, 4., 2, 0.f, "startup pose retains its requested time");
+            check(10'000'000'000, 1, 9., 1, 9.f, "time-one floor-height workaround uses the raw request");
+            XrSpace secondView{}, stage{};
+            info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+            info.poseInReferenceSpace.position.x = 1.f;
+            require(runtime.xrCreateReferenceSpace(session(), &info, &secondView) == XR_SUCCESS, "Create offset VIEW");
+            info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+            info.poseInReferenceSpace.position.x = 0.f;
+            require(runtime.xrCreateReferenceSpace(session(), &info, &stage) == XR_SUCCESS, "Create STAGE");
+            const XrSpace spaces[] = {view, secondView};
+            XrSpacesLocateInfo locate{XR_TYPE_SPACES_LOCATE_INFO};
+            locate.baseSpace = stage;
+            locate.time = 4'000'000'000;
+            locate.spaceCount = 2;
+            locate.spaces = spaces;
+            XrSpaceLocationData data[2]{};
+            XrSpaceLocations locations{XR_TYPE_SPACE_LOCATIONS};
+            locations.locationCount = 2;
+            locations.locations = data;
+            runtime.m_apiMinor = 1;
+            runtime.m_lastPredictedDisplayTime = 10'000'000'000;
+            queryTimes = {};
+            queries = 0;
+            require(runtime.xrLocateSpaces(session(), &locate, &locations) == XR_SUCCESS, "Locate two VIEW spaces");
+            std::cout << "batch times=" << queryTimes[0] << ',' << queryTimes[1]
+                      << " heights=" << data[0].pose.position.y << ',' << data[1].pose.position.y << '\n';
+            expect(queries == 2 && queryTimes[0] == 9. && queryTimes[1] == 9. &&
+                       (data[0].locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
+                       (data[1].locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
+                       data[0].pose.position.y == 9.f && data[1].pose.position.y == 9.f,
+                   "all spaces in one batch use the same clamped time");
+            require(runtime.xrDestroySpace(secondView) == XR_SUCCESS && runtime.xrDestroySpace(stage) == XR_SUCCESS,
+                    "Batch space cleanup failed");
+            require(runtime.xrDestroySpace(view) == XR_SUCCESS && runtime.xrDestroySpace(local) == XR_SUCCESS,
+                    "Prediction-time space cleanup failed");
+            require(runtime.xrDestroySession(session()) == XR_SUCCESS, "Prediction-time session cleanup failed");
+        }
+
         static void velocities(const wchar_t* backendDirectory, bool controlsOnly) {
             OpenXrRuntime runtime;
             seed(runtime);
@@ -1885,13 +1978,17 @@ namespace virtualdesktop_openxr {
             } else if (mode == L"velocity-invalid") {
                 require(argc == 3, "velocity-invalid requires the explicit OVRNull directory");
                 velocityInvalid(argv[2]);
+            } else if (mode == L"prediction-pose-time") {
+                require(argc == 3, "prediction-pose-time requires the explicit OVRNull directory");
+                predictionPoseTime(argv[2]);
             } else if (mode == L"velocity" || mode == L"velocity-controls") {
                 require(argc == 3, "velocity mode requires the explicit OVRNull directory");
                 velocities(argv[2], mode == L"velocity-controls");
             } else
-                throw std::runtime_error("Unknown mode: cpu, controls, float, action-paths, action-pose, query-cache, "
-                                         "action-set-lifetime, events, poll-lock, sync-validation, pinch-velocity, "
-                                         "velocity-offsets, velocity-invalid, velocity, velocity-controls");
+                throw std::runtime_error(
+                    "Unknown mode: cpu, controls, float, action-paths, action-pose, query-cache, "
+                    "action-set-lifetime, events, poll-lock, sync-validation, pinch-velocity, "
+                    "velocity-offsets, velocity-invalid, velocity, velocity-controls, prediction-pose-time");
             std::cout << "failures=" << failures << '\n';
             return failures ? 1 : 0;
         }

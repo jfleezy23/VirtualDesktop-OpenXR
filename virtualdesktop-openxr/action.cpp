@@ -1265,7 +1265,11 @@ namespace virtualdesktop_openxr {
                 controllerTypeChanged = !m_cachedControllerType[side].empty();
                 m_cachedControllerType[side].clear();
                 m_isControllerActive[side] = false;
-                m_lastValidControllerPose[side].reset();
+                {
+                    std::scoped_lock cacheLock(m_trackingCacheMutex);
+                    m_lastValidControllerPose[side].reset();
+                    m_lastValidControllerPoseFlags[side] = 0;
+                }
 
                 TraceLoggingWrite(g_traceProvider,
                                   "OVR_InputState",

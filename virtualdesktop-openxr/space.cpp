@@ -34,6 +34,45 @@ namespace virtualdesktop_openxr {
     using namespace virtualdesktop_openxr::utils;
     using namespace xr::math;
 
+    namespace {
+        constexpr XrSpaceLocationFlags validPoseComponents =
+            XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+
+        XrSpaceLocationFlags observedPoseComponents(const XrPosef& pose) {
+            XrSpaceLocationFlags flags{};
+            if (std::isfinite(pose.position.x) && std::isfinite(pose.position.y) && std::isfinite(pose.position.z))
+                flags |= XR_SPACE_LOCATION_POSITION_VALID_BIT;
+            if (std::isfinite(pose.orientation.x) && std::isfinite(pose.orientation.y) &&
+                std::isfinite(pose.orientation.z) && std::isfinite(pose.orientation.w) &&
+                Quaternion::IsNormalized(pose.orientation))
+                flags |= XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+            return flags;
+        }
+
+        // Called under the tracking-cache lock. Missing components never establish fallback validity.
+        XrSpaceLocationFlags updatePoseCache(const XrPosef& current,
+                                             XrSpaceLocationFlags observed,
+                                             std::optional<XrPosef>& cached,
+                                             XrSpaceLocationFlags& cachedFlags,
+                                             XrPosef& pose) {
+            pose = cached.value_or(Pose::Identity());
+            XrSpaceLocationFlags tracked{};
+            if (observed & XR_SPACE_LOCATION_POSITION_VALID_BIT) {
+                pose.position = current.position;
+                tracked |= XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
+            }
+            if (observed & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) {
+                pose.orientation = current.orientation;
+                tracked |= XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+            }
+            if (observed) {
+                cached = pose;
+                cachedFlags |= observed;
+            }
+            return cachedFlags | tracked;
+        }
+    } // namespace
+
     // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrEnumerateReferenceSpaces
     XrResult OpenXrRuntime::xrEnumerateReferenceSpaces(XrSession session,
                                                        uint32_t spaceCapacityInput,
@@ -228,6 +267,12 @@ namespace virtualdesktop_openxr {
 
     // https://www.khronos.org/registry/OpenXR/specs/1.0/html/xrspec.html#xrLocateSpace
     XrResult OpenXrRuntime::xrLocateSpace(XrSpace space, XrSpace baseSpace, XrTime time, XrSpaceLocation* location) {
+        return locateSpaceAtPrediction(
+            space, baseSpace, time, location, m_lastPredictedDisplayTime.load(std::memory_order_relaxed));
+    }
+
+    XrResult OpenXrRuntime::locateSpaceAtPrediction(
+        XrSpace space, XrSpace baseSpace, XrTime time, XrSpaceLocation* location, XrTime prediction) {
         if (location->type != XR_TYPE_SPACE_LOCATION) {
             return XR_ERROR_VALIDATION_FAILURE;
         }
@@ -273,7 +318,8 @@ namespace virtualdesktop_openxr {
         Space& xrSpace = *(Space*)space;
         Space& xrBaseSpace = *(Space*)baseSpace;
 
-        location->locationFlags = locateSpace(xrSpace, xrBaseSpace, time, location->pose, velocity, gazeSampleTime);
+        location->locationFlags =
+            locateSpace(xrSpace, xrBaseSpace, time, location->pose, velocity, gazeSampleTime, prediction);
 
         if (!velocity) {
             TraceLoggingWrite(g_traceProvider,
@@ -398,17 +444,18 @@ namespace virtualdesktop_openxr {
 
                     // Debug option to test reprojection.
                     if (jiggleViewRotations) {
+                        std::scoped_lock cacheLock(m_trackingCacheMutex);
                         // To investigate cross-frame or within-frame issues.
                         const bool useSameJiggleForEachDisplayTime = false;
                         if (!useSameJiggleForEachDisplayTime ||
                             m_lastRequestedViewDisplayTime != viewLocateInfo->displayTime) {
-                            static std::mt19937_64 randGen(0);
-
                             // Scale jitter by FOV.
                             const float randMax = (views[i].fov.angleRight - views[i].fov.angleLeft) * 0.06f;
                             std::uniform_real_distribution<float> dist(-randMax, randMax);
-                            const auto randomQuatJiggle =
-                                DirectX::XMVectorSet(dist(randGen), dist(randGen), dist(randGen), dist(randGen));
+                            const auto randomQuatJiggle = DirectX::XMVectorSet(dist(m_viewJiggleRandom),
+                                                                               dist(m_viewJiggleRandom),
+                                                                               dist(m_viewJiggleRandom),
+                                                                               dist(m_viewJiggleRandom));
                             const auto originalPoseOrientation = xr::math::LoadXrQuaternion(views[i].pose.orientation);
                             const auto poseOrientationWithJiggle =
                                 DirectX::XMVectorAdd(originalPoseOrientation, randomQuatJiggle);
@@ -427,13 +474,16 @@ namespace virtualdesktop_openxr {
                                       TLArg(xr::ToString(views[i].fov).c_str(), "Fov"));
                 }
 
-                if (std::abs(worldScale - 1.f) > FLT_EPSILON) {
-                    // Patch the views with our IPD before returning to the application.
-                    // Store the actual IPD as reported by the runtime so we can restore it later in xrEndFrame().
-                    m_lastSeenIpd =
-                        overrideIpd(views[xr::StereoView::Left].pose, views[xr::StereoView::Right].pose, worldScale);
-                } else {
-                    m_lastSeenIpd.reset();
+                // Patch the views with our IPD before returning to the application.
+                // Store the actual IPD so xrEndFrame can restore it, under the same leaf lock as its reader.
+                const std::optional<float> originalIpd =
+                    std::abs(worldScale - 1.f) > FLT_EPSILON
+                        ? std::optional<float>(overrideIpd(
+                              views[xr::StereoView::Left].pose, views[xr::StereoView::Right].pose, worldScale))
+                        : std::nullopt;
+                {
+                    std::scoped_lock cacheLock(m_trackingCacheMutex);
+                    m_lastSeenIpd = originalIpd;
                 }
             } else {
                 // All or nothing.
@@ -442,7 +492,10 @@ namespace virtualdesktop_openxr {
             }
         }
 
-        m_lastRequestedViewDisplayTime = viewLocateInfo->displayTime;
+        {
+            std::scoped_lock cacheLock(m_trackingCacheMutex);
+            m_lastRequestedViewDisplayTime = viewLocateInfo->displayTime;
+        }
 
         return XR_SUCCESS;
     }
@@ -497,14 +550,15 @@ namespace virtualdesktop_openxr {
             return XR_ERROR_VALIDATION_FAILURE;
         }
 
+        const XrTime prediction = m_lastPredictedDisplayTime.load(std::memory_order_relaxed);
         for (uint32_t i = 0; i < locateInfo->spaceCount; i++) {
             XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
             XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
             if (velocities) {
                 location.next = &velocity;
             }
-            const auto result =
-                xrLocateSpace(locateInfo->spaces[i], locateInfo->baseSpace, locateInfo->time, &location);
+            const auto result = locateSpaceAtPrediction(
+                locateInfo->spaces[i], locateInfo->baseSpace, locateInfo->time, &location, prediction);
             if (XR_SUCCEEDED(result)) {
                 spaceLocations->locations[i].locationFlags = location.locationFlags;
                 spaceLocations->locations[i].pose = location.pose;
@@ -526,7 +580,8 @@ namespace virtualdesktop_openxr {
                                                     XrTime time,
                                                     XrPosef& pose,
                                                     XrSpaceVelocity* velocity,
-                                                    XrEyeGazeSampleTimeEXT* gazeSampleTime) const {
+                                                    XrEyeGazeSampleTimeEXT* gazeSampleTime,
+                                                    std::optional<XrTime> prediction) const {
         if (velocity) {
             velocity->velocityFlags = 0;
             velocity->angularVelocity = velocity->linearVelocity = {};
@@ -539,13 +594,21 @@ namespace virtualdesktop_openxr {
         if (xrSpace.referenceType != xrBaseSpace.referenceType ||
             (xrSpace.referenceType == XR_REFERENCE_SPACE_TYPE_MAX_ENUM &&
              (xrSpace.action != xrBaseSpace.action || xrSpace.subActionPath != xrBaseSpace.subActionPath))) {
-            flags1 = locateSpaceToOrigin(
-                xrSpace, time, spaceToVirtual, velocity ? &spaceToVirtualVelocity : nullptr, gazeSampleTime);
+            // Both endpoints of this relative pose must use the same time clamp.
+            if (!prediction)
+                prediction = m_lastPredictedDisplayTime.load(std::memory_order_relaxed);
+            flags1 = locateSpaceToOrigin(xrSpace,
+                                         time,
+                                         spaceToVirtual,
+                                         velocity ? &spaceToVirtualVelocity : nullptr,
+                                         gazeSampleTime,
+                                         prediction);
             flags2 = locateSpaceToOrigin(xrBaseSpace,
                                          time,
                                          baseSpaceToVirtual,
                                          velocity ? &baseSpaceToVirtualVelocity : nullptr,
-                                         gazeSampleTime);
+                                         gazeSampleTime,
+                                         prediction);
         } else {
             // Optimize the case of locating against the same reference space or same action space.
             flags1 = flags2 = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT |
@@ -613,7 +676,8 @@ namespace virtualdesktop_openxr {
                                                             XrTime time,
                                                             XrPosef& pose,
                                                             XrSpaceVelocity* velocity,
-                                                            XrEyeGazeSampleTimeEXT* gazeSampleTime) const {
+                                                            XrEyeGazeSampleTimeEXT* gazeSampleTime,
+                                                            std::optional<XrTime> prediction) const {
         XrSpaceLocationFlags result = 0;
         XrVector3f velocityOrigin{};
 
@@ -626,8 +690,10 @@ namespace virtualdesktop_openxr {
         const bool ignoreFloorHeight = time <= 1;
 
         // OculusXR likes to specify random XrTime. Clamp to t-1s.
-        if (m_lastPredictedDisplayTime) {
-            time = std::max(time, m_lastPredictedDisplayTime - 1'000'000'000);
+        const XrTime lastPredictedDisplayTime =
+            prediction ? *prediction : m_lastPredictedDisplayTime.load(std::memory_order_relaxed);
+        if (lastPredictedDisplayTime) {
+            time = std::max(time, lastPredictedDisplayTime - 1'000'000'000);
         }
 
         if (xrSpace.referenceType == XR_REFERENCE_SPACE_TYPE_VIEW) {
@@ -641,17 +707,32 @@ namespace virtualdesktop_openxr {
                 TraceLoggingWrite(g_traceProvider, "OVR_GetConfig", TLArg(floorHeight, "EyeHeight"));
                 if (std::abs(floorHeight) < FLT_EPSILON) {
                     // Virtual Desktop Stage Tracking mode.
-                    if (!m_lastKnownFloorHeight) {
+                    std::optional<float> knownFloorHeight;
+                    {
+                        std::scoped_lock cacheLock(m_trackingCacheMutex);
+                        knownFloorHeight = m_lastKnownFloorHeight;
+                    }
+                    if (!knownFloorHeight) {
                         XrPosef referencePose{};
                         if ((getHmdPose(time, referencePose, nullptr) & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
                             std::abs(referencePose.position.y) > FLT_EPSILON) {
-                            Log("Inferred eye height: %.3f\n", referencePose.position.y);
-                            m_lastKnownFloorHeight = referencePose.position.y;
+                            bool inferred{};
+                            {
+                                std::scoped_lock cacheLock(m_trackingCacheMutex);
+                                if (!m_lastKnownFloorHeight) {
+                                    m_lastKnownFloorHeight = referencePose.position.y;
+                                    inferred = true;
+                                }
+                                knownFloorHeight = m_lastKnownFloorHeight;
+                            }
+                            if (inferred)
+                                Log("Inferred eye height: %.3f\n", referencePose.position.y);
                         }
                     }
-                    pose = Pose::Translation({0, m_lastKnownFloorHeight.value_or(0), 0});
+                    pose = Pose::Translation({0, knownFloorHeight.value_or(0), 0});
                 } else {
                     pose = Pose::Translation({0, floorHeight, 0});
+                    std::scoped_lock cacheLock(m_trackingCacheMutex);
                     m_lastKnownFloorHeight = floorHeight;
                 }
             } else {
@@ -810,28 +891,26 @@ namespace virtualdesktop_openxr {
                               TLArg(xr::ToString(state.LinearVelocity).c_str(), "LinearVelocity"));
         }
 
-        const bool isTracked = OVR_SUCCESS(result);
-        if (isTracked) {
-            locationFlags |= (XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT |
-                              XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT);
-            if (enablePredictionRefinement || time != m_lastRequestedViewDisplayTime) {
-                pose = ovrPoseToXrPose(state.ThePose);
-            } else if (m_lastValidHmdPose) {
-                // Return the same pose for the same timestamp.
-                pose = m_lastValidHmdPose.value();
+        const bool isTracked = OVR_UNQUALIFIED_SUCCESS(result);
+        const auto current = ovrPoseToXrPose(state.ThePose);
+        const auto observed = isTracked ? observedPoseComponents(current) : 0;
+        {
+            std::scoped_lock cacheLock(m_trackingCacheMutex);
+            if (!enablePredictionRefinement && time == m_lastRequestedViewDisplayTime && m_lastValidHmdPose &&
+                m_lastValidHmdPoseTime == time && m_lastValidHmdPoseFlags == validPoseComponents &&
+                observed == validPoseComponents) {
+                // Freeze only a complete sample from this timestamp, never another query's fallback pose.
+                pose = *m_lastValidHmdPose;
+                locationFlags = validPoseComponents | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT |
+                                XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
             } else {
-                locationFlags = 0;
-                pose = Pose::Identity();
-            }
-        } else {
-            if (m_lastValidHmdPose) {
-                locationFlags |= XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
-                pose = m_lastValidHmdPose.value();
-            } else {
-                pose = Pose::Identity();
+                locationFlags = updatePoseCache(current, observed, m_lastValidHmdPose, m_lastValidHmdPoseFlags, pose);
+                if (observed == validPoseComponents)
+                    m_lastValidHmdPoseTime = time;
+                else if (observed)
+                    m_lastValidHmdPoseTime.reset();
             }
         }
-        m_lastValidHmdPose = pose;
 
         if (velocity) {
             velocity->velocityFlags = 0;
@@ -886,40 +965,13 @@ namespace virtualdesktop_openxr {
         // Untracked or unavailable controllers return ovrSuccess_DeviceUnavailable = 1002
         // which is for some reason considered a success.
         const bool isTracked = OVR_UNQUALIFIED_SUCCESS(result);
-        if (isTracked) {
-            locationFlags |= XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
-
-            // Some devices like AndroidXR seem to like returning NaNs. The OVR API doesn't have validity bits. We need
-            // to check manually.
-            const bool isPositionValid = !(isnan(state.ThePose.Position.x) || isnan(state.ThePose.Position.y) ||
-                                           isnan(state.ThePose.Position.z));
-            const bool isOrientationValid =
-                !(isnan(state.ThePose.Orientation.x) || isnan(state.ThePose.Orientation.y) ||
-                  isnan(state.ThePose.Orientation.z) || isnan(state.ThePose.Orientation.w));
-
-            const auto returnedPose = ovrPoseToXrPose(state.ThePose);
-            const auto fallbackPose = m_lastValidControllerPose[side].value_or(Pose::Identity());
-            if (isPositionValid) {
-                locationFlags |= XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
-                pose.position = returnedPose.position;
-            } else {
-                pose.position = fallbackPose.position;
-            }
-            if (isOrientationValid) {
-                locationFlags |= XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
-                pose.orientation = returnedPose.orientation;
-            } else {
-                pose.orientation = fallbackPose.orientation;
-            }
-        } else {
-            if (m_lastValidControllerPose[side]) {
-                locationFlags |= XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
-                pose = m_lastValidControllerPose[side].value();
-            } else {
-                pose = Pose::Identity();
-            }
+        const auto current = ovrPoseToXrPose(state.ThePose);
+        const auto observed = isTracked ? observedPoseComponents(current) : 0;
+        {
+            std::scoped_lock cacheLock(m_trackingCacheMutex);
+            locationFlags = updatePoseCache(
+                current, observed, m_lastValidControllerPose[side], m_lastValidControllerPoseFlags[side], pose);
         }
-        m_lastValidControllerPose[side] = pose;
 
         if (velocity) {
             velocity->velocityFlags = 0;

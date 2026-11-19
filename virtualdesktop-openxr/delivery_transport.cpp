@@ -65,11 +65,15 @@ namespace virtualdesktop_openxr {
     } // namespace
 
     struct DeliveryTransport::Chain {
+        explicit Chain(ChainKind allocationKind) : kind(allocationKind) {
+        }
+        const ChainKind kind;
         ovrTextureSwapChain native{};
         ovrTextureSwapChainDesc desc{};
-        bool nativeOnly{}, pending{};
+        bool pending{};
         int producerIndex{}, producedIndex{-1}, nativeTarget{-1};
         uint64_t reservedReady{};
+        uint64_t lastReadValue{};
         bool copied{};
         std::vector<ComPtr<ID3D11Texture2D>> nativeImages, producerImages, presentationAliases;
         std::vector<wil::unique_handle> handles;
@@ -80,13 +84,15 @@ namespace virtualdesktop_openxr {
         ComPtr<ID3D11Device5> producer, presentation;
         ComPtr<ID3D11DeviceContext4> sourceContext, targetContext;
         ComPtr<ID3D11Fence> sourceReady, sourceOnTarget, readDone, readOnSource;
-        uint64_t sourceValue{}, readValue{};
+        uint64_t sourceValue{}, readValue{}, ordinaryReadValue{};
         std::atomic<bool> unknown{};
         bool closed{};
         mutable std::recursive_mutex sdkMutex, metadata;
         std::map<ovrTextureSwapChain, std::shared_ptr<Chain>> chains;
         std::vector<std::shared_ptr<Chain>> retired;
         Statistics statistics;
+        void orderProducerAfterRead(uint64_t requiredValue);
+        Chain& unreadFgDepth(const Batch& batch);
     };
 
     DeliveryTransport::DeliveryTransport(ovrSession session,
@@ -126,13 +132,23 @@ namespace virtualdesktop_openxr {
     ovrResult DeliveryTransport::create(const ovrTextureSwapChainDesc& desc,
                                         ovrTextureSwapChain* output,
                                         bool nativeOnly) {
+        return createChain(desc, output, nativeOnly ? ChainKind::nativeOnly : ChainKind::ordinary);
+    }
+
+    ovrResult DeliveryTransport::createFrameGenerationDepth(const ovrTextureSwapChainDesc& desc,
+                                                            ovrTextureSwapChain* output) {
+        return createChain(desc, output, ChainKind::frameGenerationDepth);
+    }
+
+    ovrResult DeliveryTransport::createChain(const ovrTextureSwapChainDesc& desc,
+                                             ovrTextureSwapChain* output,
+                                             ChainKind kind) {
         auto sdk = sdkLease("Create");
         auto& s = *m_state;
         std::lock_guard<std::recursive_mutex> lock(s.metadata);
         CHECK_MSG(!s.unknown && !s.closed && output, "Cannot allocate on an uncertain delivery graph");
-        auto chain = std::make_shared<Chain>();
+        auto chain = std::make_shared<Chain>(kind);
         chain->desc = desc;
-        chain->nativeOnly = nativeOnly;
         const auto result = ovr_CreateTextureSwapChainDX(s.session, s.presentation.Get(), &desc, &chain->native);
         if (OVR_FAILURE(result))
             return result;
@@ -153,7 +169,7 @@ namespace virtualdesktop_openxr {
             CHECK_HRCMD(s.presentation.As(&expected));
             CHECK_MSG(actual == expected, "SDK returned a foreign presentation-device image");
             chain->nativeImages.push_back(native);
-            if (nativeOnly)
+            if (kind == ChainKind::nativeOnly)
                 continue;
             D3D11_TEXTURE2D_DESC texture{};
             native->GetDesc(&texture);
@@ -226,7 +242,8 @@ namespace virtualdesktop_openxr {
         if (!lock.owns_lock() || m_state->unknown || m_state->closed)
             return false;
         const auto found = m_state->chains.find(chain);
-        if (found == m_state->chains.end() || found->second->nativeOnly || found->second->reservedReady)
+        if (found == m_state->chains.end() || found->second->kind == ChainKind::nativeOnly ||
+            found->second->reservedReady)
             return false;
         index = found->second->producerIndex;
         return true;
@@ -240,7 +257,7 @@ namespace virtualdesktop_openxr {
             const auto found = m_state->chains.find(chain);
             if (found == m_state->chains.end() || !index)
                 return ovrError_InvalidParameter;
-            if (!found->second->nativeOnly) {
+            if (found->second->kind != ChainKind::nativeOnly) {
                 if (found->second->reservedReady)
                     return ovrError_InvalidParameter;
                 *index = found->second->producerIndex;
@@ -254,7 +271,7 @@ namespace virtualdesktop_openxr {
         const auto found = m_state->chains.find(chain);
         if (found == m_state->chains.end() || !index)
             return ovrError_InvalidParameter;
-        if (found->second->nativeOnly)
+        if (found->second->kind == ChainKind::nativeOnly)
             return ovr_GetTextureSwapChainCurrentIndex(m_state->session, chain, index);
         *index = found->second->producerIndex;
         return ovrSuccess;
@@ -266,8 +283,8 @@ namespace virtualdesktop_openxr {
             static_cast<size_t>(index) >= found->second->nativeImages.size())
             return ovrError_InvalidParameter;
         const auto& c = *found->second;
-        const auto result =
-            (c.nativeOnly ? c.nativeImages[index] : c.producerImages[index])->QueryInterface(iid, output);
+        const auto& image = c.kind == ChainKind::nativeOnly ? c.nativeImages[index] : c.producerImages[index];
+        const auto result = image->QueryInterface(iid, output);
         CHECK_HRCMD(result);
         return ovrSuccess;
     }
@@ -280,7 +297,7 @@ namespace virtualdesktop_openxr {
             if (found == m_state->chains.end())
                 return ovrError_InvalidParameter;
             auto& c = *found->second;
-            if (!c.nativeOnly) {
+            if (c.kind != ChainKind::nativeOnly) {
                 if (c.reservedReady)
                     return ovrError_InvalidParameter;
                 c.producedIndex = c.producerIndex;
@@ -296,7 +313,7 @@ namespace virtualdesktop_openxr {
         if (m_state->unknown || m_state->closed)
             return ovrError_RuntimeException;
         auto& c = *found->second;
-        if (c.nativeOnly) {
+        if (c.kind == ChainKind::nativeOnly) {
             const auto result = ovr_CommitTextureSwapChain(m_state->session, chain);
             if (OVR_FAILURE(result))
                 m_state->unknown = true;
@@ -321,7 +338,7 @@ namespace virtualdesktop_openxr {
             const auto found = s.chains.find(handle);
             CHECK_MSG(found != s.chains.end(), "Submitted delivery chain has no owner");
             auto& c = *found->second;
-            if (c.nativeOnly || !c.pending)
+            if (c.kind == ChainKind::nativeOnly || !c.pending)
                 continue;
             CHECK_MSG(!c.reservedReady, "Producer image already belongs to a published batch");
             CHECK_MSG(c.producedIndex >= 0 && static_cast<size_t>(c.producedIndex) < c.producerImages.size(),
@@ -379,6 +396,14 @@ namespace virtualdesktop_openxr {
             CHECK_MSG(s.readValue < UINT64_MAX - 1, "Delivery read fence exhausted");
             CHECK_HRCMD(s.targetContext->Signal(s.readDone.Get(), ++s.readValue));
             s.targetContext->Flush();
+            // Only a singleton ticket-depth read belongs exclusively to the
+            // bank writer. Mixed submissions retain ordinary producer ordering.
+            if (batch.images.size() != 1 || batch.images.front().owner->kind != ChainKind::frameGenerationDepth)
+                s.ordinaryReadValue = s.readValue;
+            for (const auto& image : batch.images) {
+                if (image.owner->kind == ChainKind::frameGenerationDepth)
+                    image.owner->lastReadValue = s.readValue;
+            }
         } catch (...) {
             s.unknown = true;
             throw;
@@ -398,7 +423,8 @@ namespace virtualdesktop_openxr {
             const bool retained = found != s.chains.end()
                                       ? found->second == image.owner
                                       : std::find(s.retired.begin(), s.retired.end(), image.owner) != s.retired.end();
-            CHECK_MSG(retained && image.owner->reservedReady == batch.sourceReady && image.owner->copied,
+            CHECK_MSG(retained && image.owner->reservedReady == batch.sourceReady && image.owner->copied &&
+                          image.owner->producedIndex == image.sourceIndex,
                       "Foreign, replayed or uncopied native commit receipt");
         }
         try {
@@ -427,22 +453,75 @@ namespace virtualdesktop_openxr {
         commitCopied(batch);
     }
 
+    DeliveryTransport::Chain& DeliveryTransport::State::unreadFgDepth(const Batch& batch) {
+        CHECK_MSG(!unknown && !closed && batch.sourceReady && batch.images.size() == 1 && batch.images.front().owner,
+                  "Invalid unused FG depth receipt");
+        const auto& transfer = batch.images.front();
+        auto& chain = *transfer.owner;
+        const auto found = chains.find(chain.native);
+        CHECK_MSG(found != chains.end() && found->second == transfer.owner &&
+                      chain.kind == ChainKind::frameGenerationDepth && chain.pending && !chain.copied &&
+                      chain.nativeTarget == -1 && chain.reservedReady == batch.sourceReady &&
+                      chain.producedIndex == transfer.sourceIndex,
+                  "Copied or stale FG depth receipt");
+        return chain;
+    }
+
+    bool DeliveryTransport::fgDepthReady(const Batch& batch) {
+        auto& s = *m_state;
+        std::lock_guard<std::recursive_mutex> lock(s.metadata);
+        s.unreadFgDepth(batch);
+        const auto completed = s.sourceOnTarget->GetCompletedValue();
+        if (completed == UINT64_MAX)
+            s.unknown = true;
+        CHECK_MSG(completed != UINT64_MAX, "Delivery source-ready fence device removed");
+        return completed >= batch.sourceReady;
+    }
+
+    void DeliveryTransport::discardUncopiedFgDepth(const Batch& batch) {
+        auto& s = *m_state;
+        std::lock_guard<std::recursive_mutex> lock(s.metadata);
+        auto& chain = s.unreadFgDepth(batch);
+        chain.pending = false;
+        chain.producedIndex = -1;
+        chain.reservedReady = 0;
+    }
+
+    void DeliveryTransport::State::orderProducerAfterRead(uint64_t requiredValue) {
+        CHECK_MSG(!unknown && !closed, "Producer cannot overwrite uncertain native reads");
+        const auto done = readOnSource->GetCompletedValue();
+        if (done == UINT64_MAX)
+            unknown = true;
+        CHECK_MSG(done != UINT64_MAX, "Native-read fence device removed");
+        if (done < requiredValue) {
+            const auto result = sourceContext->Wait(readOnSource.Get(), requiredValue);
+            if (FAILED(result))
+                unknown = true;
+            CHECK_HRCMD(result);
+        }
+    }
+
     void DeliveryTransport::orderProducerAfterNativeReads() {
         auto& s = *m_state;
         std::lock_guard<std::recursive_mutex> lock(s.metadata);
-        CHECK_MSG(!s.unknown, "Producer cannot overwrite uncertain native reads");
-        if (!s.readValue)
-            return;
-        const auto done = s.readOnSource->GetCompletedValue();
-        if (done == UINT64_MAX)
-            s.unknown = true;
-        CHECK_MSG(done != UINT64_MAX, "Native-read fence device removed");
-        if (done < s.readValue) {
-            const auto result = s.sourceContext->Wait(s.readOnSource.Get(), s.readValue);
-            if (FAILED(result))
-                s.unknown = true;
-            CHECK_HRCMD(result);
-        }
+        s.orderProducerAfterRead(s.ordinaryReadValue);
+    }
+
+    ovrResult DeliveryTransport::acquireFrameGenerationDepthForWrite(ovrTextureSwapChain chain, int* index) {
+        auto& s = *m_state;
+        std::lock_guard<std::recursive_mutex> lock(s.metadata);
+        if (s.unknown || s.closed)
+            return ovrError_RuntimeException;
+        const auto found = s.chains.find(chain);
+        if (found == s.chains.end() || !index)
+            return ovrError_InvalidParameter;
+        const auto& depth = *found->second;
+        if (depth.kind != ChainKind::frameGenerationDepth || depth.pending || depth.reservedReady ||
+            depth.producerIndex < 0 || static_cast<size_t>(depth.producerIndex) >= depth.producerImages.size())
+            return ovrError_InvalidParameter;
+        s.orderProducerAfterRead(depth.lastReadValue);
+        *index = depth.producerIndex;
+        return ovrSuccess;
     }
 
     HRESULT DeliveryTransport::duplicateSharedHandle(ID3D11Texture2D* image, HANDLE* output) {

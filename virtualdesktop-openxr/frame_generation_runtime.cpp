@@ -714,8 +714,10 @@ namespace virtualdesktop_openxr {
             desc.ArraySize = desc.MipLevels = desc.SampleCount = 1;
             desc.BindFlags = ovrTextureBind_DX_DepthStencil;
             desc.MiscFlags = ovrTextureMisc_DX_Typeless;
-            CHECK_OVRCMD(
-                createSubmissionSwapchain(m_ovrSession, m_ovrSubmissionDevice.Get(), &desc, &bank.output.ovrSwapchain));
+            CHECK_OVRCMD(m_deliveryTransport
+                             ? m_deliveryTransport->createFrameGenerationDepth(desc, &bank.output.ovrSwapchain)
+                             : createSubmissionSwapchain(
+                                   m_ovrSession, m_ovrSubmissionDevice.Get(), &desc, &bank.output.ovrSwapchain));
             int count{};
             CHECK_OVRCMD(submissionSwapchainLength(m_ovrSession, bank.output.ovrSwapchain, &count));
             CHECK_MSG(count > 0, "Empty FG depth presentation chain");
@@ -732,7 +734,10 @@ namespace virtualdesktop_openxr {
                 bank.output.dsvs.push_back(std::move(dsv));
             }
         }
-        CHECK_OVRCMD(submissionSwapchainIndex(m_ovrSession, bank.output.ovrSwapchain, &bank.preparedImage));
+        CHECK_OVRCMD(m_deliveryTransport
+                         ? m_deliveryTransport->acquireFrameGenerationDepthForWrite(bank.output.ovrSwapchain,
+                                                                                    &bank.preparedImage)
+                         : submissionSwapchainIndex(m_ovrSession, bank.output.ovrSwapchain, &bank.preparedImage));
         CHECK_MSG(bank.preparedImage >= 0 && static_cast<size_t>(bank.preparedImage) < bank.output.dsvs.size(),
                   "Invalid FG depth presentation image");
         for (unsigned eye = 0; eye < 2; ++eye) {
@@ -779,13 +784,14 @@ namespace virtualdesktop_openxr {
     }
 
     void OpenXrRuntime::protectFrameGenerationSources(bool ordinaryFallback) {
-        // NR's private colour does not cover depth alignment on an ordinary
-        // fallback. Those queued source reads also precede application reuse.
+        // Delivery NR returns private-colour input ownership separately. Native
+        // NR may still read an aliased app image, so its successful capture also
+        // needs this return edge. Fallback reads require it on either route.
         const bool hasDepthSources = m_precompositor.finalDepth[0] || m_precompositor.finalDepth[1];
         const bool hasGuideSources =
             m_frameGeneration && m_frameGeneration->depthGuidanceEnabled() &&
             (m_precompositor.originalFgDepth[0].source || m_precompositor.originalFgDepth[1].source);
-        if ((m_precompositor.dlssnrSettings.enabled && !(m_deliveryTransport && ordinaryFallback) &&
+        if ((m_precompositor.dlssnrSettings.enabled && m_deliveryTransport && !ordinaryFallback &&
              !m_fgDepthSnapshotForFrame && !hasDepthSources && !hasGuideSources) ||
             (!m_d3d11Context && !m_d3d12CommandQueue)) {
             return;
@@ -992,6 +998,13 @@ namespace virtualdesktop_openxr {
                               getSetting("async_submission_priority").value_or(THREAD_PRIORITY_TIME_CRITICAL));
             bool begun{};
             bool started{};
+            struct CompletedStereoFrame {
+                ovrLayer_Union layer{};
+                ovrViewScaleDesc scale{};
+                uint64_t serial{}, throughSerial{}, ownerGeneration{}, ticketGeneration{}, historyEpoch{};
+                uint32_t bank{};
+                int colourIndex{-1}, depthIndex{-1};
+            } retainedStereo;
             struct NativeTiming {
                 bool enabled{};
                 double waitEnter{}, waitReturn{}, predictionBefore{}, predictionAfter{};
@@ -1098,6 +1111,18 @@ namespace virtualdesktop_openxr {
                     m_asyncSubmissionCondVar.wait(
                         lock, [&] { return m_terminateAsyncThread || !m_layersForAsyncSubmission.empty(); });
                     if (m_terminateAsyncThread) {
+                        if (begun && !m_asyncSubmissionError) {
+                            // Startup can leave a healthy Begin awaiting its first packet.
+                            // Teardown retains any queued transaction and its layers.
+                            lock.unlock();
+                            std::unique_lock contextLease(m_fgContextMutex, std::defer_lock);
+                            if (!m_deliveryTransport)
+                                contextLease.lock();
+                            ovrLayerHeader disabled{};
+                            disabled.Type = ovrLayerType_Disabled;
+                            const ovrLayerHeader* layers[] = {&disabled};
+                            CHECK_OVRCMD(endSubmissionFrame(m_ovrSession, nativeId, nullptr, layers, 1));
+                        }
                         break;
                     }
                     ownedLayers.swap(m_layersForAsyncSubmission);
@@ -1135,28 +1160,82 @@ namespace virtualdesktop_openxr {
                     CHECK_HRCMD(m_frameGeneration->copyOutput(transaction, role, output.images[image].Get()));
                     copyQueued[index] = timingNow(traceGroup);
                 };
+                const bool hasDepth = ownedLayers[0].Header.Type == ovrLayerType_EyeFovDepth;
+                const unsigned cycles =
+                    reservation.multiplier >= 1 && reservation.multiplier <= 4 ? reservation.multiplier : 1;
+                const bool matchingReservation =
+                    reservation.valid && reservation.nativeId == static_cast<uint64_t>(nativeId);
+                const bool retainReal = hasGpuOutput && m_deliveryTransport && transaction.nrEnabled &&
+                                        matchingReservation && reservation.shouldRender;
+                const bool continuesRetainedLineage =
+                    hasGpuOutput && retainedStereo.serial && !transaction.ticket.prime &&
+                    retainedStereo.throughSerial == transaction.ticket.previous_serial &&
+                    retainedStereo.ownerGeneration == transaction.ownerGeneration &&
+                    retainedStereo.ticketGeneration == transaction.ticket.generation &&
+                    retainedStereo.historyEpoch == reservation.historyEpoch;
+                // Visibility is independent of the old layer remaining a
+                // valid replay source, such as when paired depth disappears.
+                const bool missedPredecessor =
+                    continuesRetainedLineage && retainedStereo.serial != retainedStereo.throughSerial;
+                const auto canRepeat = [&] {
+                    if (!retainReal || !continuesRetainedLineage || cycles == 1 || transaction.slots.count != cycles ||
+                        retainedStereo.layer.Header.Type != ownedLayers[0].Header.Type) {
+                        return false;
+                    }
+                    const auto& colour = m_fgPresentationBanks[retainedStereo.bank][
+                        static_cast<unsigned>(FrameGenerationRole::real)];
+                    if (colour.images.size() < 2 ||
+                        retainedStereo.layer.EyeFov.ColorTexture[0] != colour.ovrSwapchain ||
+                        retainedStereo.colourIndex != colour.lastCommittedIndex) {
+                        return false;
+                    }
+                    if (!hasDepth)
+                        return true;
+                    const auto& depth = m_fgDepthPresentationBanks[retainedStereo.bank].output;
+                    return depth.images.size() > 1 &&
+                           retainedStereo.layer.EyeFovDepth.DepthTexture[0] == depth.ovrSwapchain &&
+                           retainedStereo.depthIndex == depth.lastCommittedIndex;
+                };
+                const auto currentRealInputReady = [&] {
+                    CHECK_MSG(!m_deliveryTransport->completionUnknown(), "Cannot repeat on an uncertain delivery graph");
+                    const auto result = m_frameGeneration->realInputReady(transaction);
+                    if (result != VDXRFG_E_BUSY)
+                        CHECK_HRCMD(result);
+                    const bool depthReady =
+                        !hasDepth || m_deliveryTransport->fgDepthReady(m_fgDepthDelivery[transaction.ticket.bank]);
+                    return result == S_OK && depthReady;
+                };
                 bool depthCopiedBeforeReal{};
-                if (hasGpuOutput) {
-                    std::unique_lock contextLease(m_fgContextMutex);
-                    // Stage finalized B before any synthesis wait. A missed
-                    // synthetic deadline can now use the same 100% NR pixels.
-                    if (m_deliveryTransport && ownedLayers[0].Header.Type == ovrLayerType_EyeFovDepth) {
+                const auto stageReal = [&] {
+                    if (m_deliveryTransport && hasDepth) {
                         m_deliveryTransport->copy(m_fgDepthDelivery[transaction.ticket.bank]);
                         depthCopiedBeforeReal = true;
                     }
                     prepareRole(FrameGenerationRole::real);
-                }
-                if (!hasGpuOutput && m_deliveryTransport) {
+                };
+                bool deferredReal{};
+                if (hasGpuOutput) {
                     std::unique_lock contextLease(m_fgContextMutex);
-                    m_deliveryTransport->execute(ownedDelivery);
+                    if (!canRepeat())
+                        retainedStereo = {};
+                    // No current dependency may get ahead of a possible repeat
+                    // on P. An already-ready B keeps the existing staging order.
+                    deferredReal = retainedStereo.serial && !currentRealInputReady();
+                    if (!deferredReal)
+                        stageReal();
+                } else {
+                    retainedStereo = {};
+                    if (m_deliveryTransport) {
+                        std::unique_lock contextLease(m_fgContextMutex);
+                        m_deliveryTransport->execute(ownedDelivery);
+                    }
                 }
-                bool generated = transaction.ticket.token && !transaction.ticket.prime && reservation.valid &&
-                                 reservation.nativeId == static_cast<uint64_t>(nativeId);
-                if (!reservation.valid || reservation.nativeId != static_cast<uint64_t>(nativeId)) {
+                // A skipped B never becomes the visible predecessor for S1/S2.
+                bool generated = hasGpuOutput && !transaction.ticket.prime && matchingReservation &&
+                                 !missedPredecessor;
+                if (!matchingReservation) {
                     m_fgNeedReprime = m_fgTimelineReanchor = true;
                 }
-                const unsigned cycles =
-                    reservation.multiplier >= 1 && reservation.multiplier <= 4 ? reservation.multiplier : 1;
                 // Closed native cycles can omit expired original slots. An
                 // already-begun cycle still needs its matching End; do not
                 // assume that the SDK permits replacing that open cycle.
@@ -1237,14 +1316,48 @@ namespace virtualdesktop_openxr {
                         retainedMissNoted = true;
                     }
                 };
-                if (generated && !recoverExpiredSlots) {
+                const auto skipExpiredReplaySlots = [&](unsigned slot) {
+                    if (cycles == 4 && !begun) {
+                        const auto now = ovrTimeToXrTime(ovr_GetTimeInSeconds());
+                        while (slot < cycles - 1 && now >= transaction.slots.targets[slot + 1]) {
+                            ++slot;
+                            noteRetainedPresentationMiss();
+                        }
+                        nativeId = static_cast<long long>(reservation.nativeId + slot);
+                    }
+                    return slot;
+                };
+                unsigned firstReplaySlot{};
+                if (deferredReal) {
+                    // Honour the native render lead. Do not wait for S1's
+                    // full slot deadline when there is already a ready pair.
+                    if (!begun) {
+                        firstReplaySlot = skipExpiredReplaySlots(0);
+                        if (firstReplaySlot)
+                            generated = false; // An elapsed initial slot cannot become a new synthetic sample.
+                        stopping = !beginNative();
+                    }
+                    if (!stopping) {
+                        std::unique_lock contextLease(m_fgContextMutex);
+                        if (currentRealInputReady()) {
+                            stageReal();
+                            deferredReal = false;
+                        }
+                    }
+                }
+                // A deferred B can become ready during Begin. Prepare the
+                // already-open slot normally, then keep the closed-slot skip
+                // policy for any subsequent 4x slots that expire.
+                if (generated && !deferredReal && !stopping && (!recoverExpiredSlots || begun)) {
                     generated = awaitRole(FrameGenerationRole::synthetic1, transaction.slots.targets[0]);
                     if (!generated) {
                         noteFrameGenerationPresentationMiss();
                     }
                 }
                 std::unique_lock contextLease(m_fgContextMutex);
-                if (generated && !recoverExpiredSlots) {
+                if (deferredReal)
+                    generated = false;
+                if (generated && !stopping && (!recoverExpiredSlots || begun)) {
                     // Only S1 may be complete. Do not queue an unresolved tail
                     // dependency ahead of its native handoff or independent B.
                     const unsigned copies = m_frameGeneration->ready(transaction) ? cycles - 1 : 1;
@@ -1254,7 +1367,7 @@ namespace virtualdesktop_openxr {
                 }
                 bool admissionOpened{};
                 const auto openAdmission = [&] {
-                    if (admissionOpened)
+                    if (admissionOpened || deferredReal)
                         return;
                     bool currentCopiesQueued = true;
                     if (generated)
@@ -1290,6 +1403,8 @@ namespace virtualdesktop_openxr {
                 ovrLayer_Union lastSyntheticLayer{};
                 unsigned lastSyntheticSlot = cycles;
                 bool realPresented{};
+                bool repeatedStereo{};
+                CompletedStereoFrame completedStereo;
                 // Worker-local immutable handoff owners. The active group pins
                 // its native chains, current-bank batch and State-owned event;
                 // neither opposite-bank capture nor quiescent reset can replace
@@ -1388,7 +1503,44 @@ namespace virtualdesktop_openxr {
                         }
                     }
                 };
-                for (unsigned slot = 0; slot < cycles && !stopping; ++slot) {
+                for (unsigned slot = firstReplaySlot; slot < cycles && !stopping; ++slot) {
+                    if (deferredReal) {
+                        if (contextLease.owns_lock())
+                            contextLease.unlock();
+                        if (!begun) {
+                            slot = skipExpiredReplaySlots(slot);
+                            if (!beginNative())
+                                break;
+                        }
+                        if (slot != firstReplaySlot) {
+                            contextLease.lock();
+                            if (currentRealInputReady()) {
+                                stageReal();
+                                deferredReal = false;
+                            }
+                        }
+                        if (deferredReal) {
+                            // Re-submit the previous committed colour/depth
+                            // pair, including its original tracking metadata.
+                            // No new Commit and no P wait for this ticket.
+                            if (contextLease.owns_lock())
+                                contextLease.unlock();
+                            const ovrLayerHeader* layers[] = {&retainedStereo.layer.Header};
+                            const auto result = endSubmissionFrame(m_ovrSession,
+                                                                   nativeId,
+                                                                   &retainedStereo.scale,
+                                                                   layers,
+                                                                   1,
+                                                                   retainedStereo.serial,
+                                                                   FrameGenerationRole::real);
+                            ++nativeId;
+                            begun = false;
+                            CHECK_OVRCMD(result);
+                            repeatedStereo = true;
+                            noteRetainedPresentationMiss();
+                            continue;
+                        }
+                    }
                     // Last new acquisition of this retained lease in this
                     // iteration, not total wait/hold time. Zero means no new
                     // acquisition; a lease inherited from preparation may exist.
@@ -1479,7 +1631,8 @@ namespace virtualdesktop_openxr {
                     // can advance after a blocking Begin, but never before its
                     // original time or backwards after B has been presented.
                     unsigned contentSlot = slot;
-                    if (recoverReadyContent && !generated && !realPresented && !slot && !admissionOpened) {
+                    if (recoverReadyContent && !repeatedStereo && !generated && !realPresented && !slot &&
+                        !admissionOpened) {
                         // Source work can finish inside the blocking SDK Begin
                         // after missing its first deadline. Recover it without
                         // another source wait or waiting for the producer lock.
@@ -1894,6 +2047,20 @@ namespace virtualdesktop_openxr {
                     ++nativeId;
                     begun = false;
                     CHECK_OVRCMD(result);
+                    if (retainReal && selectedRole == FrameGenerationRole::real && committedReal &&
+                        !completedStereo.serial) {
+                        const auto bank = transaction.ticket.bank;
+                        completedStereo = {layer,
+                                           scale,
+                                           transaction.ticket.current_serial,
+                                           transaction.ticket.current_serial,
+                                           transaction.ownerGeneration,
+                                           transaction.ticket.generation,
+                                           reservation.historyEpoch,
+                                           bank,
+                                           preparedImages[static_cast<unsigned>(FrameGenerationRole::real)],
+                                           hasDepth ? m_fgDepthPresentationBanks[bank].output.lastCommittedIndex : -1};
+                    }
                     if (recoverReadyContent && slot + 1 == cycles - 1) {
                         // Only B remains. An abandoned, unqueued synthetic
                         // cannot hold admission; full output readiness and
@@ -1920,6 +2087,15 @@ namespace virtualdesktop_openxr {
                     contextLease.unlock();
                 }
                 if (transaction.ticket.token) {
+                    if (deferredReal && hasDepth) {
+                        // This group's P context never touched that depth.
+                        // Free its private write reservation without rotating
+                        // the visible SDK chain or touching the retained pair.
+                        std::unique_lock retirementLease(m_fgContextMutex);
+                        auto& depth = m_fgDepthDelivery[transaction.ticket.bank];
+                        m_deliveryTransport->discardUncopiedFgDepth(depth);
+                        depth = {};
+                    }
                     const auto deadline = std::chrono::steady_clock::now() + 10s;
                     const auto retirementSerial = transaction.ticket.current_serial;
                     HRESULT result;
@@ -1979,6 +2155,15 @@ namespace virtualdesktop_openxr {
                         }
                     } while (std::chrono::steady_clock::now() < deadline);
                     CHECK_HRCMD(result);
+                    // The consumer fence covers both B and its earlier depth
+                    // copy. Merely returning from SDK End cannot qualify them.
+                    if (completedStereo.serial) {
+                        retainedStereo = completedStereo;
+                    } else if (repeatedStereo) {
+                        retainedStereo.throughSerial = retirementSerial;
+                    } else {
+                        retainedStereo = {};
+                    }
                 }
                 ownedLayers.clear();
                 {

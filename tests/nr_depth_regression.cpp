@@ -101,7 +101,7 @@ float depthAt(const uint8_t* bytes, DXGI_FORMAT format) {
     memcpy(&value, bytes, 4);
     return value;
 }
-void checkDepth(ovrSession session, const ovrLayerEyeFovDepth& layer, unsigned eye) {
+void checkDepth(ovrSession session, const ovrLayerEyeFovDepth& layer, unsigned eye, bool complementDepth = false) {
     auto color = getCommitted(session, layer.ColorTexture[eye]);
     auto depth = getCommitted(session, layer.DepthTexture[eye]);
     D3D11_TEXTURE2D_DESC colorDesc{}, desc{};
@@ -139,8 +139,9 @@ void checkDepth(ovrSession session, const ovrLayerEyeFovDepth& layer, unsigned e
         const auto x = rect.Pos.x + rect.Size.w * probe[0] / 8, y = rect.Pos.y + rect.Size.h * probe[1] / 8;
         const auto* bytes = static_cast<const uint8_t*>(mapped.pData) + y * mapped.RowPitch + x * stride;
         const float actual = depthAt(bytes, format);
-        const float expected =
+        const float sourceDepth =
             (eye && !sameDepthForBothEyes ? .55f : .15f) + (probe[0] > 4 ? .1f : 0.f) + (probe[1] > 4 ? .2f : 0.f);
+        const float expected = complementDepth ? 1.f - sourceDepth : sourceDepth;
         correct &= std::isfinite(actual) && std::abs(actual - expected) < .0001f;
         std::cout << "eye=" << eye << " depth(" << x << ',' << y << ")=" << actual << " expected=" << expected << '\n';
     }

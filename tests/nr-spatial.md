@@ -48,7 +48,7 @@ Native 100% retains its original per-channel color contract and runs independent
 
 Standalone negative controls compile changed shader copies under their output directory. `-ShaderControl ZeroResidual` and `-ShaderControl EncodedArea` must fail the relevant oracle comparisons. They do not modify production shaders.
 
-## Runtime-linked six-mode fixture
+## Runtime-linked fixture
 
 Build a fresh ReleaseBundle runtime cohort first, then use its `obj` directory with the exact matching sources and headers. For example:
 
@@ -65,7 +65,7 @@ Build a fresh ReleaseBundle runtime cohort first, then use its `obj` directory w
 $ovrNull = (Resolve-Path '<path-to-OVRNull-LibOVRRT64_1.dll>').Path
 .\tests\build-nr-spatial-runtime-regression.ps1 `
     -RuntimeObjectDirectory bin/nr-spatial-host-01/obj `
-    -CaseName six-modes-01 -CandidateSpatial -Run -OvrNull $ovrNull
+    -CaseName spatial-modes-01 -CandidateSpatial -Run -OvrNull $ovrNull
 ```
 
 `SourceDirectory` defaults to `virtualdesktop-openxr` in this checkout. `RuntimeObjectDirectory` and a fresh `CaseName` are required. Never link changed `runtime.h` layouts against old runtime objects. Outputs, logs, a private backend, and input SHA-256 records go to ignored `bin/nr-spatial-runtime/<CaseName>`; an existing case directory is rejected.
@@ -80,6 +80,7 @@ The runner reuses the retained runtime fixture's compiler and linker options. It
 | `create-failure` | Both normal and manual-loader creation attempts fail; no stale output is published. |
 | `signal-failure` | Real execution precedes a rejected completion signal; uncertain ownership survives until a blocked native drain completes. |
 | `wait-failure` | Accepted submission precedes a rejected D3D11 consumer wait; resources survive until completion and final output is not published. |
+| `wait-retry-off`, `signal-retry-off` and the corresponding `native-` variants | On both reduced and native processing paths, a rejected output wait or completion signal must drain before the first source copy of a new frame with NR off. Later frames re-enable NR and check both eyes and balanced feature ownership. |
 
 Every child has a 90-second bound. Success requires exit zero, exactly one complete `PASS: public runtime <mode>; ...` marker, and no assertion failures or unexpected `FAIL:` lines. Each of the four injected-failure modes intentionally emits exactly one inherited `FAIL: xrEndFrame(session, &end): -2` before its final PASS. The runner preserves and checks that expected diagnostic; it does not suppress it or treat an unrelated failure as success.
 
@@ -89,4 +90,4 @@ For an old frozen baseline, omit `-CandidateSpatial` and pass its matching froze
 
 With matching current candidate objects, add either `-NegativeControl DropUncertainOwnership` or `-NegativeControl IgnoreWaitFailure` to a fresh linked `-CandidateSpatial -Run` invocation. The runner compiles a changed private copy of `dlssnr_spatial.cpp` and substitutes only that object. The first control runs `signal-failure`; the second runs `wait-failure`. Both must exit nonzero with behavioral assertion/readback evidence. Production sources remain unchanged.
 
-These controls check that the ownership and consumer-wait assertions can detect regressions through actual queued spatial work. They do not replace the normal six-mode pass, real vendor qualification, or separate headset and timing evaluation.
+These controls check that the ownership and consumer-wait assertions can detect regressions through actual queued spatial work. The full runtime fixture and vendor headset evaluation cover separate behavior.

@@ -17,6 +17,7 @@ namespace virtualdesktop_openxr {
     // Genuine SDK handles stay on P. Producer-facing images are private S
     // allocations; their final contents are selected after preprocessing.
     class DeliveryTransport {
+        enum class ChainKind { ordinary, nativeOnly, frameGenerationDepth };
         struct Chain;
         struct State;
 
@@ -43,6 +44,10 @@ namespace virtualdesktop_openxr {
         DeliveryTransport& operator=(const DeliveryTransport&) = delete;
 
         ovrResult create(const ovrTextureSwapChainDesc& desc, ovrTextureSwapChain* chain, bool nativeOnly = false);
+        ovrResult createFrameGenerationDepth(const ovrTextureSwapChainDesc& desc, ovrTextureSwapChain* chain);
+        // The depth-bank writer owns the producer context and must acquire its
+        // index here. Ordinary current/index peeks do not order GPU writes.
+        ovrResult acquireFrameGenerationDepthForWrite(ovrTextureSwapChain chain, int* index);
         void destroy(ovrTextureSwapChain chain);
         ovrResult length(ovrTextureSwapChain chain, int* length);
         ovrResult description(ovrTextureSwapChain chain, ovrTextureSwapChainDesc* desc);
@@ -59,6 +64,10 @@ namespace virtualdesktop_openxr {
         void copy(const Batch& batch);
         void commitCopied(const Batch& batch);
         void execute(const Batch& batch);
+        bool fgDepthReady(const Batch& batch);
+        // Discard an exact scheduled FG depth write before any native read.
+        // The next writer runs on the same producer context.
+        void discardUncopiedFgDepth(const Batch& batch);
         void orderProducerAfterNativeReads();
         // One resource export, multiple owned duplicate handles/importers.
         HRESULT duplicateSharedHandle(ID3D11Texture2D* image, HANDLE* output);
@@ -74,6 +83,7 @@ namespace virtualdesktop_openxr {
         ID3D11DeviceContext4* presentationContext() const noexcept;
 
       private:
+        ovrResult createChain(const ovrTextureSwapChainDesc& desc, ovrTextureSwapChain* chain, ChainKind kind);
         std::unique_ptr<State> m_state;
     };
 } // namespace virtualdesktop_openxr

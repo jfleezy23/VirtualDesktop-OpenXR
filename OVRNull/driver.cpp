@@ -417,12 +417,16 @@ namespace {
             TraceLoggingWriteStart(local, "NullDriver_GetPredictedDisplayTime", TLArg(frameIndex, "Frame"));
 
             double predictedDisplayTime;
-            // Base our prediction on the last successfully waited frame.
-            if (frameIndex <= m_lastWaitedFrame) {
-                predictedDisplayTime = m_nextFramePredictedDisplayTime;
-            } else {
-                const auto numFramesInTheFuture = frameIndex - m_lastWaitedFrame;
-                predictedDisplayTime = m_nextFramePredictedDisplayTime + numFramesInTheFuture * (1.0 / m_displayRate);
+            {
+                std::unique_lock lock(m_frameMutex);
+                // Base our prediction on the last successfully waited frame.
+                if (frameIndex <= m_lastWaitedFrame) {
+                    predictedDisplayTime = m_nextFramePredictedDisplayTime;
+                } else {
+                    const auto numFramesInTheFuture = frameIndex - m_lastWaitedFrame;
+                    predictedDisplayTime =
+                        m_nextFramePredictedDisplayTime + numFramesInTheFuture * (1.0 / m_displayRate);
+                }
             }
 
             TraceLoggingWriteStop(

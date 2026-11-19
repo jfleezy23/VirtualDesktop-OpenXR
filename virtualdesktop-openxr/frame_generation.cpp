@@ -1691,6 +1691,7 @@ namespace virtualdesktop_openxr {
             return VDXRFG_E_POISONED;
         }
         transaction.slots = input.slots;
+        transaction.nrEnabled = input.nrEnabled;
         state.previousSerial = input.serial;
         state.lastFullOutputValue = transaction.ticket.output_ready_value;
         state.liveTokens[transaction.ticket.bank] = transaction.ticket.token;
@@ -1776,6 +1777,28 @@ namespace virtualdesktop_openxr {
         const auto& ticket = m_state->tickets[transaction.ticket.bank];
         const auto value = m_state->ready11->GetCompletedValue();
         return value != UINT64_MAX && value >= ticket.output_ready_value;
+    }
+
+    HRESULT FrameGeneration::realInputReady(const OwnedFrameTransaction& transaction) noexcept {
+        if (!m_state || !transaction.ticket.token || transaction.ticket.bank >= 2 ||
+            transaction.ownerGeneration != m_state->generation ||
+            m_state->liveTokens[transaction.ticket.bank] != transaction.ticket.token) {
+            return VDXRFG_E_REJECTED;
+        }
+        auto& state = *m_state;
+        if (state.poisoned)
+            return VDXRFG_E_POISONED;
+        const auto& ticket = state.tickets[transaction.ticket.bank];
+        if (!state.deliveryConsumed11 || !ticket.input_consumed_value || state.inputOwnerToken != ticket.token ||
+            state.inputOwnerGeneration != ticket.generation) {
+            return VDXRFG_E_REJECTED;
+        }
+        const auto completed = state.deliveryConsumed11->GetCompletedValue();
+        if (completed == UINT64_MAX) {
+            state.poisoned = state.hostCompletionUnknown = true;
+            return VDXRFG_E_POISONED;
+        }
+        return completed >= ticket.input_consumed_value ? S_OK : VDXRFG_E_BUSY;
     }
 
     HRESULT FrameGeneration::prepareOutputReadyWait(const OwnedFrameTransaction& transaction,

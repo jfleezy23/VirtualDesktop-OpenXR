@@ -653,6 +653,10 @@ namespace virtualdesktop_openxr {
         }
 
         // We assume that our frame timing in xrWaitFrame() guaranteed availability of the next image. No wait.
+        // A failed return fence invalidates that assumption for this session.
+        if (m_sourceReturnFailed) {
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
         xrSwapchain.lastWaitedIndex = xrSwapchain.acquiredIndices.front();
 
         return XR_SUCCESS;

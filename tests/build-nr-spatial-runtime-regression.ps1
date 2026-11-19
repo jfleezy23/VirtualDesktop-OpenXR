@@ -134,7 +134,7 @@ $backend = Join-Path $output 'backend'
 New-Item -ItemType Directory -Path $backend | Out-Null
 & cl.exe /nologo /std:c++17 /EHsc /W3 /MT /O2 /LD /DNDEBUG /D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR "/I$repo/external/DLSS/include" "/I$repo/packages/Detours.4.0.1/lib/native/include" "$repo/tests/nr_test_module.cpp" "/Fo$output/nr_test_module.obj" "/Fe$backend/nvngx_dlssnr.dll" /link "$repo/packages/Detours.4.0.1/lib/native/libs/x64/detours.lib" *> "$output/facade-build.log"
 if ($LASTEXITCODE) { Get-Content "$output/facade-build.log"; throw "Private facade build failed: $LASTEXITCODE" }
-$inputs = @("$repo/tests/nr_spatial_runtime_regression.cpp", "$repo/tests/nr_input_toggle_regression.cpp", "$SourceDirectory/runtime.h", "$SourceDirectory/dlssnr.cpp")
+$inputs = @("$repo/tests/nr_spatial_runtime_regression.cpp", "$repo/tests/nr_input_toggle_regression.cpp", "$repo/tests/nr_depth_regression.cpp", "$SourceDirectory/runtime.h", "$SourceDirectory/dlssnr.cpp", "$SourceDirectory/frame.cpp")
 if (Test-Path -LiteralPath "$SourceDirectory/dlssnr_spatial.cpp") { $inputs += "$SourceDirectory/dlssnr_spatial.cpp" }
 if ($NegativeControl -ne 'None') { $inputs += $controlSource }
 $inputs += @(Get-ChildItem -LiteralPath $RuntimeObjectDirectory -Filter '*.obj' | ForEach-Object FullName)
@@ -143,7 +143,10 @@ Write-Output "PASS: runtime fixture/source facade built using MSVC14.51; output=
 if (!$Run) { exit 0 }
 if (!$OvrNull) { throw 'Run requires the explicitly selected source OVRNull DLL.' }
 Copy-Item -LiteralPath $OvrNull -Destination "$backend/LibOVRRT64_1.dll"
-$modes = if ($CandidateSpatial) { @('native100', 'sequence', 'evaluate-failure', 'create-failure', 'signal-failure', 'wait-failure') } else { @('native100', 'sequence') }
+$modes = if ($CandidateSpatial) {
+    @('native100', 'sequence', 'evaluate-failure', 'create-failure', 'signal-failure', 'wait-failure',
+      'wait-retry-off', 'signal-retry-off', 'native-wait-retry-off', 'native-signal-retry-off')
+} else { @('native100', 'sequence') }
 if ($NegativeControl -eq 'DropUncertainOwnership') { $modes = @('signal-failure') }
 if ($NegativeControl -eq 'IgnoreWaitFailure') { $modes = @('wait-failure') }
 foreach ($mode in $modes) {

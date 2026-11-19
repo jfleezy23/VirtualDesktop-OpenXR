@@ -102,7 +102,7 @@ for source in args.sources:
     if name in {'nr_fg_runtime_regression', 'nr_spatial_runtime_regression', 'nr_input_toggle_regression',
                 'runtime_delivery_regression', 'native_runtime_delivery_probe', 'controlled_runtime_delivery_probe',
                 'nr_fg_prebegin_overlap_regression', 'nr_fg_prebegin_fast_begin_regression',
-                'nr_fg_4x_capture_regression',
+                'nr_fg_4x_capture_regression', 'fg_failed_end_source_regression', 'fg_success_source_return_regression',
                 'nr_fg_last_copy_gate_regression', 'nr_fg_current_copy_gate_regression',
                 'nr_fg_prebegin_failure_regression', 'nr_fg_prebegin_cancel_regression',
                 'nr_fg_copy_ready_poison_regression', 'nr_fg_pending_current_copy_regression'}:
@@ -132,24 +132,30 @@ for source in args.sources:
         compile_helper('spatial-observer', 'virtualdesktop-openxr/NrSpatialPipeline.cpp')
     if name == 'nr_fg_early_dispatch_regression':
         compile_helper('context-methods', 'tests/context_method_addresses.cpp')
-    if name in {'fg_delivery_isolation_regression', 'fg_delivery_dependencies_regression',
-                'delivery_transport_regression', 'nr_fg_copy_ready_poison_regression',
+    if name in {'fg_worker_shutdown_regression', 'fg_failed_end_source_regression', 'fg_success_source_return_regression',
+                'display_refresh_rate_regression', 'tracking_cache_regression',
+                'fg_delivery_isolation_regression', 'fg_delivery_dependencies_regression',
+                'delivery_transport_regression', 'delivery_depth_bank_regression', 'nr_fg_copy_ready_poison_regression',
                 'nr_fg_last_copy_gate_regression', 'nr_fg_current_copy_gate_regression',
-                'nr_fg_pending_current_copy_regression'}:
+                'nr_fg_pending_current_copy_regression', 'nr_fg_retained_stereo_regression'}:
         compile_helper('delivery-context-slots', 'tests/delivery_context_slots.cpp')
     if name == 'fg_delivery_dependencies_regression':
         compile_helper('delivery-queue-slots', 'tests/delivery_queue_slots.cpp')
     # Only isolated SDK fixtures replace system.obj. Native probes retain the real SDK loader.
-    private_system = name in {'nr_fg_closed_cycle_recovery_regression', 'nr_fg_recovery_copy_regression',
+    private_system = name in {'fg_worker_shutdown_regression', 'fg_failed_end_source_regression', 'fg_success_source_return_regression',
+                             'display_refresh_rate_regression', 'tracking_cache_regression',
+                             'nr_fg_prediction_frontier_regression', 'nonnr_input_regression',
+                             'nr_fg_partial_reservation_regression',
+                             'nr_fg_closed_cycle_recovery_regression', 'nr_fg_recovery_copy_regression',
                              'controlled_runtime_delivery_probe', 'nr_fg_prebegin_overlap_regression',
                              'nr_fg_4x_capture_regression',
                              'nr_fg_prebegin_fast_begin_regression', 'nr_fg_prebegin_failure_regression',
                              'nr_fg_last_copy_gate_regression', 'nr_fg_current_copy_gate_regression',
                              'nr_fg_prebegin_cancel_regression', 'nr_fg_copy_ready_poison_regression',
                              'nr_fg_pending_current_copy_regression', 'fg_delivery_isolation_regression',
-                             'fg_delivery_dependencies_regression', 'delivery_transport_regression',
+                             'fg_delivery_dependencies_regression', 'delivery_transport_regression', 'delivery_depth_bank_regression',
                              'nr_fg_runtime_regression', 'nr_spatial_runtime_regression',
-                             'nr_input_toggle_regression', 'runtime_delivery_regression'}
+                             'nr_input_toggle_regression', 'runtime_delivery_regression', 'nr_fg_retained_stereo_regression'}
     if private_system:
         compile_helper('private-system', 'virtualdesktop-openxr/system.cpp', ['/DLOAD_LOCAL_LIBOVR'])
     link_args = ['/nologo', '/SUBSYSTEM:CONSOLE', '/DEBUG', '/OUT:' + str(out / (name + '.exe')), str(test_object), *map(str, extra_objects)]

@@ -310,7 +310,9 @@ namespace {
     }
 
     struct BackendHooks {
-        explicit BackendHooks(const wchar_t* directory, BackendState& state) {
+        const bool fakeSwapchains;
+        explicit BackendHooks(const wchar_t* directory, BackendState& state, bool useFakeSwapchains = true)
+            : fakeSwapchains(useFakeSwapchains) {
             ovrInitParams init{};
             init.Flags = ovrInit_RequestVersion;
             init.RequestedMinorVersion = OVR_MINOR_VERSION;
@@ -342,9 +344,11 @@ namespace {
             checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalEnd), interceptedEnd));
             checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalStatus), interceptedStatus));
             checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalHmdDesc), interceptedHmdDesc));
-            checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalIndex), interceptedIndex));
-            checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalCreateChain), interceptedCreateChain));
-            checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalDestroyChain), interceptedDestroyChain));
+            if (fakeSwapchains) {
+                checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalIndex), interceptedIndex));
+                checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalCreateChain), interceptedCreateChain));
+                checkDetour(DetourAttach(reinterpret_cast<PVOID*>(&originalDestroyChain), interceptedDestroyChain));
+            }
             checkDetour(DetourTransactionCommit());
         }
 
@@ -356,9 +360,10 @@ namespace {
                 DetourDetach(reinterpret_cast<PVOID*>(&originalEnd), interceptedEnd) != NO_ERROR ||
                 DetourDetach(reinterpret_cast<PVOID*>(&originalStatus), interceptedStatus) != NO_ERROR ||
                 DetourDetach(reinterpret_cast<PVOID*>(&originalHmdDesc), interceptedHmdDesc) != NO_ERROR ||
-                DetourDetach(reinterpret_cast<PVOID*>(&originalIndex), interceptedIndex) != NO_ERROR ||
-                DetourDetach(reinterpret_cast<PVOID*>(&originalCreateChain), interceptedCreateChain) != NO_ERROR ||
-                DetourDetach(reinterpret_cast<PVOID*>(&originalDestroyChain), interceptedDestroyChain) != NO_ERROR ||
+                (fakeSwapchains &&
+                 (DetourDetach(reinterpret_cast<PVOID*>(&originalIndex), interceptedIndex) != NO_ERROR ||
+                  DetourDetach(reinterpret_cast<PVOID*>(&originalCreateChain), interceptedCreateChain) != NO_ERROR ||
+                  DetourDetach(reinterpret_cast<PVOID*>(&originalDestroyChain), interceptedDestroyChain) != NO_ERROR)) ||
                 DetourTransactionCommit() != NO_ERROR) {
                 std::cerr << "FAIL: OVR export detour cleanup failed\n";
                 std::_Exit(2);

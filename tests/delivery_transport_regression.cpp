@@ -5,6 +5,7 @@
 #include "fg_delivery_isolation_regression.cpp"
 #undef wmain
 #include "../virtualdesktop-openxr/delivery_transport.h"
+#include <array>
 #include <atomic>
 #include <exception>
 #include <future>
@@ -21,7 +22,7 @@ namespace {
         ID3D11DeviceContext4* context{};
         ovrTextureSwapChain badCommit{};
         bool badSignal{}, badWait{};
-        unsigned injections{};
+        unsigned injections{}, nativeCommitCalls{};
         static HRESULT STDMETHODCALLTYPE wait(ID3D11DeviceContext4* context, ID3D11Fence* fence, UINT64 value) {
             if (active && active->context == context && active->badWait) {
                 active->badWait = false;
@@ -39,6 +40,8 @@ namespace {
             return originalSignal(context, fence, value);
         }
         static ovrResult OVR_CDECL commit(ovrSession session, ovrTextureSwapChain chain) {
+            if (active)
+                ++active->nativeCommitCalls;
             if (active && active->badCommit == chain) {
                 ++active->injections;
                 return ovrError_RuntimeException;
@@ -130,6 +133,7 @@ namespace {
     };
 } // namespace
 
+#ifndef VDXR_DELIVERY_TRANSPORT_HELPERS_ONLY
 int wmain(int argc, wchar_t** argv) {
     try {
         check(argc == 3, "usage: private-SDK-prefix metadata|pixels|reuse");
@@ -138,7 +142,7 @@ int wmain(int argc, wchar_t** argv) {
         check(scenario == L"metadata" || scenario == L"pixels" || scenario == L"reuse" || scenario == L"pending" ||
                   scenario == L"cancel" || scenario == L"failed-wait" || scenario == L"failed-signal" ||
                   scenario == L"partial-commit" || scenario == L"native-commit-failure" ||
-                  scenario == L"pinned-retire" || fenceDrain,
+                  scenario == L"copied-index-pair" || scenario == L"pinned-retire" || fenceDrain,
               "known transport case");
         auto hwOwner = std::make_unique<Interop>();
         auto& hw = *hwOwner;
@@ -375,13 +379,82 @@ int wmain(int argc, wchar_t** argv) {
         check(transport.statistics().nativeCopies == 0 && transport.statistics().nativeCommits == 0,
               "accepted FG does not copy or commit unused private intermediates");
         ovrTextureSwapChain second{};
-        if (scenario == L"partial-commit") {
+        if (scenario == L"partial-commit" || scenario == L"copied-index-pair") {
             sdk(transport.create(desc, &second), "second pair chain");
             sdk(transport.commit(second), "second pair receipt");
         }
         auto batch = transport.prepare({chain, chain, second}, 1);
         check(batch.images.size() == (second ? 2u : 1u),
               "shared chains deduplicate while distinct pair members remain");
+        if (scenario == L"copied-index-pair") {
+            int secondCount{};
+            sdk(transport.length(second, &secondCount), "second producer image count");
+            check(count > 1 && secondCount > 1, "copied-index pair requires two multi-image native chains");
+            const int originalIndex = batch.images[1].sourceIndex;
+            check(originalIndex >= 0 && originalIndex < secondCount, "second receipt has an owned source index");
+            const int alternateIndex = (originalIndex + 1) % secondCount;
+            check(alternateIndex != originalIndex && alternateIndex >= 0 && alternateIndex < secondCount,
+                  "changed second source index is distinct and still in bounds");
+            const std::array<ovrTextureSwapChain, 2> chains{{chain, second}};
+            const auto nativeIndexes = [&] {
+                std::array<int, 2> indexes{};
+                for (unsigned member = 0; member < chains.size(); ++member)
+                    sdk(ovr_GetTextureSwapChainCurrentIndex(session.value, chains[member], &indexes[member]),
+                        "copied pair native index");
+                return indexes;
+            };
+            const auto initialIndexes = nativeIndexes();
+            transport.copy(batch);
+            const auto copied = transport.statistics();
+            check(copied.nativeCopies == 2 && copied.nativeCommits == 0 && copied.batches == 0 &&
+                      nativeIndexes() == initialIndexes,
+                  "both pair copies precede all native commits");
+            const auto sameStatistics = [](const auto& left, const auto& right) {
+                return left.privateExports == right.privateExports && left.nativeCopies == right.nativeCopies &&
+                       left.nativeCommits == right.nativeCommits && left.batches == right.batches;
+            };
+            TransportFaults observed(presentation.context.Get());
+            for (const int wrongIndex : {-1, alternateIndex}) {
+                auto malformed = batch;
+                // Leave the first member valid: validating during the commit
+                // loop would irreversibly advance it before rejecting member 2.
+                malformed.images[1].sourceIndex = wrongIndex;
+                bool rejected{};
+                try {
+                    transport.commitCopied(malformed);
+                } catch (...) {
+                    rejected = true;
+                }
+                check(rejected && !transport.completionUnknown() && observed.nativeCommitCalls == 0 &&
+                          sameStatistics(transport.statistics(), copied),
+                      "malformed second receipt is rejected atomically before any native commit or counter change");
+                check(nativeIndexes() == initialIndexes,
+                      "malformed second receipt cannot advance either native image index");
+            }
+            transport.commitCopied(batch);
+            const auto committed = transport.statistics();
+            check(!transport.completionUnknown() && observed.nativeCommitCalls == 2 &&
+                      committed.privateExports == copied.privateExports && committed.nativeCopies == 2 &&
+                      committed.nativeCommits == 2 && committed.batches == 1,
+                  "unchanged original pair commits each native chain exactly once after malformed clones");
+            const auto committedIndexes = nativeIndexes();
+            bool rejected{};
+            try {
+                transport.commitCopied(batch);
+            } catch (...) {
+                rejected = true;
+            }
+            check(rejected && !transport.completionUnknown() && observed.nativeCommitCalls == 2 &&
+                      sameStatistics(transport.statistics(), committed) && nativeIndexes() == committedIndexes,
+                  "replayed original pair cannot commit again, change counters or advance either native index");
+            batch = {};
+            transport.destroy(chain);
+            transport.destroy(second);
+            transport.shutdown();
+            hw.gpu.noErrors();
+            std::puts("PASS: copied pair source-index validation is atomic before native commits and rejects replay");
+            return 0;
+        }
         if (scenario == L"failed-wait" || scenario == L"failed-signal" || scenario == L"partial-commit" ||
             scenario == L"native-commit-failure") {
             ovrTextureSwapChain direct{};
@@ -502,6 +575,21 @@ int wmain(int argc, wchar_t** argv) {
             }
             check(rejected && !foreign.completionUnknown() && foreign.statistics().nativeCommits == 0,
                   "foreign copied receipt cannot commit on a different transport");
+            for (const int wrongIndex : {-1, batch.images[0].sourceIndex + 1}) {
+                auto malformed = batch;
+                malformed.images[0].sourceIndex = wrongIndex;
+                rejected = false;
+                try {
+                    transport.commitCopied(malformed);
+                } catch (...) {
+                    rejected = true;
+                }
+                check(rejected && !transport.completionUnknown() && transport.statistics().nativeCommits == 0,
+                      "changed copied source index cannot commit or poison the original receipt");
+                sdk(ovr_GetTextureSwapChainCurrentIndex(session.value, chain, &stillCurrent),
+                    "index after malformed copied receipt");
+                check(stillCurrent == nativeIndex, "malformed copied receipt cannot advance the native image");
+            }
             transport.commitCopied(batch);
             const auto beforeReplay = transport.statistics();
             rejected = false;
@@ -566,3 +654,4 @@ int wmain(int argc, wchar_t** argv) {
         return 1;
     }
 }
+#endif
