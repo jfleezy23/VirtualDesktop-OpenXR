@@ -1182,8 +1182,8 @@ namespace virtualdesktop_openxr {
                         retainedStereo.layer.Header.Type != ownedLayers[0].Header.Type) {
                         return false;
                     }
-                    const auto& colour = m_fgPresentationBanks[retainedStereo.bank][
-                        static_cast<unsigned>(FrameGenerationRole::real)];
+                    const auto& colour =
+                        m_fgPresentationBanks[retainedStereo.bank][static_cast<unsigned>(FrameGenerationRole::real)];
                     if (colour.images.size() < 2 ||
                         retainedStereo.layer.EyeFov.ColorTexture[0] != colour.ovrSwapchain ||
                         retainedStereo.colourIndex != colour.lastCommittedIndex) {
@@ -1197,7 +1197,8 @@ namespace virtualdesktop_openxr {
                            retainedStereo.depthIndex == depth.lastCommittedIndex;
                 };
                 const auto currentRealInputReady = [&] {
-                    CHECK_MSG(!m_deliveryTransport->completionUnknown(), "Cannot repeat on an uncertain delivery graph");
+                    CHECK_MSG(!m_deliveryTransport->completionUnknown(),
+                              "Cannot repeat on an uncertain delivery graph");
                     const auto result = m_frameGeneration->realInputReady(transaction);
                     if (result != VDXRFG_E_BUSY)
                         CHECK_HRCMD(result);
@@ -1231,8 +1232,7 @@ namespace virtualdesktop_openxr {
                     }
                 }
                 // A skipped B never becomes the visible predecessor for S1/S2.
-                bool generated = hasGpuOutput && !transaction.ticket.prime && matchingReservation &&
-                                 !missedPredecessor;
+                bool generated = hasGpuOutput && !transaction.ticket.prime && matchingReservation && !missedPredecessor;
                 if (!matchingReservation) {
                     m_fgNeedReprime = m_fgTimelineReanchor = true;
                 }

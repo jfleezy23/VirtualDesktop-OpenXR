@@ -22,8 +22,8 @@ namespace {
         using Signal = HRESULT(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, ID3D12Fence*, UINT64);
         using Wait = HRESULT(STDMETHODCALLTYPE*)(ID3D11DeviceContext4*, ID3D11Fence*, UINT64);
         using Event = HRESULT(STDMETHODCALLTYPE*)(ID3D12Fence*, UINT64, HANDLE);
-        using Copy = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext4*, ID3D11Resource*, UINT, UINT, UINT, UINT,
-                                              ID3D11Resource*, UINT, const D3D11_BOX*);
+        using Copy = void(STDMETHODCALLTYPE*)(
+            ID3D11DeviceContext4*, ID3D11Resource*, UINT, UINT, UINT, UINT, ID3D11Resource*, UINT, const D3D11_BOX*);
         struct Retired {
             std::atomic<unsigned> resources{}, lists{};
         };
@@ -709,7 +709,7 @@ int main(int argc, char** argv) {
                 "normal teardown must release every created feature exactly once");
         require(probe.evaluations == (probe.failEvaluation ? 16
                                       : probe.failCreation ? (nativeFault ? 0 : 10)
-                                       : retryFrame         ? 36
+                                      : retryFrame         ? 36
                                       : failSubmission     ? 18
                                                            : 38),
                 "bounded run must observe the exact expected stereo evaluation count");

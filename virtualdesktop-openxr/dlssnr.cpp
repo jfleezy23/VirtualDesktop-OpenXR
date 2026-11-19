@@ -369,11 +369,11 @@ namespace virtualdesktop_openxr {
     }
 
     void OpenXrRuntime::upliftLayer(const XrSwapchainSubImage** views,
-                                     const XrSwapchainSubImage** depth,
-                                     const bool* depthInverted,
-                                     ovrLayerEyeFov& layer,
-                                     bool finalColour,
-                                     std::unique_lock<std::mutex>* producerLease) {
+                                    const XrSwapchainSubImage** depth,
+                                    const bool* depthInverted,
+                                    ovrLayerEyeFov& layer,
+                                    bool finalColour,
+                                    std::unique_lock<std::mutex>* producerLease) {
         if (m_precompositor.dlssnrSettings.processingResolution < 100 &&
             upliftSpatialLayer(views, depth, depthInverted, layer, finalColour, producerLease)) {
             // Entering spatial mode already drained the previous native features

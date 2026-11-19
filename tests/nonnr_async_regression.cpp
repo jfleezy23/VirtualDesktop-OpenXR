@@ -363,7 +363,8 @@ namespace {
                 (fakeSwapchains &&
                  (DetourDetach(reinterpret_cast<PVOID*>(&originalIndex), interceptedIndex) != NO_ERROR ||
                   DetourDetach(reinterpret_cast<PVOID*>(&originalCreateChain), interceptedCreateChain) != NO_ERROR ||
-                  DetourDetach(reinterpret_cast<PVOID*>(&originalDestroyChain), interceptedDestroyChain) != NO_ERROR)) ||
+                  DetourDetach(reinterpret_cast<PVOID*>(&originalDestroyChain), interceptedDestroyChain) !=
+                      NO_ERROR)) ||
                 DetourTransactionCommit() != NO_ERROR) {
                 std::cerr << "FAIL: OVR export detour cleanup failed\n";
                 std::_Exit(2);

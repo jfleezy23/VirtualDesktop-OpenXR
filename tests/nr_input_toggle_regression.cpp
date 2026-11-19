@@ -861,10 +861,11 @@ int VDXR_NR_TEST_ENTRYPOINT(int argc, char** argv) {
                 checkXr(endResult, "xrEndFrame(session, &end)");
                 {
                     std::unique_lock lock(captureMutex);
-                    require(ready.wait_for(lock,
-                                           std::chrono::seconds(30),
-                                            [&] { return captured > frame - rejectedFrames || !captureFailure.empty(); }),
-                            "Native compositor readback timed out");
+                    require(
+                        ready.wait_for(lock,
+                                       std::chrono::seconds(30),
+                                       [&] { return captured > frame - rejectedFrames || !captureFailure.empty(); }),
+                        "Native compositor readback timed out");
                     if (!captureFailure.empty())
                         throw std::runtime_error(captureFailure);
                 }

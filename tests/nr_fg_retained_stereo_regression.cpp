@@ -126,9 +126,9 @@ namespace virtualdesktop_openxr {
             }
             if (withDepth) {
                 for (auto& bank : runtime.m_fgDepthPresentationBanks) {
-                    require(OVR_SUCCESS(transport.createFrameGenerationDepth(description(true),
-                                                                              &bank.output.ovrSwapchain)),
-                            "create actual private depth bank and native chain");
+                    require(
+                        OVR_SUCCESS(transport.createFrameGenerationDepth(description(true), &bank.output.ovrSwapchain)),
+                        "create actual private depth bank and native chain");
                     int count{};
                     require(OVR_SUCCESS(transport.length(bank.output.ovrSwapchain, &count)) && count == 3,
                             "native depth chain rotates");
@@ -308,9 +308,8 @@ namespace virtualdesktop_openxr {
                 else
                     require(slow->after->GetCompletedValue() == 0 && full->GetCompletedValue() < fullValue,
                             "slow current pair is still pending before publication");
-                StereoClock::time =
-                    runtime.xrTimeToOvrTime(reservation.firstTarget + skipped * period) +
-                    (gated && !preDeadline && !slowEnd ? .001 : -.003);
+                StereoClock::time = runtime.xrTimeToOvrTime(reservation.firstTarget + skipped * period) +
+                                    (gated && !preDeadline && !slowEnd ? .001 : -.003);
                 {
                     std::lock_guard lock(runtime.m_asyncSubmissionMutex);
                     runtime.m_fgReservationForSubmission = reservation;
@@ -366,14 +365,15 @@ namespace virtualdesktop_openxr {
                         for (unsigned slot = 0; slot < replayed; ++slot) {
                             const auto& repeated = ends[priorEnds + slot];
                             require(repeated.layer.EyeFov.ColorTexture[0] == committed.layer.EyeFov.ColorTexture[0] &&
-                                        repeated.layer.EyeFov.ColorTexture[1] == committed.layer.EyeFov.ColorTexture[1] &&
+                                        repeated.layer.EyeFov.ColorTexture[1] ==
+                                            committed.layer.EyeFov.ColorTexture[1] &&
                                         repeated.colourIndex == committed.colourIndex,
                                     "replay uses the last committed stereo colour, without a new commit");
                             require(repeated.layer.EyeFov.SensorSampleTime == committed.layer.EyeFov.SensorSampleTime,
                                     "stereo replay preserves the original sensor sample time");
                             for (unsigned eye = 0; eye < 2; ++eye) {
                                 require(repeated.layer.EyeFov.RenderPose[eye].Position.y ==
-                                            committed.layer.EyeFov.RenderPose[eye].Position.y &&
+                                                committed.layer.EyeFov.RenderPose[eye].Position.y &&
                                             repeated.layer.EyeFov.RenderPose[eye].Position.x ==
                                                 committed.layer.EyeFov.RenderPose[eye].Position.x,
                                         "stereo replay keeps both original render poses");
@@ -390,8 +390,7 @@ namespace virtualdesktop_openxr {
                                         "stereo replay retains the exact depth chain, image and projection");
                         }
                     } else {
-                        require(!progressed,
-                                "NR-off or changed history uses the original current-B path");
+                        require(!progressed, "NR-off or changed history uses the original current-B path");
                         std::lock_guard lock(sdk.mutex);
                         const auto& current = ends[priorEnds];
                         const auto& previous = ends[multiplier - 1];
@@ -407,8 +406,7 @@ namespace virtualdesktop_openxr {
                         slow.reset();
                     }
                 }
-                const bool ended =
-                    sdk.waitFor([&] { return ends.size() >= priorEnds + expectedSlots; });
+                const bool ended = sdk.waitFor([&] { return ends.size() >= priorEnds + expectedSlots; });
                 if (!ended && slowEnd) {
                     {
                         std::lock_guard lock(sdk.mutex);
@@ -424,9 +422,11 @@ namespace virtualdesktop_openxr {
                         "actual presentation queue completed all Ends");
                 {
                     std::unique_lock lock(runtime.m_asyncSubmissionMutex);
-                    require(runtime.m_asyncSubmissionCondVar.wait_for(lock, 4s, [&] {
-                                return runtime.m_asyncSubmissionError || !runtime.m_fgActiveSubmission;
-                            }) && !runtime.m_asyncSubmissionError,
+                    require(runtime.m_asyncSubmissionCondVar.wait_for(
+                                lock,
+                                4s,
+                                [&] { return runtime.m_asyncSubmissionError || !runtime.m_fgActiveSubmission; }) &&
+                                !runtime.m_asyncSubmissionError,
                             "all selected slots and queued owners retire without worker failure");
                 }
                 require(ends.size() == priorEnds + expectedSlots, "expired 4x slots cannot submit extra Ends");
@@ -462,16 +462,17 @@ namespace virtualdesktop_openxr {
                     const auto chain = last.layer.EyeFov.ColorTexture[0];
                     require(chain == last.layer.EyeFov.ColorTexture[1], "packed two-eye colour is one selected image");
                     ComPtr<ID3D11Texture2D> colour;
-                    require(OVR_SUCCESS(ovr_GetTextureSwapChainBufferDX(runtime.m_ovrSession, chain,
-                                                                      last.colourIndex, IID_PPV_ARGS(&colour))),
+                    require(OVR_SUCCESS(ovr_GetTextureSwapChainBufferDX(
+                                runtime.m_ovrSession, chain, last.colourIndex, IID_PPV_ARGS(&colour))),
                             "read exact committed real image");
-                    require(presentation.read(colour.Get()) == colours[group + 1], "fresh stereo pixels match both eyes");
+                    require(presentation.read(colour.Get()) == colours[group + 1],
+                            "fresh stereo pixels match both eyes");
                     if (withDepth) {
                         ComPtr<ID3D11Texture2D> depth;
                         require(OVR_SUCCESS(ovr_GetTextureSwapChainBufferDX(runtime.m_ovrSession,
-                                                                          last.layer.EyeFovDepth.DepthTexture[0],
-                                                                          last.depthIndex,
-                                                                          IID_PPV_ARGS(&depth))),
+                                                                            last.layer.EyeFovDepth.DepthTexture[0],
+                                                                            last.depthIndex,
+                                                                            IID_PPV_ARGS(&depth))),
                                 "read exact committed depth image");
                         const auto bytes = presentation.read(depth.Get());
                         for (size_t offset = 0; offset < bytes.size(); offset += sizeof(float)) {
@@ -490,7 +491,7 @@ namespace virtualdesktop_openxr {
                       << (withDepth ? " with synchronized depth" : " colour-only") << '\n';
         }
     };
-}
+} // namespace virtualdesktop_openxr
 
 int wmain(int argc, wchar_t** argv) {
     try {
