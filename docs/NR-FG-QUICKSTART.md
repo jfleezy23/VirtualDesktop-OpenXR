@@ -1,9 +1,10 @@
 # Try VDXR NR and OFXR frame generation
 
-The [November 17 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.17.1)
-includes **early optical flow** for eligible D3D11 sessions with NR and NVIDIA FG. The matching
-**Controls 2026.11.16.1** adds live status for NR, FG and early optical flow use. **OFXR 2×/3×/4×**,
-frame-delivery recovery and automatic per-game NR/FG profiles remain available.
+The [November 18 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.18.1)
+adds **stereo replay during late NR** for eligible **OFXR 2×/3×/4×** sessions and fixes retry ordering
+after a failed NR submission. Early optical flow remains available with compatible D3D11 games.
+**Controls 2026.11.16.1** shows live NR, FG and early optical flow activity. Automatic per-game profiles
+continue to apply.
 NR processing resolution and coverage are independent, including **95% coverage / 80% processing** and
 **90% coverage / 85% processing**. FG offers Off, 2×, 3× and 4× and also works with NR off.
 
@@ -23,10 +24,10 @@ it does not provide Steam Frame or ALVR streaming. Frame Launcher's separate Ste
 
 ## Install once
 
-1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.11.17.1.zip` and
-   `VDXR-NR-FG-Controls-Windows-x64-2026.11.17.1.zip` from the
-   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.17.1).
-   Check them against `SHA256SUMS-2026.11.17.1.txt`.
+1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.11.18.1.zip` and
+   `VDXR-NR-FG-Controls-Windows-x64-2026.11.18.1.zip` from the
+   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.18.1).
+   Check them against `SHA256SUMS-2026.11.18.1.txt`.
 2. Use the ZIPs from step 1 with the [side-by-side setup](SIDE-BY-SIDE-RUNTIME.md), which describes
    the folder layout and registration procedure. Put the matching host DLL, FG DLL and
    `CUSTOM-RUNTIME.json` under `%ProgramFiles%\VDXR-NR-FG\OpenXR`, then register the managed path.
@@ -38,7 +39,8 @@ it does not provide Steam Frame or ALVR streaming. Frame Launcher's separate Ste
 4. Select **Custom VDXR** in Controls and **VDXR** in Streamer. The switch takes effect on the next game launch.
 
 For upgrades, use the side-by-side guide's backup and replacement steps with all VR games closed. The new Controls
-app can live in its own extracted folder. Existing NR, appearance and FG settings are preserved.
+app can live in its own extracted folder. Restart Streamer after replacing the runtime and reconnect the headset
+if needed. Existing NR, appearance and FG settings are preserved.
 
 ## First comparison
 
@@ -152,7 +154,7 @@ not automatically converted by selecting VDXR. Routing a game successfully does 
 
 Rapid head turns, ghosting and exposure-change artifacts can remain. This release does not establish universal
 game compatibility, artifact-free motion or identical perceived detail at every processing percentage.
-See the [release notes](releases/2026.11.17.1.md) for early optical flow eligibility and output readiness measurements.
+See the [November 17 release notes](releases/2026.11.17.1.md) for early optical flow eligibility and output readiness measurements.
 
 ## Source and licenses
 
