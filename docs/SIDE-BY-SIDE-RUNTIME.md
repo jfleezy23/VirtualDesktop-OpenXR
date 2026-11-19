@@ -31,12 +31,9 @@ that unprivileged programs can modify.
 
 ## Install from the release
 
-The [**2026.11.15.1 release**](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.15.1) supplies the guarded runtime and
-`CUSTOM-RUNTIME.json` together. Older runtime packages without this metadata are
-not the switcher package. Download the dated runtime ZIP and dated Controls ZIP
-from that release, and verify them against `SHA256SUMS-2026.11.15.1.txt` before continuing.
-Use `VDXR-NR-FG-Windows-x64-2026.11.15.1.zip` and
-`VDXR-NR-FG-Controls-Windows-x64-2026.11.15.1.zip` together.
+Use the matching runtime and Controls ZIPs from the [Quickstart](NR-FG-QUICKSTART.md).
+Verify both ZIPs against the release's checksums. The runtime package supplies the guarded DLLs
+and their matching `CUSTOM-RUNTIME.json`.
 
 1. Close VR games. Keep Virtual Desktop Streamer's **official** runtime installed.
    If you previously replaced its DLL with a community build, restore the original
@@ -96,9 +93,7 @@ try {
    Runtime-only selection does not require restarting Streamer or Controls. Optional prepared
    launch-library selection can restart Streamer and ask you to reconnect the headset.
 
-The dated Controls package reuses the locally tested binary labelled 2026.11.08.1, without a fresh rebuild.
-Compared with the previous public package, it adds optional prepared launch-library support and disables
-Custom NR/FG controls in Stock mode. Existing preferences and defaults are preserved.
+See the [Controls guide](NR-FG-CONTROLS.md) for live activity, saved profiles and the Runtime selector.
 
 ### Optional prepared launch libraries
 
@@ -137,7 +132,7 @@ The new spatial NR option keeps processing at native
 100% until explicitly changed when no prior processing preference exists. Extract the new Controls app into a fresh folder
 and update your shortcut to its EXE. The saved `custom_runtime_path` remains valid
 when the installation path stays the same; rerunning the registration block is
-safe for that same path. Select Custom and launch a game again.
+safe for that same path. Select Custom, restart Streamer, then reconnect the headset if needed and launch a game.
 
 ## Selection
 

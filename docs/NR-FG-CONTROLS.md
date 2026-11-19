@@ -10,13 +10,9 @@ selector chooses stock or custom VDXR for the next VR launch.
 *Retained illustrations of the app with example settings, not installation defaults or a complete view
 of every selector. The appearance sliders are not a preset applied by installation.*
 
-The 2026.11.15.1 runtime improves 2× recovery while retaining NR processing, coverage and appearance controls.
-The 2026.11.15.1 Controls package reuses the locally tested binary labelled 2026.11.08.1, without a fresh rebuild.
-Compared with the previous public package, it adds optional prepared Stock/Custom launch-library support and
-disables Custom NR/FG and profile-editing controls in Stock mode. Saved settings, reconstruction choices and
-defaults are preserved. Bounded perceptual color transfer remains available below 100% processing.
-The recovery update has no new toggle. Install the matching runtime package;
-your saved global values, appearance choices and game profiles remain in place.
+The 2026.11.18.1 release carries forward Controls 2026.11.16.1. Use the matching runtime and Controls
+packages listed in the [Quickstart](NR-FG-QUICKSTART.md). Stereo replay and retry fixes work with
+existing NR/FG settings. See the [release notes](releases/2026.11.18.1.md) for details.
 
 ## Get started
 
@@ -287,7 +283,7 @@ From a full source checkout on Windows x64 with Python 3.13 and Tcl/Tk:
 
 Building Controls needs the pinned Python requirements below. The full regression
 command also compiles sampler shaders and requires Windows SDK **10.0.26100.0**
-(including FXC); see the [FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.15.1/tests/frame-generation.md).
+(including FXC); see the [FG development guide](../tests/frame-generation.md).
 
 ```powershell
 python -m venv bin/controls-build-env
