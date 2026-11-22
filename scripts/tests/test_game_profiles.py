@@ -54,8 +54,9 @@ class ProfileTests(unittest.TestCase):
                          self.p.profile_id(self.exe))
 
     def test_complete_roundtrip_inherits_individual_missing_values_and_reset(self):
-        globals_ = dict(self.p.DEFAULTS, DLSSNR_Intensity=87, FoveationSize=95)
+        globals_ = dict(self.p.GLOBAL_DEFAULTS, DLSSNR_Intensity=87, FoveationSize=95)
         self.store.save(None, globals_)
+        effective_globals = {**globals_, self.p.NVIDIA_FLOW_PRESET: 0}
         self.store.save(self.exe, {"FrameGenerationMode": 4, "DLSSNR_Enabled": 1})
         values, sources = self.store.load(self.exe)
         self.assertEqual(values["FrameGenerationMode"], 4)
@@ -66,10 +67,10 @@ class ProfileTests(unittest.TestCase):
                           DLSSNR_ProcessingResolution=75, FrameGenerationBackend=1)
         self.store.save(self.exe, all_values)
         self.assertEqual(self.store.load(self.exe)[0], all_values)
-        self.assertEqual(self.store.load(None)[0], globals_)
+        self.assertEqual(self.store.load(None)[0], effective_globals)
         self.assertEqual(self.store.list_profiles(), [self.p.normalize_executable(self.exe)])
         self.store.reset(self.exe)
-        self.assertEqual(self.store.load(self.exe)[0], globals_)
+        self.assertEqual(self.store.load(self.exe)[0], effective_globals)
 
     def test_missing_coverage_uses_full_coverage_without_overwriting_saved_90(self):
         self.assertEqual(self.store.load()[0]["FoveationSize"], 100)
@@ -144,7 +145,7 @@ class ProfileTests(unittest.TestCase):
                 root.withdraw()
                 try:
                     app = gui.VDXRRegistryApp(root, profile_store=self.store)
-                    self.assertIn(self.p.normalize_executable(other), app.scope_selector.cget("values"),
+                    self.assertIn(self.p.normalize_executable(other), app.game_entries,
                                   "One corrupt entry hid a different valid game profile")
                     self.assertIn("skipped", app.status.get().lower())
                     self.assertEqual(self.store.load(other)[0]["DLSSNR_Intensity"], 73)
@@ -174,7 +175,7 @@ class ProfileTests(unittest.TestCase):
         root = tk.Tk()
         root.withdraw()
         self.addCleanup(root.destroy)
-        self.store.save(None, dict(self.p.DEFAULTS, DLSSNR_Enabled=1, DLSSNR_Intensity=89))
+        self.store.save(None, dict(self.p.GLOBAL_DEFAULTS, DLSSNR_Enabled=1, DLSSNR_Intensity=89))
         app = gui.VDXRRegistryApp(root, profile_store=self.store)
         root.update_idletasks()
         self.assertLess(root.winfo_reqheight(), root.winfo_screenheight(),
@@ -203,7 +204,7 @@ class ProfileTests(unittest.TestCase):
         root = tk.Tk()
         root.withdraw()
         self.addCleanup(root.destroy)
-        original = dict(self.p.DEFAULTS, DLSSNR_Enabled=1, DLSSNR_Style=2,
+        original = dict(self.p.GLOBAL_DEFAULTS, DLSSNR_Enabled=1, DLSSNR_Style=2,
                         DLSSNR_Intensity=89, FrameGenerationMode=4, FrameGenerationBackend=1)
         self.store.save(None, original)
         app = gui.VDXRRegistryApp(root, profile_store=self.store)
@@ -215,12 +216,15 @@ class ProfileTests(unittest.TestCase):
                                FrameGenerationBackend=0, FoveationSize=90)
         self.store.save(None, changed_globals)
         saved, sources = self.store.load(self.exe)
-        self.assertEqual(saved, original, "Saved game setup drifted when Globals changed")
+        self.assertEqual(saved, {**original, self.p.NVIDIA_FLOW_PRESET: 0},
+                         "Saved game setup drifted when Globals changed")
         self.assertEqual(set(sources.values()), {"profile"})
-        self.assertEqual(self.store.load(None)[0], changed_globals)
+        effective_globals = {**changed_globals, self.p.NVIDIA_FLOW_PRESET: 0}
+        self.assertEqual(self.store.load(None)[0], effective_globals)
         app.reset_defaults()
         inherited, sources = self.store.load(self.exe)
-        self.assertEqual(inherited, changed_globals)
+        self.assertEqual(inherited, effective_globals)
+        self.assertEqual(sources.pop(self.p.NVIDIA_FLOW_PRESET), "default")
         self.assertEqual(set(sources.values()), {"global"})
 
     def test_scope_switch_flushes_pending_global_sliders(self):

@@ -1,3 +1,4 @@
+from collections import Counter
 import ctypes
 import os
 import subprocess
@@ -10,6 +11,8 @@ import winreg
 import vdxr_runtime_selection as runtime_selection
 import vdxr_game_profiles as game_profiles
 import vdxr_live_status as live_status
+from vdxr_game_art import cover_photo
+from vdxr_game_catalog import GameEntry, catalog_entries
 
 
 REGISTRY_PATH = r"SOFTWARE\Virtual Desktop, Inc.\OpenXR"
@@ -32,6 +35,12 @@ FRAME_GENERATION_BACKEND_NAME = "FrameGenerationBackend"
 FRAME_GENERATION_BACKENDS = {"NVIDIA (default)": 0, "FidelityFX (full resolution)": 1}
 FRAME_GENERATION_DEPTH_MODE_NAME = "FrameGenerationDepthMode"
 FRAME_GENERATION_DEPTH_MODES = {"Standard": 0, "Depth assist": 1, "Depth reconstruction (experimental)": 2}
+NVIDIA_FLOW_PRESETS = {"Fast": 1, "Medium": 0, "Slow": 2}
+
+IMAGE_SETTINGS = {
+    "sharpen": ("CAS sharpening", 0, 0),
+    "upscaling": ("FSR render scale", 50, 100),
+}
 
 COLORS = {
     "background": "#101217", "panel": "#1A1D25", "border": "#2B303C",
@@ -49,6 +58,35 @@ def rounded_image(root, width, height, radius, color):
         inset = round(radius - max(0, radius * radius - distance * distance) ** 0.5)
         image.put(color, to=(inset, y, width - inset, y + 1))
     return image
+
+
+def fit_title(title, font, width):
+    text = title[:80]
+    if text == title and font.measure(text) <= width:
+        return text
+    while text and font.measure(text.rstrip() + "…") > width:
+        text = text[:-1]
+    return text.rstrip() + "…"
+
+
+def edition_labels(entries):
+    """Disambiguate duplicate titles without displaying their executable paths."""
+    groups = {}
+    for entry in entries:
+        groups.setdefault(entry.title.casefold(), []).append(entry)
+    labels = {}
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        counts = Counter(entry.store for entry in group)
+        positions = Counter()
+        for entry in sorted(group, key=lambda game: game.executable):
+            label = entry.store or "Copy"
+            positions[entry.store] += 1
+            if counts[entry.store] > 1:
+                label = f"{label} {positions[entry.store]}"
+            labels[entry.executable] = label
+    return labels
 
 
 def apply_dark_theme(root):
@@ -87,6 +125,14 @@ def apply_dark_theme(root):
               foreground=[("disabled", COLORS["disabled"]), ("readonly", COLORS["text"])],
               selectbackground=[("readonly", COLORS["control"])], selectforeground=[("readonly", COLORS["text"])],
               bordercolor=[("focus", COLORS["accent"])], arrowcolor=[("active", COLORS["accent"])])
+
+    style.configure("Dark.TSpinbox", fieldbackground=COLORS["control"], foreground=COLORS["text"],
+                    insertcolor=COLORS["text"], arrowcolor=COLORS["text"], arrowsize=14, padding=(6, 4))
+    style.map("Dark.TSpinbox", foreground=[("disabled", COLORS["disabled"])],
+              fieldbackground=[("disabled", COLORS["panel"])])
+
+    style.configure("Search.TEntry", fieldbackground=COLORS["control"], foreground=COLORS["text"],
+                    insertcolor=COLORS["text"], bordercolor=COLORS["border"], padding=(8, 5))
 
     switch_images = []
     for selected, disabled in ((False, False), (True, False), (False, True), (True, True)):
@@ -312,8 +358,26 @@ def write_processing_resolution(value):
     write_value(PROCESSING_RESOLUTION_VALUE_NAME, value)
 
 
+def read_image_setting(name):
+    label, minimum, default = IMAGE_SETTINGS[name]
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, 0,
+                            winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+            value, kind = winreg.QueryValueEx(key, name)
+    except FileNotFoundError:
+        return default
+    if kind != winreg.REG_DWORD or type(value) is not int or not minimum <= value <= 100:
+        raise ValueError(f"Invalid saved {label}; enter a value from {minimum} to 100 to correct it.")
+    return value
+
+
 def write_value(name, value):
-    if name == PROCESSING_RESOLUTION_VALUE_NAME:
+    if name in IMAGE_SETTINGS:
+        label, minimum, _ = IMAGE_SETTINGS[name]
+        if type(value) is not int or not minimum <= value <= 100:
+            raise ValueError(f"{label} must be a whole number from {minimum} to 100.")
+        maximum = 100
+    elif name == PROCESSING_RESOLUTION_VALUE_NAME:
         maximum = 100
     else:
         maximum = 1 if name == ENABLE_VALUE_NAME else VALUE_MAXIMUMS[VALUE_NAMES.index(name)]
@@ -334,11 +398,13 @@ class VDXRRegistryApp:
     def __init__(self, root, profile_store=None):
         self.root = root
         self.root.title("VDXR NR/FG Controls")
-        self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         apply_dark_theme(root)
         self.updating = True
         self.profile_store = profile_store or game_profiles.ProfileStore()
+        self.game_entries = {}
+        self.cover_images = {}
+        self.game_picker = None
         self.profile_executable = None
         self.profile_dirty = False
         self.profile_valid = True
@@ -347,50 +413,50 @@ class VDXRRegistryApp:
         self.load_processing_resolution(errors)
         self.saved_values = read_values(errors)
 
-        # Live diagnostics stay visible while the existing editor scrolls.
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(0, weight=1)
+        self.viewport = tk.Canvas(root, background=COLORS["background"], highlightthickness=0, borderwidth=0)
+        self.viewport.grid(row=0, column=0, sticky="nsew")
+        self.editor_scrollbar = ttk.Scrollbar(root, orient="vertical", command=self.viewport.yview)
+        self.viewport.configure(yscrollcommand=self.editor_scrollbar.set)
+        frame = ttk.Frame(self.viewport, padding=(20, 16), style="App.TFrame")
+        self.editor_window = self.viewport.create_window(0, 0, anchor="nw", window=frame)
+        self.editor_frame = frame
+        for column in (0, 1):
+            frame.columnconfigure(column, weight=1, minsize=510)
+
+        ttk.Label(frame, text="VDXR Controls", style="Title.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(frame, text="Neural rendering  /  Frame generation", style="Subtitle.TLabel").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(2, 12))
+        left = ttk.Frame(frame, style="App.TFrame")
+        right = ttk.Frame(frame, style="App.TFrame")
+        left.grid(row=2, column=0, sticky="new", padx=(0, 7))
+        right.grid(row=2, column=1, sticky="new", padx=(7, 0))
+        left.columnconfigure(0, weight=1)
+        right.columnconfigure(0, weight=1)
+
         self.live_observations = []
         self.live_selected_identity = None
         self.live_explicit_selection = False
         self.live_poll_id = None
         self.live_worker = None
-        live_panel = RoundedPanel(root)
-        live_panel.grid(row=0, column=0, columnspan=2, sticky="ew", padx=20, pady=(16, 0))
-        self.live_panel = live_panel
+        live_panel = RoundedPanel(right)
+        live_panel.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         live_card = live_panel.content
         live_card.columnconfigure(0, weight=1)
         ttk.Label(live_card, text="Live runtime", style="Section.TLabel").grid(row=0, column=0, sticky="w")
         self.live_selection = tk.StringVar()
         self.live_selector = ttk.Combobox(live_card, textvariable=self.live_selection, state="disabled",
-                                         width=76, style="Dark.TCombobox")
+                                         width=24, style="Dark.TCombobox")
         self.live_selector.grid(row=1, column=0, sticky="ew", pady=(6, 4))
         self.live_selector.bind("<<ComboboxSelected>>", self.on_live_session_changed)
         self.live_text = tk.StringVar(value="Discovering custom live sessions…")
-        ttk.Label(live_card, textvariable=self.live_text, style="Hint.TLabel", wraplength=592).grid(
+        ttk.Label(live_card, textvariable=self.live_text, style="Hint.TLabel", wraplength=460).grid(
             row=2, column=0, sticky="w")
         root.bind("<Destroy>", self.on_live_destroy, add="+")
 
-        # A bounded viewport keeps the existing cards reachable on scaled displays.
-        self.viewport = tk.Canvas(root, background=COLORS["background"], highlightthickness=0, borderwidth=0)
-        self.viewport.grid(row=1, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(root, orient="vertical", command=self.viewport.yview)
-        scrollbar.grid(row=1, column=1, sticky="ns")
-        self.viewport.configure(yscrollcommand=scrollbar.set)
-        frame = ttk.Frame(self.viewport, padding=(20, 16), style="App.TFrame")
-        self.viewport.create_window(0, 0, anchor="nw", window=frame)
-        frame.bind("<Configure>", lambda _event: self.viewport.configure(scrollregion=self.viewport.bbox("all")))
-        root.bind("<MouseWheel>", lambda event: self.viewport.yview_scroll(-int(event.delta / 120), "units"), add="+")
-        frame.columnconfigure(0, minsize=592)
-        self.editor_frame = frame
-
-        ttk.Label(frame, text="VDXR Controls", style="Title.TLabel").grid(
-            row=0, column=0, sticky="w"
-        )
-        ttk.Label(frame, text="Neural rendering  /  Frame generation", style="Subtitle.TLabel").grid(
-            row=1, column=0, sticky="w", pady=(2, 12)
-        )
-
-        runtime_panel = RoundedPanel(frame)
-        runtime_panel.grid(row=2, column=0, sticky="ew", pady=(0, 14))
+        runtime_panel = RoundedPanel(left)
+        runtime_panel.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         runtime = runtime_panel.content
         runtime.columnconfigure(0, weight=1)
         ttk.Label(runtime, text="Runtime", style="Section.TLabel").grid(row=0, column=0, sticky="w")
@@ -412,28 +478,28 @@ class VDXRRegistryApp:
             row=1, column=0, columnspan=2, sticky="w", pady=(10, 0)
         )
         self.runtime_features_note = tk.StringVar()
-        ttk.Label(runtime, textvariable=self.runtime_features_note, style="Hint.TLabel", wraplength=592).grid(
+        ttk.Label(runtime, textvariable=self.runtime_features_note, style="Hint.TLabel", wraplength=460).grid(
             row=2, column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
 
-        scope_panel = RoundedPanel(frame)
-        scope_panel.grid(row=3, column=0, sticky="ew", pady=(0, 14))
+        scope_panel = RoundedPanel(left)
+        scope_panel.grid(row=0, column=0, sticky="ew")
         scope = scope_panel.content
         scope.columnconfigure(0, weight=1)
         ttk.Label(scope, text="Settings scope", style="Section.TLabel").grid(row=0, column=0, sticky="w")
         self.scope_selection = tk.StringVar(value="Globals")
-        self.scope_selector = ttk.Combobox(scope, textvariable=self.scope_selection, values=("Globals",),
-                                            state="readonly", width=48, style="Dark.TCombobox")
+        self.scope_title = tk.StringVar(value="Globals · Choose game…")
+        self.scope_selector = ttk.Button(scope, textvariable=self.scope_title, compound="left",
+                                         command=self.open_game_picker, style="Soft.TButton")
         self.scope_selector.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        self.scope_selector.bind("<<ComboboxSelected>>", self.on_scope_changed)
         self.add_profile_button = ttk.Button(scope, text="Add game EXE…", command=self.add_profile, style="Soft.TButton")
-        self.add_profile_button.grid(row=1, column=1, padx=(12, 0), pady=(8, 0))
-        self.scope_feedback = tk.StringVar(value="Globals · changes save immediately. Game profiles apply automatically at launch.")
-        ttk.Label(scope, textvariable=self.scope_feedback, style="Hint.TLabel", wraplength=592).grid(
+        self.add_profile_button.grid(row=0, column=1, rowspan=2, padx=(10, 0), sticky="e")
+        self.scope_feedback = tk.StringVar(value="Global NR and FG settings save automatically.")
+        ttk.Label(scope, textvariable=self.scope_feedback, style="Hint.TLabel", wraplength=460).grid(
             row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
-        nr_panel = RoundedPanel(frame)
-        nr_panel.grid(row=4, column=0, sticky="ew")
+        nr_panel = RoundedPanel(right)
+        nr_panel.grid(row=0, column=0, sticky="ew")
         nr = nr_panel.content
         nr.columnconfigure(1, weight=1)
         nr_header = ttk.Frame(nr, style="Card.TFrame")
@@ -472,7 +538,7 @@ class VDXRRegistryApp:
                 resolution=1,
                 variable=variable,
                 orient="horizontal",
-                length=260,
+                length=225,
                 showvalue=False,
                 background="#B2C4FF",
                 foreground=COLORS["text"],
@@ -501,7 +567,7 @@ class VDXRRegistryApp:
         )
         self.processing_resolution_slider = tk.Scale(
             nr, from_=50, to=100, resolution=1, variable=self.processing_resolution,
-            orient="horizontal", length=260, showvalue=False,
+            orient="horizontal", length=225, showvalue=False,
             background="#B2C4FF", foreground=COLORS["text"], troughcolor="#56627A",
             activebackground="#E7EDFF", sliderrelief="flat", sliderlength=18,
             width=8, borderwidth=0, highlightthickness=1,
@@ -513,17 +579,17 @@ class VDXRRegistryApp:
         )
         ttk.Label(nr, text="Both percentages scale linear dimensions. Native processing 100%; try 80%.\n"
                   "Combined coverage + processing requires an updated custom runtime.",
-                  style="Hint.TLabel", wraplength=592).grid(
+                  style="Hint.TLabel", wraplength=460).grid(
             row=9, column=0, columnspan=3, sticky="w", pady=(10, 0)
         )
         ttk.Label(nr, text="Reduced processing with partial coverage adds an automatic inside transition;\n"
                   "the fully enhanced center is smaller.",
-                  style="Hint.TLabel", wraplength=592).grid(
+                  style="Hint.TLabel", wraplength=460).grid(
             row=10, column=0, columnspan=3, sticky="w", pady=(6, 0)
         )
 
-        fg_panel = RoundedPanel(frame)
-        fg_panel.grid(row=5, column=0, sticky="ew", pady=(14, 0))
+        fg_panel = RoundedPanel(left)
+        fg_panel.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         fg = fg_panel.content
         fg.columnconfigure(0, weight=1)
         fg.columnconfigure(1, weight=1)
@@ -562,7 +628,10 @@ class VDXRRegistryApp:
         backend_selector.bind("<<ComboboxSelected>>", self.on_frame_generation_backend_changed)
         self.backend_selector = backend_selector
         ttk.Label(fg, text="Requested reconstruction mode", style="Card.TLabel").grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=(14, 6)
+            row=3, column=0, sticky="w", pady=(14, 6)
+        )
+        ttk.Label(fg, text="NVIDIA flow preset", style="Card.TLabel").grid(
+            row=3, column=1, sticky="w", pady=(14, 6)
         )
         try:
             depth_mode = read_frame_generation_depth_mode()
@@ -575,51 +644,88 @@ class VDXRRegistryApp:
         self.frame_generation_depth_mode = tk.StringVar(value=self.saved_frame_generation_depth_mode)
         self.depth_mode_selector = ttk.Combobox(
             fg, textvariable=self.frame_generation_depth_mode, values=tuple(FRAME_GENERATION_DEPTH_MODES),
-            state="readonly", width=37, style="Dark.TCombobox",
+            state="readonly", width=32, style="Dark.TCombobox",
         )
-        self.depth_mode_selector.grid(row=4, column=0, columnspan=2, sticky="ew")
+        self.depth_mode_selector.grid(row=4, column=0, sticky="ew", padx=(0, 14))
         self.depth_mode_selector.bind("<<ComboboxSelected>>", self.on_frame_generation_depth_mode_changed)
+        self.nvidia_flow_preset = tk.StringVar(value="Medium")
+        self.nvidia_flow_preset_selector = ttk.Combobox(
+            fg, textvariable=self.nvidia_flow_preset, values=tuple(NVIDIA_FLOW_PRESETS),
+            state="disabled", width=15, style="Dark.TCombobox",
+        )
+        self.nvidia_flow_preset_selector.grid(row=4, column=1, sticky="ew")
+        self.nvidia_flow_preset_selector.bind("<<ComboboxSelected>>", self.on_nvidia_flow_preset_changed)
         self.depth_mode_feedback = tk.StringVar()
         self.update_depth_mode_feedback()
-        ttk.Label(fg, textvariable=self.depth_mode_feedback, style="Hint.TLabel", wraplength=592).grid(
+        ttk.Label(fg, textvariable=self.depth_mode_feedback, style="Hint.TLabel", wraplength=460).grid(
             row=5, column=0, columnspan=2, sticky="w", pady=(8, 0)
         )
         ttk.Label(fg, text="NR + MFG requires coverage at least 90%. Turn SSW off in Virtual Desktop.",
-                  style="Hint.TLabel", wraplength=592).grid(
+                  style="Hint.TLabel", wraplength=460).grid(
             row=6, column=0, columnspan=2, sticky="w", pady=(12, 4)
         )
         ttk.Label(fg, text="Selections are saved requests, not active runtime status.", style="Hint.TLabel").grid(
             row=7, column=0, columnspan=2, sticky="w"
         )
+        self.build_image_controls(right, errors)
         self.reset_button = ttk.Button(
             frame, text="Reset NR settings", command=self.reset_defaults, style="Soft.TButton",
         )
-        self.reset_button.grid(row=6, column=0, sticky="w", pady=(14, 0))
+        self.reset_button.grid(row=3, column=0, sticky="w", pady=(14, 0))
         self.save_profile_button = ttk.Button(frame, text="Save game profile", command=self.save_profile,
                                                style="Soft.TButton", state="disabled")
-        self.save_profile_button.grid(row=6, column=0, sticky="e", pady=(14, 0))
-        self.status = tk.StringVar(value="; ".join(errors) or "Ready · changes save automatically")
-        ttk.Label(frame, textvariable=self.status, style="Subtitle.TLabel", wraplength=592).grid(
-            row=7, column=0, sticky="w", pady=(8, 0)
-        )
+        self.save_profile_button.grid(row=3, column=1, sticky="e", pady=(14, 0))
+        self.status = tk.StringVar(value="; ".join(errors) or "Ready · NR and FG settings save automatically")
+        status_label = ttk.Label(frame, textvariable=self.status, style="Subtitle.TLabel", wraplength=1000)
+        status_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
         root.bind("<Map>", lambda event: root.after_idle(dark_title_bar, root) if event.widget is root else None, add="+")
         self.update_runtime_controls()
         self.updating = False
         self.refresh_profile_choices()
         root.update_idletasks()
-        self.viewport.configure(width=frame.winfo_reqwidth(),
-                                height=min(frame.winfo_reqheight(), max(200, root.winfo_screenheight() - 140
-                                                   - live_panel.winfo_reqheight())))
-        live_panel.bind("<Configure>", self.resize_editor_viewport, add="+")
+        available_width = max(280, root.winfo_screenwidth() - 30)
+        scrollbar_width = self.editor_scrollbar.winfo_reqwidth()
+        if frame.winfo_reqwidth() + scrollbar_width > available_width:
+            # Keep the whole editor reachable on a narrow or heavily scaled display.
+            frame.columnconfigure(0, minsize=0)
+            frame.columnconfigure(1, weight=0, minsize=0)
+            left.grid_configure(padx=0)
+            right.grid_configure(row=3, column=0, padx=0, pady=(12, 0))
+            self.reset_button.grid_configure(row=4)
+            self.save_profile_button.grid_configure(row=4, column=0)
+            status_label.configure(wraplength=min(460, available_width - 65))
+            status_label.grid_configure(row=5, columnspan=1)
+            root.update_idletasks()
+        preferred_width = min(available_width - scrollbar_width, frame.winfo_reqwidth())
+        self.editor_height_limit = max(180, root.winfo_screenheight() - 110)
+        self.viewport.configure(width=preferred_width, height=min(frame.winfo_reqheight(), self.editor_height_limit))
+        root.minsize(preferred_width + scrollbar_width, min(420, self.editor_height_limit))
+        self.viewport.bind("<Configure>", self.resize_editor_viewport)
+        frame.bind("<Configure>", self.resize_editor_viewport)
+        root.bind("<MouseWheel>", self.scroll_editor, add="+")
         self.live_worker = live_status.StatusWorker(self.profile_store)
         self.live_poll_id = root.after(250, self.poll_live_status)
 
     def resize_editor_viewport(self, _event=None):
-        # A populated live card can wrap more lines than the startup placeholder.
-        height = min(self.editor_frame.winfo_reqheight(), max(200,
-                     self.root.winfo_screenheight() - 140 - self.live_panel.winfo_reqheight()))
-        if int(self.viewport.cget("height")) != height:
-            self.viewport.configure(height=height)
+        content_height = self.editor_frame.winfo_reqheight()
+        preferred_height = min(content_height, self.editor_height_limit)
+        if int(self.viewport.cget("height")) != preferred_height:
+            self.viewport.configure(height=preferred_height)
+        width = self.viewport.winfo_width()
+        if width <= 1:
+            return
+        self.viewport.itemconfigure(self.editor_window, width=width)
+        self.viewport.configure(scrollregion=(0, 0, width, content_height))
+        if content_height > self.viewport.winfo_height():
+            if not self.editor_scrollbar.winfo_manager():
+                self.editor_scrollbar.grid(row=0, column=1, sticky="ns")
+        elif self.editor_scrollbar.winfo_manager():
+            self.editor_scrollbar.grid_remove()
+            self.viewport.yview_moveto(0)
+
+    def scroll_editor(self, event):
+        if self.editor_scrollbar.winfo_manager():
+            self.viewport.yview_scroll(-int(event.delta / 120), "units")
 
     def poll_live_status(self):
         self.live_poll_id = None
@@ -677,25 +783,136 @@ class VDXRRegistryApp:
             profiles = []
         if self.profile_executable and self.profile_executable not in profiles:
             profiles.append(self.profile_executable)
-        self.scope_selector.configure(values=("Globals", *profiles))
+        self.game_entries = {entry.executable: entry for entry in catalog_entries(profiles)}
+        self.update_scope_title()
         if errors:
             self.status.set(f"{self.status.get()}; {len(errors)} game profile(s) skipped: invalid or unreadable identity metadata.")
 
-    def confirm_profile_switch(self):
+    def confirm_profile_switch(self, parent=None):
         if not self.profile_dirty:
             return True
         choice = messagebox.askyesnocancel("Unsaved game profile", "Save this game's changes before switching?",
-                                          parent=self.root)
+                                          parent=parent or self.root)
         if choice is None:
             return False
         return self.save_profile() if choice else True
 
-    def on_scope_changed(self, _event=None):
-        selection = self.scope_selection.get()
-        if self.confirm_profile_switch():
-            self.load_scope(None if selection == "Globals" else selection)
-        else:
-            self.scope_selection.set(self.profile_executable or "Globals")
+    def update_scope_title(self):
+        if self.profile_executable is None:
+            self.scope_title.set("Globals · Choose game…")
+            self.scope_selector.configure(image="")
+            return
+        entry = self.game_entries.get(self.profile_executable)
+        if entry is None:
+            entry = catalog_entries([self.profile_executable])[0]
+            self.game_entries[self.profile_executable] = entry
+        font = tkfont.Font(root=self.root, font=ttk.Style(self.root).lookup("Soft.TButton", "font"))
+        self.scope_title.set(fit_title(entry.title, font, 178))
+        self.scope_selector.configure(image=self.game_cover(entry, (88, 44)))
+
+    def game_cover(self, entry: GameEntry, size):
+        key = (entry.cover, size)
+        if key not in self.cover_images:
+            self.cover_images[key] = (cover_photo(self.root, entry.cover, size, COLORS["background"])
+                                      or rounded_image(self.root, *size, 6, COLORS["border"]))
+        return self.cover_images[key]
+
+    def open_game_picker(self):
+        if self.game_picker is not None and self.game_picker.winfo_exists():
+            self.game_picker.lift()
+            return
+        self.refresh_profile_choices()
+        dialog = self.game_picker = tk.Toplevel(self.root)
+        dialog.title("Choose game")
+        dialog.transient(self.root)
+        dialog.configure(background=COLORS["background"])
+        dialog.resizable(False, False)
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        def map_picker(event):
+            if event.widget is dialog:
+                dark_title_bar(dialog)
+                dialog.grab_set()
+        dialog.bind("<Map>", map_picker)
+        content = ttk.Frame(dialog, style="App.TFrame", padding=16)
+        content.grid(sticky="nsew")
+        content.columnconfigure(0, weight=1)
+        ttk.Label(content, text="Find a game", style="App.TLabel").grid(row=0, column=0, sticky="w")
+        search = tk.StringVar(master=dialog)
+        search_entry = ttk.Entry(content, textvariable=search, width=34, style="Search.TEntry")
+        search_entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 12))
+        self.game_tiles = ttk.Frame(content, style="App.TFrame")
+        self.game_tiles.grid(row=2, column=0, columnspan=2, sticky="ew")
+        for column in range(3):
+            self.game_tiles.columnconfigure(column, minsize=192, weight=1)
+        for row in range(2):
+            self.game_tiles.rowconfigure(row, minsize=137)
+
+        entries = sorted(self.game_entries.values(), key=lambda entry: (entry.title.casefold(), entry.executable))
+        editions = edition_labels(entries)
+        tile_font = tkfont.Font(root=dialog, font=ttk.Style(dialog).lookup(".", "font"))
+
+        def choose(executable):
+            if executable == self.profile_executable or (self.confirm_profile_switch(dialog) and self.load_scope(executable)):
+                dialog.destroy()
+
+        ttk.Button(content, text="Globals", style="Soft.TButton",
+                   command=lambda: choose(None)).grid(row=3, column=0, sticky="w", pady=(10, 0))
+        navigation = ttk.Frame(content, style="App.TFrame")
+        navigation.grid(row=3, column=1, sticky="e", pady=(10, 0))
+        page_label = tk.StringVar(master=dialog)
+        page = 0
+
+        def render():
+            for child in self.game_tiles.winfo_children():
+                child.destroy()
+            query = search.get().strip().casefold()
+            matches = [entry for entry in entries if query in entry.title.casefold()
+                       or query in entry.executable.casefold()]
+            for index, entry in enumerate(matches[page * 6:(page + 1) * 6]):
+                title = fit_title(entry.title, tile_font, 174)
+                if edition := editions.get(entry.executable):
+                    title += "\n" + edition
+                button = tk.Button(self.game_tiles, text=title, image=self.game_cover(entry, (174, 82)),
+                                   compound="top", wraplength=174, relief="flat", borderwidth=0,
+                                   background=COLORS["control"], foreground=COLORS["text"],
+                                   activebackground=COLORS["hover"], activeforeground=COLORS["text"],
+                                   highlightthickness=1, highlightcolor=COLORS["accent"],
+                                   highlightbackground=COLORS["background"], padx=4, pady=4, font=tile_font,
+                                   command=lambda path=entry.executable: choose(path))
+                button.grid(row=index // 3, column=index % 3, sticky="nsew", padx=4, pady=4)
+            pages = (len(matches) + 5) // 6
+            if not matches:
+                ttk.Label(self.game_tiles, text="No matching games" if entries else "No saved game profiles",
+                          style="App.TLabel").grid(row=0, column=0, columnspan=3)
+            page_label.set(f"{page + 1} / {pages}" if pages else "")
+            previous.configure(state="normal" if page else "disabled")
+            following.configure(state="normal" if page + 1 < pages else "disabled")
+
+        def move(delta):
+            nonlocal page
+            page += delta
+            render()
+
+        def restart_search(*_args):
+            nonlocal page
+            page = 0
+            render()
+
+        previous = ttk.Button(navigation, text="Previous", style="Soft.TButton", command=lambda: move(-1))
+        previous.grid(row=0, column=0)
+        ttk.Label(navigation, textvariable=page_label, style="App.TLabel").grid(row=0, column=1, padx=10)
+        following = ttk.Button(navigation, text="Next", style="Soft.TButton", command=lambda: move(1))
+        following.grid(row=0, column=2)
+        search_trace = search.trace_add("write", restart_search)
+
+        def close_picker(event):
+            if event.widget is dialog:
+                search.trace_remove("write", search_trace)
+                self.game_picker = None
+
+        dialog.bind("<Destroy>", close_picker, add="+")
+        render()
+        search_entry.focus_set()
 
     def add_profile(self):
         if not self.confirm_profile_switch():
@@ -705,9 +922,68 @@ class VDXRRegistryApp:
         if executable:
             try:
                 self.load_scope(game_profiles.normalize_executable(executable))
-                self.refresh_profile_choices()
             except (OSError, ValueError) as error:
                 self.status.set(f"Profile identity error: {error}")
+
+    def build_image_controls(self, parent, errors):
+        panel = RoundedPanel(parent)
+        panel.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        card = panel.content
+        for column in (0, 2):
+            card.columnconfigure(column, weight=1)
+        ttk.Label(card, text="Image quality", style="Section.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(card, text="Global settings", style="Hint.TLabel").grid(row=0, column=2, columnspan=2, sticky="e")
+        self.image_values = {}
+        self.image_inputs = {}
+        self.image_apply_buttons = {}
+        for index, (name, (label, minimum, _)) in enumerate(IMAGE_SETTINGS.items()):
+            column = index * 2
+            ttk.Label(card, text=f"{label} (%)", style="Card.TLabel").grid(
+                row=1, column=column, columnspan=2, sticky="w", padx=(0, 12), pady=(6, 0))
+            variable = self.image_values[name] = tk.StringVar(master=self.root)
+            spinner = self.image_inputs[name] = ttk.Spinbox(
+                card, from_=minimum, to=100, width=5, textvariable=variable, style="Dark.TSpinbox")
+            spinner.grid(row=2, column=column, sticky="ew", pady=(4, 0))
+            spinner.bind("<Return>", lambda _event, key=name: self.save_image_setting(key))
+            button = self.image_apply_buttons[name] = ttk.Button(
+                card, text="Apply", command=lambda key=name: self.save_image_setting(key), style="Soft.TButton")
+            button.grid(row=2, column=column + 1, sticky="e", padx=(6, 12), pady=(4, 0))
+        ttk.Label(card, text="Apply to save. CAS updates live. FSR applies on game restart.",
+                  style="Hint.TLabel", wraplength=460).grid(row=3, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.refresh_image_controls(errors)
+
+    def refresh_image_controls(self, errors, names=IMAGE_SETTINGS):
+        for name in names:
+            try:
+                self.image_values[name].set(str(read_image_setting(name)))
+            except (OSError, ValueError) as error:
+                self.image_values[name].set("")
+                errors.append(str(error))
+
+    def can_edit_image_settings(self):
+        return self.saved_runtime_selection == runtime_selection.CUSTOM_LABEL and self.profile_executable is None
+
+    def save_image_setting(self, name):
+        if self.updating or not self.can_edit_image_settings():
+            return
+        label, minimum, _ = IMAGE_SETTINGS[name]
+        try:
+            value = int(self.image_values[name].get())
+            write_value(name, value)
+        except ValueError:
+            message = f"{label} must be a whole number from {minimum} to 100."
+        except PermissionError:
+            message = f"Administrator access is required to save {label}."
+        except OSError as error:
+            message = str(error)
+        else:
+            self.image_values[name].set(str(value))
+            timing = "applies during play" if name == "sharpen" else "restart the game to apply"
+            self.status.set(f"Saved {label} at {value}% · {timing}.")
+            return
+        errors = [message]
+        self.refresh_image_controls(errors, (name,))
+        self.status.set(" ".join(errors))
 
     def load_scope(self, executable):
         # Leaving Globals must keep its existing debounced autosave contract.
@@ -722,11 +998,13 @@ class VDXRRegistryApp:
         self.cancel_processing_resolution_save()
         self.profile_executable = executable
         self.scope_selection.set(executable or "Globals")
+        self.update_scope_title()
         self.reset_button.configure(text="Reset game profile" if executable else "Reset NR settings")
         self.profile_dirty = False
         self.profile_valid = True
         errors = []
         self.updating = True
+        flow_preset = game_profiles.DEFAULTS[game_profiles.NVIDIA_FLOW_PRESET]
         try:
             if executable is None:
                 # Preserve existing global autosave semantics and displayed defaults.
@@ -743,7 +1021,7 @@ class VDXRRegistryApp:
                 except (OSError, ValueError) as error:
                     depth_mode = game_profiles.DEFAULTS[FRAME_GENERATION_DEPTH_MODE_NAME]
                     errors.append(f"{error} Depth assist shown; stored request unchanged.")
-                self.scope_feedback.set("Globals · changes save immediately. Game profiles apply automatically at launch.")
+                self.scope_feedback.set("Global NR and FG settings save automatically.")
             else:
                 try:
                     values, sources = self.profile_store.load(executable, errors=errors)
@@ -757,13 +1035,14 @@ class VDXRRegistryApp:
                 self.processing_resolution_verified = self.profile_valid
                 mode, backend = values[FRAME_GENERATION_VALUE_NAME], values[FRAME_GENERATION_BACKEND_NAME]
                 depth_mode = values[FRAME_GENERATION_DEPTH_MODE_NAME]
+                flow_preset = values[game_profiles.NVIDIA_FLOW_PRESET]
                 overrides = sum(source == "profile" for source in sources.values())
                 inherited = sum(source in ("global", "default") for source in sources.values())
-                self.scope_feedback.set(
-                    f"{executable}\n{overrides} game overrides · {inherited} inherited "
-                    "from globals/defaults. New games inherit globals; Save locks current setup; Reset returns to globals."
-                    if self.profile_valid else
-                    f"{executable}\nProfile rejected · controls show safe display defaults. Reset overrides to recover.")
+                feedback = (f"{overrides} game overrides · {inherited} inherited from globals/defaults."
+                            if self.profile_valid else "Profile rejected · reset overrides to recover.")
+                if edition := edition_labels(self.game_entries.values()).get(executable):
+                    feedback = f"{edition} · {feedback}"
+                self.scope_feedback.set(feedback)
             self.enabled.set(self.saved_enabled)
             for variable, value in zip(self.variables, self.saved_values):
                 variable.set(value)
@@ -776,11 +1055,13 @@ class VDXRRegistryApp:
             self.frame_generation.set(self.saved_frame_generation)
             self.frame_generation_backend.set(self.saved_frame_generation_backend)
             self.frame_generation_depth_mode.set(self.saved_frame_generation_depth_mode)
+            self.nvidia_flow_preset.set(next(label for label, value in NVIDIA_FLOW_PRESETS.items() if value == flow_preset))
             self.update_depth_mode_feedback()
             self.save_profile_button.configure(state="normal" if executable is not None and self.profile_valid else "disabled")
+            self.refresh_image_controls(errors)
             self.update_runtime_controls()
             self.status.set("; ".join(errors) or ("Showing effective game settings · missing values inherit globals/defaults."
-                                                   if executable else "Globals · changes save automatically"))
+                                                   if executable else "Showing global settings."))
         finally:
             self.updating = False
         return True
@@ -805,7 +1086,8 @@ class VDXRRegistryApp:
                        PROCESSING_RESOLUTION_VALUE_NAME: self.processing_resolution.get(),
                        FRAME_GENERATION_VALUE_NAME: FRAME_GENERATION_MODES[self.frame_generation.get()],
                        FRAME_GENERATION_BACKEND_NAME: FRAME_GENERATION_BACKENDS[self.frame_generation_backend.get()],
-                       FRAME_GENERATION_DEPTH_MODE_NAME: FRAME_GENERATION_DEPTH_MODES.get(self.frame_generation_depth_mode.get())})
+                       FRAME_GENERATION_DEPTH_MODE_NAME: FRAME_GENERATION_DEPTH_MODES.get(self.frame_generation_depth_mode.get()),
+                       game_profiles.NVIDIA_FLOW_PRESET: NVIDIA_FLOW_PRESETS.get(self.nvidia_flow_preset.get())})
         try:
             # Save locks the complete displayed setup, including inherited values.
             self.profile_store.save(self.profile_executable, values)
@@ -860,6 +1142,7 @@ class VDXRRegistryApp:
             widget.configure(state=state if custom else "disabled")
         self.save_profile_button.configure(
             state="normal" if custom and self.profile_executable is not None and self.profile_valid else "disabled")
+        self.update_nvidia_flow_preset_state()
         if custom:
             message = "NR and frame generation controls apply to Custom VDXR."
         elif self.saved_runtime_selection == runtime_selection.STOCK_LABEL:
@@ -867,11 +1150,15 @@ class VDXRRegistryApp:
         else:
             message = "NR and frame generation require a verified Custom VDXR selection. Saved settings are retained."
         self.runtime_features_note.set(message)
+        image_state = "normal" if self.can_edit_image_settings() else "disabled"
+        for widget in (*self.image_inputs.values(), *self.image_apply_buttons.values()):
+            widget.configure(state=image_state)
         self.set_slider_state()
 
     def on_frame_generation_backend_changed(self, _event=None):
         if self.stage_profile_change():
             self.update_depth_mode_feedback()
+            self.update_nvidia_flow_preset_state()
             return
         selection = self.frame_generation_backend.get()
         try:
@@ -886,6 +1173,19 @@ class VDXRRegistryApp:
             self.saved_frame_generation_backend = selection
             self.status.set(f"Saved {selection}; restart the game.")
         self.update_depth_mode_feedback()
+
+    def can_edit_nvidia_flow_preset(self):
+        return (self.saved_runtime_selection == runtime_selection.CUSTOM_LABEL
+                and self.profile_executable is not None
+                and self.profile_valid
+                and FRAME_GENERATION_BACKENDS.get(self.frame_generation_backend.get()) == 0)
+
+    def update_nvidia_flow_preset_state(self):
+        self.nvidia_flow_preset_selector.configure(state="readonly" if self.can_edit_nvidia_flow_preset() else "disabled")
+
+    def on_nvidia_flow_preset_changed(self, _event=None):
+        if self.can_edit_nvidia_flow_preset():
+            self.stage_profile_change()
 
     def update_depth_mode_feedback(self):
         mode = self.frame_generation_depth_mode.get()

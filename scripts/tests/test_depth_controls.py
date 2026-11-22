@@ -191,9 +191,10 @@ class DepthProfileTests(DepthFixture):
 
     def test_all_depth_modes_roundtrip_as_independent_complete_game_drafts(self):
         self.assertIn(DEPTH, gui.game_profiles.DEFAULTS, "Depth mode is absent from the complete profile schema")
-        original = dict(gui.game_profiles.DEFAULTS, DLSSNR_Enabled=1, DLSSNR_Intensity=89,
+        original = dict(gui.game_profiles.GLOBAL_DEFAULTS, DLSSNR_Enabled=1, DLSSNR_Intensity=89,
                         FrameGenerationMode=4, FrameGenerationBackend=1)
         self.store.save(None, original)
+        effective_globals = {**original, gui.game_profiles.NVIDIA_FLOW_PRESET: 0}
         app = self.app(self.store)
         for label, value in (("Standard", 0), ("Depth assist", 1), ("Depth reconstruction (experimental)", 2)):
             app.load_scope(self.exe)
@@ -204,9 +205,9 @@ class DepthProfileTests(DepthFixture):
             self.assertTrue(app.profile_dirty)
             self.assertTrue(app.save_profile())
             values, sources = self.store.load(self.exe)
-            self.assertEqual(values, dict(original, FrameGenerationDepthMode=value))
+            self.assertEqual(values, dict(effective_globals, FrameGenerationDepthMode=value))
             self.assertEqual(set(sources.values()), {"profile"})
-            self.assertEqual(self.store.load()[0], original)
+            self.assertEqual(self.store.load()[0], effective_globals)
 
     def test_invalid_depth_profile_does_not_reset_nr_appearance_or_write_repairs(self):
         self.assertIn(DEPTH, gui.game_profiles.DEFAULTS, "Missing depth profile validation")

@@ -176,6 +176,10 @@ def run(result_path):
               "live-status: missing publisher is not an active session")
         check(app.variables[-1].get() == 100 and not app.enabled.get(), "fresh defaults: NR off, coverage 100")
         check(app.processing_resolution.get() == 100, "fresh processing resolution is native 100")
+        check(app.image_values["sharpen"].get() == "0" and app.image_values["upscaling"].get() == "100",
+              "image controls: absent keys display CAS off and native render scale")
+        check(all(button.instate(["disabled"]) for button in app.image_apply_buttons.values()),
+              "image controls: Stock prevents saving custom values")
         check(app.frame_generation_depth_mode.get() == "Depth assist"
               and app.profile_store.load()[1][gui.FRAME_GENERATION_DEPTH_MODE_NAME] == "default",
               "depth-mode: unset request inherits default depth assist")
@@ -185,6 +189,9 @@ def run(result_path):
         check(str(app.nr_toggle.cget("state")) == "disabled"
               and str(app.fg_selector.cget("state")) == "disabled",
               "Stock startup disables NR and FG controls")
+        check(app.nvidia_flow_preset.get() == "Medium"
+              and str(app.nvidia_flow_preset_selector.cget("state")) == "disabled",
+              "NVIDIA flow preset defaults to Medium and is unavailable in Stock")
         exercise_live_card(app, root, snapshot, check)
         temporary = tempfile.TemporaryDirectory(prefix="VDXRControlsSelfTest-")
         host = Path(temporary.name) / "virtualdesktop-openxr.dll"
@@ -230,6 +237,16 @@ def run(result_path):
                   and read("PrivateRuntimeMarker", runtime_path) == (19, winreg.REG_DWORD),
                   "switch retains managed path and unrelated runtime value")
         check(snapshot()[gui.REGISTRY_PATH] == nr_before_switch, "runtime switching preserves NR and FG values")
+        image_before = snapshot()
+        for name, value in (("sharpen", 75), ("upscaling", 90)):
+            check(app.image_inputs[name].instate(["!disabled"]), f"image controls: {name} available in Custom Globals")
+            app.image_values[name].set(str(value))
+            app.image_apply_buttons[name].invoke()
+            check(read(name) == (value, winreg.REG_DWORD), f"image controls: verified {name} DWORD")
+        image_after = snapshot()
+        check(image_after[runtime_path] == image_before[runtime_path]
+              and [row for row in image_after[gui.REGISTRY_PATH] if row[0] not in ("sharpen", "upscaling")]
+              == image_before[gui.REGISTRY_PATH], "image controls: other global requests preserved")
         runtime_before_nr = snapshot()[runtime_path]
         toggle = control(ttk.Checkbutton, "variable", app.enabled)
         toggle.invoke()
@@ -321,8 +338,13 @@ def run(result_path):
         executable = r"C:\ProfileFixtures\One\fixture.exe"
         app.load_scope(executable)
         global_values = app.profile_store.load()[0]
+        flow_preset = gui.game_profiles.NVIDIA_FLOW_PRESET
+        flow_selector = control(ttk.Combobox, "textvariable", app.nvidia_flow_preset)
         check(str(app.save_profile_button.cget("state")) == "normal" and not app.profile_dirty,
               "inherited game setup can be saved without edits")
+        check(str(flow_selector.cget("state")) == "readonly"
+              and tuple(flow_selector.cget("values")) == ("Fast", "Medium", "Slow"),
+              "NVIDIA game profile exposes exactly three preset choices")
         app.save_profile_button.invoke()
         saved, sources = app.profile_store.load(executable)
         check(saved == global_values and set(sources.values()) == {"profile"},
@@ -334,7 +356,9 @@ def run(result_path):
         app.reset_defaults()
         inherited, sources = app.profile_store.load(executable)
         check(inherited["DLSSNR_Intensity"] == 63 and inherited[gui.FRAME_GENERATION_VALUE_NAME] == 2
-              and set(sources.values()) == {"global"}, "Reset returns game to current globals")
+              and sources[flow_preset] == "default"
+              and all(source == "global" for name, source in sources.items() if name != flow_preset),
+              "Reset restores runtime Medium and returns other values to current globals")
         check(inherited[gui.FRAME_GENERATION_DEPTH_MODE_NAME] == 1
               and sources[gui.FRAME_GENERATION_DEPTH_MODE_NAME] == "global"
               and app.frame_generation_depth_mode.get() == "Depth assist",
@@ -351,6 +375,8 @@ def run(result_path):
         app.on_frame_generation_changed()
         depth_selector.set("Depth reconstruction (experimental)")
         depth_selector.event_generate("<<ComboboxSelected>>")
+        flow_selector.set("Slow")
+        flow_selector.event_generate("<<ComboboxSelected>>")
         root.update()
         check(app.profile_store.load(executable)[0][gui.FRAME_GENERATION_DEPTH_MODE_NAME] == 0
               and app.frame_generation_depth_mode.get() == "Depth reconstruction (experimental)"
@@ -358,6 +384,9 @@ def run(result_path):
               "depth-mode: game request 2 is draft until Save")
         check(snapshot() == globals_before_profile and app.profile_store.list_profiles() == [],
               "game profile edits are drafts; globals unchanged")
+        check(app.profile_store.load(executable)[0][flow_preset] == 0
+              and app.nvidia_flow_preset.get() == "Slow",
+              "NVIDIA flow preset remains a game draft until Save")
         check(app.save_profile(), "explicit game profile Save")
         saved, sources = app.profile_store.load(executable)
         check(saved[gui.ENABLE_VALUE_NAME] == 1 and saved["DLSSNR_Intensity"] == 81
@@ -369,11 +398,14 @@ def run(result_path):
         check(saved[gui.FRAME_GENERATION_DEPTH_MODE_NAME] == 2
               and sources[gui.FRAME_GENERATION_DEPTH_MODE_NAME] == "profile",
               "depth-mode: saved game DWORD 2")
+        check(saved[flow_preset] == 2 and sources[flow_preset] == "profile",
+              "NVIDIA flow preset: saved game DWORD 2")
         app.load_scope(None)
         app.load_scope(executable)
         check(app.frame_generation_depth_mode.get() == "Depth reconstruction (experimental)"
               and app.profile_store.load(executable)[0][gui.FRAME_GENERATION_DEPTH_MODE_NAME] == 2,
               "depth-mode: saved game request survives reload")
+        check(app.nvidia_flow_preset.get() == "Slow", "NVIDIA flow preset survives reload")
         app.reset_defaults()
         check(app.profile_store.list_profiles() == [] and snapshot() == globals_before_profile,
               "Reset game profile removes overrides and retains globals")
@@ -382,6 +414,8 @@ def run(result_path):
               and sources[gui.FRAME_GENERATION_DEPTH_MODE_NAME] == "global"
               and app.frame_generation_depth_mode.get() == "Standard",
               "depth-mode: game reset inherits global DWORD 0")
+        check(inherited[flow_preset] == 0 and app.nvidia_flow_preset.get() == "Medium",
+              "NVIDIA flow preset resets to Medium")
         check(snapshot() == globals_before_profile, "depth-mode: game operations preserve globals")
         app.load_scope(None)
         app.on_close()

@@ -9,13 +9,15 @@ import ntpath
 import winreg
 
 REGISTRY_PATH = r"SOFTWARE\Virtual Desktop, Inc.\OpenXR"
-DEFAULTS = {
+NVIDIA_FLOW_PRESET = "FrameGenerationNvidiaFlowPreset"
+GLOBAL_DEFAULTS = {
     "DLSSNR_Enabled": 0, "DLSSNR_Style": 0, "DLSSNR_Intensity": 100,
     "DLSSNR_LocalToneStrength": 20, "DLSSNR_LocalStructureStrength": 70,
     "DLSSNR_SkinStructureStrength": 50, "FoveationSize": 100,
     "DLSSNR_ProcessingResolution": 100, "FrameGenerationMode": 0,
     "FrameGenerationBackend": 0, "FrameGenerationDepthMode": 1,
 }
+DEFAULTS = {**GLOBAL_DEFAULTS, NVIDIA_FLOW_PRESET: 0}
 
 
 def normalize_executable(path):
@@ -60,7 +62,7 @@ def validate(name, value, kind=winreg.REG_DWORD):
         raise ValueError(f"Invalid {name}: an integer DWORD is required.")
     allowed = ((0, 2, 3, 4) if name == "FrameGenerationMode" else
                (0, 1) if name in ("DLSSNR_Enabled", "FrameGenerationBackend") else
-               range(3) if name in ("DLSSNR_Style", "FrameGenerationDepthMode") else
+               range(3) if name in ("DLSSNR_Style", "FrameGenerationDepthMode", NVIDIA_FLOW_PRESET) else
                range(50, 101) if name == "DLSSNR_ProcessingResolution" else range(101))
     if value not in allowed:
         raise ValueError(f"Invalid {name}: value is outside its supported range.")
@@ -99,15 +101,22 @@ class ProfileStore:
 
     def load(self, executable=None, errors=None):
         self._check_identity(executable)
+        path = self.path(executable)
         values, sources = {}, {}
         for name, default in DEFAULTS.items():
-            stored = self._read(self.path(executable), name)
+            per_game_only = name == NVIDIA_FLOW_PRESET
+            stored = None if per_game_only and executable is None else self._read(path, name)
             source = "profile" if executable is not None else "global"
-            if stored is None and executable is not None:
+            if stored is None and executable is not None and not per_game_only:
                 stored, source = self._read(self.base, name), "global"
             try:
                 values[name] = default if stored is None else validate(name, *stored)
             except ValueError as error:
+                if per_game_only:
+                    values[name], sources[name] = default, "invalid"
+                    if errors is not None:
+                        errors.append(f"{error} Medium shown; select a preset and save to replace it.")
+                    continue
                 # A malformed FG depth request must not reset otherwise valid NR.
                 # Strict callers still reject it; Controls may display a warning.
                 if name != "FrameGenerationDepthMode" or errors is None:
@@ -119,6 +128,8 @@ class ProfileStore:
 
     def save(self, executable, values):
         # Validate the whole draft before opening a writable key.
+        if executable is None and NVIDIA_FLOW_PRESET in values:
+            raise ValueError("NVIDIA flow preset can only be saved in a game profile.")
         for name, value in values.items():
             validate(name, value)
         self._check_identity(executable)
