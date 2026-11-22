@@ -802,9 +802,9 @@ namespace virtualdesktop_openxr {
                 createFlags |= VDXRFG_CREATE_FIDELITYFX_FULL;
                 state->info.nvidiaFlowPreset = 0;
             } else {
-                const uint32_t requestedFlowFlag = info.nvidiaFlowPreset == 1 ? VDXRFG_CREATE_NVIDIA_FLOW_FAST
-                                                 : info.nvidiaFlowPreset == 2 ? VDXRFG_CREATE_NVIDIA_FLOW_SLOW
-                                                                              : 0u;
+                const uint32_t requestedFlowFlag = info.nvidiaFlowPreset == 1   ? VDXRFG_CREATE_NVIDIA_FLOW_FAST
+                                                   : info.nvidiaFlowPreset == 2 ? VDXRFG_CREATE_NVIDIA_FLOW_SLOW
+                                                                                : 0u;
                 createFlags |= requestedFlowFlag & supportedFlags;
                 if (!(requestedFlowFlag & supportedFlags))
                     state->info.nvidiaFlowPreset = 0;

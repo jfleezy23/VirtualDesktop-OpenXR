@@ -476,10 +476,9 @@ namespace {
             (info->guide_input && (info->base.flags & VDXRFG_CREATE_FIDELITYFX_FULL)) ||
             ((info->base.flags & VDXRFG_CREATE_COLOR_OPAQUE) && !info->guide_input) ||
             ((info->base.flags & VDXRFG_CREATE_DEPTH_RECONSTRUCTION) && !info->guide_input) ||
-            (info->base.flags &
-             ~(VDXRFG_CREATE_GPU_TIMING | VDXRFG_CREATE_HOST_OWNS_REAL | VDXRFG_CREATE_FIDELITYFX_FULL |
-               VDXRFG_CREATE_OMIT_REAL_OUTPUTS | VDXRFG_CREATE_COLOR_OPAQUE | VDXRFG_CREATE_DEPTH_RECONSTRUCTION |
-               nvidiaFlowFlags)) ||
+            (info->base.flags & ~(VDXRFG_CREATE_GPU_TIMING | VDXRFG_CREATE_HOST_OWNS_REAL |
+                                  VDXRFG_CREATE_FIDELITYFX_FULL | VDXRFG_CREATE_OMIT_REAL_OUTPUTS |
+                                  VDXRFG_CREATE_COLOR_OPAQUE | VDXRFG_CREATE_DEPTH_RECONSTRUCTION | nvidiaFlowFlags)) ||
             !validNvidiaFlowFlags(info->base.flags) ||
             ((info->base.flags & VDXRFG_CREATE_OMIT_REAL_OUTPUTS) &&
              !(info->base.flags & VDXRFG_CREATE_HOST_OWNS_REAL)))
