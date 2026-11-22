@@ -70,8 +70,9 @@ namespace vdxr_profiles {
         int fallback;
         int minimum;
         int maximum;
+        bool optionalPerGame{};
     };
-    inline constexpr std::array<Rule, 11> Rules{{
+    inline constexpr std::array<Rule, 12> Rules{{
         {"DLSSNR_Enabled", L"DLSSNR_Enabled", 0, 0, 1},
         {"DLSSNR_Style", L"DLSSNR_Style", 0, 0, 2},
         {"DLSSNR_Intensity", L"DLSSNR_Intensity", 100, 0, 100},
@@ -83,6 +84,7 @@ namespace vdxr_profiles {
         {"FrameGenerationMode", L"FrameGenerationMode", 0, 0, 4},
         {"FrameGenerationBackend", L"FrameGenerationBackend", 0, 0, 1},
         {"FrameGenerationDepthMode", L"FrameGenerationDepthMode", 1, 0, 2},
+        {"FrameGenerationNvidiaFlowPreset", L"FrameGenerationNvidiaFlowPreset", 0, 0, 2, true},
     }};
 
     inline bool isProfileSetting(const std::string& name) {
@@ -135,7 +137,7 @@ namespace vdxr_profiles {
                                   ? RegQueryValueExW(
                                         profile, rule.wideName, nullptr, &type, reinterpret_cast<BYTE*>(&value), &bytes)
                                   : ERROR_FILE_NOT_FOUND;
-                if (missing(status)) {
+                if (missing(status) && !rule.optionalPerGame) {
                     bytes = sizeof(value);
                     status = RegGetValueW(
                         root, base.c_str(), rule.wideName, RRF_SUBKEY_WOW6464KEY | RRF_RT_ANY, &type, &value, &bytes);
@@ -147,7 +149,7 @@ namespace vdxr_profiles {
                                    value <= static_cast<DWORD>(rule.maximum) && (i != 8 || value != 1);
                 if (valid)
                     result.values[i] = static_cast<int>(value);
-                else {
+                else if (!rule.optionalPerGame) {
                     if (i < 8)
                         result.nrValid = false;
                     else

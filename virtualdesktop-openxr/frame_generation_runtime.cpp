@@ -125,6 +125,11 @@ namespace virtualdesktop_openxr {
             m_fgPreviousSharpen != std::clamp(m_precompositor.sharpenFactor, 0.f, 1.f) ||
             !sameFrameGenerationSettings(settings, m_fgPreviousSettings) || m_fgColourEpoch == UINT64_MAX)
             return S_FALSE;
+        // Preview on a copy because plan() records the current display period.
+        // A real-only frame has no synthetic slot that could consume early flow.
+        auto cadence = m_frameGenerationCadence;
+        if (cadence.plan(m_fgBegunReservation, m_fgPreviousCapturedTime, true).count < 2)
+            return S_FALSE;
         const auto& projection = *reinterpret_cast<const XrCompositionLayerProjection*>(info.layers[0]);
         if (projection.viewCount != 2 || !projection.views)
             return S_FALSE;
@@ -549,6 +554,7 @@ namespace virtualdesktop_openxr {
             init.deliveryContext11 = m_deliveryTransport ? presentationContext() : nullptr;
             init.enableGpuTiming = false;
             init.useFidelityFxFull = m_frameGenerationBackend == 1;
+            init.nvidiaFlowPreset = m_frameGenerationNvidiaFlowPreset;
             init.enableDepthGuidance = m_fgDepthGuidanceRequested;
             init.opaqueInput = opaqueInput;
             init.depthMode = m_frameGenerationDepthMode;
@@ -569,6 +575,12 @@ namespace virtualdesktop_openxr {
                 m_fgDepthModeFallbackWarned = true;
                 ErrorLog("Depth reconstruction requested; using Standard FG until compatible NVIDIA V5 support "
                          "and usable game depth are available.\n");
+            }
+            if (!init.useFidelityFxFull) {
+                TraceLoggingWrite(g_traceProvider,
+                                  "FrameGenerationNvidiaFlowPreset",
+                                  TLArg(init.nvidiaFlowPreset, "Requested"),
+                                  TLArg(m_frameGeneration->negotiatedNvidiaFlowPreset(), "Effective"));
             }
             m_fgEyeResolution = size;
             m_fgFormat = format;
@@ -1182,8 +1194,8 @@ namespace virtualdesktop_openxr {
                         retainedStereo.layer.Header.Type != ownedLayers[0].Header.Type) {
                         return false;
                     }
-                    const auto& colour =
-                        m_fgPresentationBanks[retainedStereo.bank][static_cast<unsigned>(FrameGenerationRole::real)];
+                    const auto& colour = m_fgPresentationBanks[retainedStereo.bank][
+                        static_cast<unsigned>(FrameGenerationRole::real)];
                     if (colour.images.size() < 2 ||
                         retainedStereo.layer.EyeFov.ColorTexture[0] != colour.ovrSwapchain ||
                         retainedStereo.colourIndex != colour.lastCommittedIndex) {
@@ -1197,8 +1209,7 @@ namespace virtualdesktop_openxr {
                            retainedStereo.depthIndex == depth.lastCommittedIndex;
                 };
                 const auto currentRealInputReady = [&] {
-                    CHECK_MSG(!m_deliveryTransport->completionUnknown(),
-                              "Cannot repeat on an uncertain delivery graph");
+                    CHECK_MSG(!m_deliveryTransport->completionUnknown(), "Cannot repeat on an uncertain delivery graph");
                     const auto result = m_frameGeneration->realInputReady(transaction);
                     if (result != VDXRFG_E_BUSY)
                         CHECK_HRCMD(result);
@@ -1232,7 +1243,8 @@ namespace virtualdesktop_openxr {
                     }
                 }
                 // A skipped B never becomes the visible predecessor for S1/S2.
-                bool generated = hasGpuOutput && !transaction.ticket.prime && matchingReservation && !missedPredecessor;
+                bool generated = hasGpuOutput && !transaction.ticket.prime && matchingReservation &&
+                                 !missedPredecessor;
                 if (!matchingReservation) {
                     m_fgNeedReprime = m_fgTimelineReanchor = true;
                 }

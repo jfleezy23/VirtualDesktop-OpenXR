@@ -999,6 +999,7 @@ namespace virtualdesktop_openxr {
 
         uint32_t m_frameGenerationMode{};
         uint32_t m_frameGenerationBackend{};
+        uint32_t m_frameGenerationNvidiaFlowPreset{};
         uint32_t m_frameGenerationDepthMode{1};
         ComPtr<ID3D12Device> m_fgDevice;
         ComPtr<ID3D11Fence> m_fgSourceFence11;

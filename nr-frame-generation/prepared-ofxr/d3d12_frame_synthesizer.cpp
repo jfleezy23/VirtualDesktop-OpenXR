@@ -1409,7 +1409,7 @@ namespace xrfg {
             initialization.outGridSize = NV_OF_OUTPUT_VECTOR_GRID_SIZE_4;
             initialization.hintGridSize = NV_OF_HINT_VECTOR_GRID_SIZE_UNDEFINED;
             initialization.mode = NV_OF_MODE_OPTICALFLOW;
-            switch (nvidia_options.preset) {
+            switch (nvidia_options.driver_preset.value_or(nvidia_options.preset)) {
             case D3D12NvidiaPerformancePreset::fast:
                 initialization.perfLevel = NV_OF_PERF_LEVEL_FAST;
                 break;

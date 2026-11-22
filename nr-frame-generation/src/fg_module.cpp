@@ -23,6 +23,12 @@
 #include <cstring>
 
 namespace {
+    constexpr uint32_t nvidiaFlowFlags = VDXRFG_CREATE_NVIDIA_FLOW_FAST | VDXRFG_CREATE_NVIDIA_FLOW_SLOW;
+
+    constexpr bool validNvidiaFlowFlags(uint32_t flags) noexcept {
+        const uint32_t requested = flags & nvidiaFlowFlags;
+        return requested == 0 || (requested != nvidiaFlowFlags && !(flags & VDXRFG_CREATE_FIDELITYFX_FULL));
+    }
     using Microsoft::WRL::ComPtr;
 
     struct Lease {
@@ -344,6 +350,10 @@ namespace {
             xrfg::D3D12NvidiaOpticalFlowOptions opticalFlowOptions{};
             if (fidelityFxFull)
                 opticalFlowOptions.input_scale = xrfg::D3D12OpticalFlowInputScale::full;
+            else if (flags & VDXRFG_CREATE_NVIDIA_FLOW_FAST)
+                opticalFlowOptions.driver_preset = xrfg::D3D12NvidiaPerformancePreset::fast;
+            else if (flags & VDXRFG_CREATE_NVIDIA_FLOW_SLOW)
+                opticalFlowOptions.driver_preset = xrfg::D3D12NvidiaPerformancePreset::slow;
             hr = context->synthesizer.initialize(device,
                                                  context->queue.Get(),
                                                  context->history,
@@ -450,7 +460,8 @@ namespace {
         *result = nullptr;
         if (!info || info->struct_size < sizeof(*info) || info->api_version != VDXRFG_API_VERSION_3 ||
             (info->flags & ~(VDXRFG_CREATE_GPU_TIMING | VDXRFG_CREATE_HOST_OWNS_REAL | VDXRFG_CREATE_FIDELITYFX_FULL |
-                             VDXRFG_CREATE_OMIT_REAL_OUTPUTS)) ||
+                             VDXRFG_CREATE_OMIT_REAL_OUTPUTS | nvidiaFlowFlags)) ||
+            !validNvidiaFlowFlags(info->flags) ||
             ((info->flags & VDXRFG_CREATE_OMIT_REAL_OUTPUTS) && !(info->flags & VDXRFG_CREATE_HOST_OWNS_REAL)))
             return VDXRFG_E_REJECTED;
         return createImpl(info, result, info->flags, true, true);
@@ -467,7 +478,9 @@ namespace {
             ((info->base.flags & VDXRFG_CREATE_DEPTH_RECONSTRUCTION) && !info->guide_input) ||
             (info->base.flags &
              ~(VDXRFG_CREATE_GPU_TIMING | VDXRFG_CREATE_HOST_OWNS_REAL | VDXRFG_CREATE_FIDELITYFX_FULL |
-               VDXRFG_CREATE_OMIT_REAL_OUTPUTS | VDXRFG_CREATE_COLOR_OPAQUE | VDXRFG_CREATE_DEPTH_RECONSTRUCTION)) ||
+               VDXRFG_CREATE_OMIT_REAL_OUTPUTS | VDXRFG_CREATE_COLOR_OPAQUE | VDXRFG_CREATE_DEPTH_RECONSTRUCTION |
+               nvidiaFlowFlags)) ||
+            !validNvidiaFlowFlags(info->base.flags) ||
             ((info->base.flags & VDXRFG_CREATE_OMIT_REAL_OUTPUTS) &&
              !(info->base.flags & VDXRFG_CREATE_HOST_OWNS_REAL)))
             return VDXRFG_E_REJECTED;
@@ -1529,7 +1542,7 @@ extern "C" __declspec(dllexport) HRESULT WINAPI VDXRFG_GetApiV4(VDXRFG_ApiV4* ou
     const VDXRFG_ApiV4 api{sizeof(VDXRFG_ApiV4),
                            VDXRFG_API_VERSION_4,
                            VDXRFG_CREATE_GPU_TIMING | VDXRFG_CREATE_HOST_OWNS_REAL | VDXRFG_CREATE_FIDELITYFX_FULL |
-                               VDXRFG_CREATE_OMIT_REAL_OUTPUTS,
+                               VDXRFG_CREATE_OMIT_REAL_OUTPUTS | nvidiaFlowFlags,
                            4,
                            createV4,
                            submitV3,
@@ -1547,7 +1560,7 @@ extern "C" __declspec(dllexport) HRESULT WINAPI VDXRFG_GetApiV5(VDXRFG_ApiV5* ou
         return VDXRFG_E_REJECTED;
     uint32_t capabilities = VDXRFG_DEPTH_CANONICAL_TRANSPORT;
     uint32_t flags = VDXRFG_CREATE_GPU_TIMING | VDXRFG_CREATE_HOST_OWNS_REAL | VDXRFG_CREATE_FIDELITYFX_FULL |
-                     VDXRFG_CREATE_OMIT_REAL_OUTPUTS;
+                     VDXRFG_CREATE_OMIT_REAL_OUTPUTS | nvidiaFlowFlags;
 #ifdef VDXR_FG_DEPTH_ENDPOINT_PREFERENCE
     capabilities |= VDXRFG_DEPTH_ENDPOINT_PREFERENCE | VDXRFG_DEPTH_OPACITY_RESET;
     flags |= VDXRFG_CREATE_COLOR_OPAQUE;

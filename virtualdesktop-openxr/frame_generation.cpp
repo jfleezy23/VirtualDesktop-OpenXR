@@ -798,8 +798,17 @@ namespace virtualdesktop_openxr {
                                                                : api2.supported_create_flags;
             uint32_t createFlags = supportedFlags & (VDXRFG_CREATE_HOST_OWNS_REAL |
                                                      (info.enableGpuTiming ? VDXRFG_CREATE_GPU_TIMING : 0u));
-            if (info.useFidelityFxFull)
+            if (info.useFidelityFxFull) {
                 createFlags |= VDXRFG_CREATE_FIDELITYFX_FULL;
+                state->info.nvidiaFlowPreset = 0;
+            } else {
+                const uint32_t requestedFlowFlag = info.nvidiaFlowPreset == 1 ? VDXRFG_CREATE_NVIDIA_FLOW_FAST
+                                                 : info.nvidiaFlowPreset == 2 ? VDXRFG_CREATE_NVIDIA_FLOW_SLOW
+                                                                              : 0u;
+                createFlags |= requestedFlowFlag & supportedFlags;
+                if (!(requestedFlowFlag & supportedFlags))
+                    state->info.nvidiaFlowPreset = 0;
+            }
             if (extended && (createFlags & VDXRFG_CREATE_HOST_OWNS_REAL) &&
                 (supportedFlags & VDXRFG_CREATE_OMIT_REAL_OUTPUTS))
                 createFlags |= VDXRFG_CREATE_OMIT_REAL_OUTPUTS;
@@ -2489,6 +2498,10 @@ namespace virtualdesktop_openxr {
 
     bool FrameGeneration::depthGuidanceRequested() const noexcept {
         return m_state && m_state->info.depthMode != 0 && m_state->info.enableDepthGuidance;
+    }
+
+    uint32_t FrameGeneration::negotiatedNvidiaFlowPreset() const noexcept {
+        return initialized() ? m_state->info.nvidiaFlowPreset : 0;
     }
 
     uint32_t FrameGeneration::negotiatedDepthMode() const noexcept {

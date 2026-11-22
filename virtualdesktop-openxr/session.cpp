@@ -424,8 +424,9 @@ namespace virtualdesktop_openxr {
                                     ? static_cast<uint32_t>(requestedFrameGeneration)
                                     : 0;
         // Snapshot all FG requests together. Registry notifications only refresh live NR;
-        // multiplier, backend and depth mode remain fixed until the next session begins.
+        // Frame-generation settings remain fixed until the next session begins.
         m_frameGenerationBackend = startupSettings.get("FrameGenerationBackend").value_or(0);
+        m_frameGenerationNvidiaFlowPreset = startupSettings.get("FrameGenerationNvidiaFlowPreset").value_or(0);
         m_frameGenerationDepthMode = startupSettings.get("FrameGenerationDepthMode").value_or(1);
         if (!startupSettings.fgValid) {
             ErrorLog("Invalid frame-generation profile/global setting %s; disabling FG.\n",

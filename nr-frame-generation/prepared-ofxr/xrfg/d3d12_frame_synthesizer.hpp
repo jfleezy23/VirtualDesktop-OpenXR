@@ -110,6 +110,8 @@ namespace xrfg {
         // one per backend.
         D3D12OpticalFlowInputScale input_scale{D3D12OpticalFlowInputScale::half};
         bool bidirectional{};
+        // Overrides the hardware performance hint without selecting another synthesis shader.
+        std::optional<D3D12NvidiaPerformancePreset> driver_preset;
     };
 
     // A second synthetic produced from the same pair, for a session that hands

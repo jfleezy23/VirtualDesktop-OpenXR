@@ -217,6 +217,10 @@ typedef HRESULT(WINAPI* VDXRFG_GetApiV4Fn)(VDXRFG_ApiV4*) VDXRFG_NOEXCEPT;
  * lifetime, including history and opacity resets. Missing depth on a Submit
  * preserves ordinary color FG rather than fabricating a guide. */
 #define VDXRFG_CREATE_DEPTH_RECONSTRUCTION 32u
+/* NVIDIA hardware motion estimation only. V4/V5 may advertise either flag.
+ * No flag uses Medium. Fast and Slow are mutually exclusive and NVIDIA-only. */
+#define VDXRFG_CREATE_NVIDIA_FLOW_FAST 64u
+#define VDXRFG_CREATE_NVIDIA_FLOW_SLOW 128u
 /* Reset reasons 0/1 retain their existing history-reset behavior and preserve
  * opacity. V5 with DEPTH_OPACITY_RESET additionally accepts exactly one of
  * these mode bits, optionally combined with reason 1. Unknown or conflicting

@@ -1260,6 +1260,18 @@ NvidiaFlowSample nvidia_confidence_flow_for_pixel(
         original_shader.splitlines(keepends=True), shader.splitlines(keepends=True),
         fromfile="upstream/src/d3d12/frame_synthesis.hlsl",
         tofile="compiled/src/d3d12/frame_synthesis.hlsl")), encoding="utf-8")
+    # Keep driver quality independent of the synthesis pipeline selected by OFXR.
+    for path, before, after in (
+            (output / "xrfg/d3d12_frame_synthesizer.hpp", "    bool bidirectional{};",
+             "    bool bidirectional{};\n"
+             "    // Overrides the hardware performance hint without selecting another synthesis shader.\n"
+             "    std::optional<D3D12NvidiaPerformancePreset> driver_preset;"),
+            (output / "d3d12_frame_synthesizer.cpp", "switch (nvidia_options.preset)",
+             "switch (nvidia_options.driver_preset.value_or(nvidia_options.preset))")):
+        text = path.read_text(encoding="utf-8")
+        if text.count(before) != 1:
+            raise ValueError("Pinned NVIDIA driver preset context does not match uniquely")
+        path.write_text(text.replace(before, after), encoding="utf-8")
     print("PASS: verified OFXR ownership, state, timing and endpoint derivatives prepared")
 
 

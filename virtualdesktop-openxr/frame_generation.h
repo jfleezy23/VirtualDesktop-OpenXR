@@ -145,6 +145,7 @@ namespace virtualdesktop_openxr {
             // delivery consumer fence. Null preserves the established path.
             ID3D11Device5* deliveryDevice11{};
             ID3D11DeviceContext4* deliveryContext11{};
+            uint32_t nvidiaFlowPreset{}; // 0=Medium, 1=Fast, 2=Slow.
         };
 
         // Optional CPU-only receipt of the actual module Submit call. This is
@@ -249,6 +250,7 @@ namespace virtualdesktop_openxr {
         bool depthGuidanceEnabled() const noexcept;
         bool depthGuidanceRequested() const noexcept;
         uint32_t negotiatedDepthMode() const noexcept;
+        uint32_t negotiatedNvidiaFlowPreset() const noexcept;
         bool opaqueInputEnabled() const noexcept;
         void diagnostic(const char*, uint64_t, void*, void*, uint64_t, HRESULT = S_OK) const noexcept;
         bool diagnosticEntryEnabled() const noexcept;
