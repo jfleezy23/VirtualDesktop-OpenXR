@@ -1,10 +1,9 @@
 # Try VDXR NR and OFXR frame generation
 
-The [November 18 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.18.1)
-adds **stereo replay during late NR** for eligible **OFXR 2×/3×/4×** sessions and fixes retry ordering
-after a failed NR submission. Early optical flow remains available with compatible D3D11 games.
-**Controls 2026.11.16.1** shows live NR, FG and early optical flow activity. Automatic per-game profiles
-continue to apply.
+The [November 21 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.21.1)
+avoids unused early optical-flow work across frame gaps in eligible D3D11 sessions with NR and NVIDIA FG.
+Stereo replay during late NR and retry ordering after a failed NR submission carry forward.
+**Controls 2026.11.20.1** adds a cover grid for saved games and per-game NVIDIA flow presets.
 NR processing resolution and coverage are independent, including **95% coverage / 80% processing** and
 **90% coverage / 85% processing**. FG offers Off, 2×, 3× and 4× and also works with NR off.
 
@@ -24,10 +23,10 @@ it does not provide Steam Frame or ALVR streaming. Frame Launcher's separate Ste
 
 ## Install once
 
-1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.11.18.1.zip` and
-   `VDXR-NR-FG-Controls-Windows-x64-2026.11.18.1.zip` from the
-   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.18.1).
-   Check them against `SHA256SUMS-2026.11.18.1.txt`.
+1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.11.21.1.zip` and
+   `VDXR-NR-FG-Controls-Windows-x64-2026.11.21.1.zip` from the
+   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.21.1).
+   Check them against `SHA256SUMS-2026.11.21.1.txt`.
 2. Use the ZIPs from step 1 with the [side-by-side setup](SIDE-BY-SIDE-RUNTIME.md), which describes
    the folder layout and registration procedure. Put the matching host DLL, FG DLL and
    `CUSTOM-RUNTIME.json` under `%ProgramFiles%\VDXR-NR-FG\OpenXR`, then register the managed path.
@@ -61,7 +60,7 @@ Fresh settings remain NR off, FG off, 100% processing and 100% coverage.
 
 ![VDXR NR/FG Controls illustration](images/controls-overview.png)
 
-*Retained illustration showing example settings. The new Live runtime card is not shown.*
+*Example settings in Controls.*
 
 Globals save automatically; game-profile edits remain drafts until **Save game profile**. Saved NR enable,
 processing, coverage and appearance changes can apply during play. FG mode, backend and requested reconstruction
@@ -95,17 +94,19 @@ zero NR strength preserves the original RGB. Your appearance settings remain sep
 
 Use the executable that actually runs the game, rather than its launcher or a shortcut. Adding or selecting an EXE
 writes nothing. A new profile inherits effective settings from Globals; edit them and click **Save game profile**.
-Save stores all eleven displayed values: NR enable, style, strength, local tone, structure detail, skin detail,
-processing resolution, coverage, FG mode, optical-flow backend and requested reconstruction mode.
+Save stores all twelve displayed values, including the frame generation backend,
+reconstruction mode and NVIDIA flow preset.
 Later global changes do not alter that saved setup.
 You can also save without edits to lock a working global setup for one game.
 
-**Reset game profile** removes the overrides and immediately restores global inheritance. Unsaved game edits remain
+**Reset game profile** removes the overrides, restores global inheritance and returns the NVIDIA flow preset to
+**Medium**. Unsaved game edits remain
 drafts; switching scope or closing offers Save, Discard or Cancel. Global **Reset NR settings** resets only NR and
 preserves the FG selections. The separate Runtime selector applies to the installation, rather than an individual game.
 
 The custom runtime selects the matching profile automatically when that EXE launches. Controls can be closed, and
-you do not need to select the profile before each launch. There is no automatic game-library scan. Executables in
+you do not need to select the profile before each launch. The picker uses local store metadata to label saved
+profiles. Use **Add game EXE…** to add another profile. Executables in
 different folders have separate profiles, even when their filenames match. Moving a game EXE needs a new profile;
 updating it at the same path preserves the profile. Install the matching new runtime before relying on profiles.
 
@@ -126,6 +127,10 @@ The 4× mode is not a measured fourfold game-FPS improvement.
 Start with NVIDIA. **FidelityFX (full resolution)** remains experimental and may show interpolation artifacts.
 Restart the game after changing backends. Backend selection does not change NR coverage, appearance controls or
 game pixel density. An explicit unsupported/mismatched backend request can leave FG unavailable for that session.
+
+For a game using NVIDIA frame generation, select its game profile and choose **Fast**, **Medium** or **Slow**
+under **Frame generation → NVIDIA flow preset**. Click **Save game profile** and restart the game.
+Medium is the default. Fast can reduce optical-flow time at a motion-quality cost. Slow can take more GPU time.
 
 ## Check the game's route
 

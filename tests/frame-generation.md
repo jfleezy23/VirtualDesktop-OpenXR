@@ -3,28 +3,27 @@
 This x64 experimental integration uses the retained OFXR D3D12 synthesis core
 as an optional adjacent DLL, vdxr-frame-generation.dll. It runs after final stereo processing, including NR when enabled, sharpening and upscaling. Each real input receives NR once per eye; synthesized
 outputs are not fed through NR again. When NR is enabled, coverage must be at least 90%
-for FG eligibility. Coverage and processing resolution remain independent; the recorded
-Moss headset check used 90% coverage and 85% processing with NVIDIA 4X.
+for FG eligibility. Coverage and processing resolution remain independent.
 
 ## Controls and activation
 
 The VDXR NR/FG Controls app offers **Off**, **OFXR 2X**, **OFXR 3X** and **OFXR 4X**.
 Globals save automatically to the 64-bit runtime registry view. Game-scope edits
-remain drafts until **Save game profile**, which saves all ten displayed NR/FG values.
+remain drafts until **Save game profile**, which saves all twelve displayed NR/FG values.
 Profiles are selected automatically by the actual game executable's normalized full path;
-Controls does not scan the game library or need to remain open. **Reset game profile**
+Controls uses local store metadata to label saved profiles and can be closed during play. **Reset game profile**
 removes the overrides and restores global inheritance. Use the game process EXE rather
 than a launcher. See the [Controls guide](../docs/NR-FG-CONTROLS.md) for profile semantics.
 
-FG mode and backend are captured at session start. Restart the game to apply either
-change; saved NR enable, coverage, processing and appearance controls remain live.
+FG mode, backend and the per-game NVIDIA flow preset are captured at session start. Restart the game to apply these
+changes; saved NR enable, coverage, processing and appearance controls remain live.
 The selector shows the saved request, not a
 claim that generation is currently active. Changing FG does not reset NR
 settings. Installing the package does not enable FG or change the registry.
 
 The backend selector independently saves `FrameGenerationBackend` in the same
-64-bit registry view: 0 (or absent) is NVIDIA Medium/half, 1 requests FidelityFX
-at full optical-flow input resolution. Both require a game restart. V2 advertises
+64-bit registry view: 0 (or absent) selects NVIDIA optical flow at half input resolution, and 1 requests FidelityFX
+at full optical-flow input resolution. NVIDIA uses Medium by default, with Fast and Slow selectable per game. Both require a game restart. V2 advertises
 the required `VDXRFG_CREATE_FIDELITYFX_FULL` capability without changing any ABI
 layout. A host requesting it rejects V1-only or older V2 modules before GPU
 allocation rather than masking the required flag or retrying NVIDIA. Unsupported

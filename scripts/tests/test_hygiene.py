@@ -233,7 +233,9 @@ class HygieneTests(unittest.TestCase):
                 + chunk(b"IDAT", zlib.compress(b"\x00\x14\x28\x3c\xff")) + chunk(b"IEND", b""))
 
     def test_documentation_png_is_allowed(self):
-        for name in ("controls-overview.png", "controls-fg-only.png", "controls-game-profile.png"):
+        for name in (
+            "controls-overview.png", "controls-fg-only.png", "controls-game-profile.png", "controls-game-picker.png"
+        ):
             image = self.repo / "docs/images" / name
             image.parent.mkdir(parents=True, exist_ok=True)
             image.write_bytes((SCRIPT.parent.parent / "docs/images" / name).read_bytes())

@@ -7,12 +7,10 @@ selector chooses stock or custom VDXR for the next VR launch.
 
 ![The actual Controls app showing processing resolution, coverage and OFXR settings](images/controls-overview.png)
 
-*Retained illustrations of the app with example settings, not installation defaults or a complete view
-of every selector. The appearance sliders are not a preset applied by installation.*
+*Example settings. The profile screenshots use fictional titles and original placeholder artwork.*
 
-The 2026.11.18.1 release carries forward Controls 2026.11.16.1. Use the matching runtime and Controls
-packages listed in the [Quickstart](NR-FG-QUICKSTART.md). Stereo replay and retry fixes work with
-existing NR/FG settings. See the [release notes](releases/2026.11.18.1.md) for details.
+**Controls 2026.11.20.1** ships with runtime **2026.11.21.1**. Use the matching packages listed in the
+[Quickstart](NR-FG-QUICKSTART.md). See the [release notes](releases/2026.11.21.1.md) for upgrade details.
 
 ## Get started
 
@@ -88,7 +86,10 @@ frame tracing or write frame logs.
 ## Automatic game profiles
 
 **Globals** retains the existing immediate-save controls and your saved appearance values.
-Use **Add game EXE…** to select the actual game executable, then edit its effective NR/FG
+Open **Settings scope** to find a saved game by title and cover. Controls matches the
+executable to local Steam or Meta metadata and prefers widescreen cover art when available.
+Use **Add game EXE…** to select the actual game executable. If Controls cannot match it
+to a known game, it shows a name based on the filename. Edit its effective NR/FG
 values and click **Save game profile**. Adding or selecting an executable writes nothing.
 Game edits remain drafts until saved; switching or closing offers Save, Discard or Cancel.
 **New games inherit globals; Save locks current setup; Reset returns to globals.** Save is
@@ -96,36 +97,38 @@ available even without edits so you can lock a working global setup for one game
 **Reset game profile** removes that game's overrides and restores inheritance immediately.
 Global **Reset NR settings** continues to reset only NR and preserves the FG selections.
 
-![The actual Controls app showing an example 4× game profile](images/controls-game-profile.png)
+![Game picker with example titles and original placeholder artwork](images/controls-game-picker.png)
 
-*Retained illustration with an example executable and settings. Its override count predates the eleventh setting;
-no personal game inventory is included in the download.*
+![An example 4× game profile with the NVIDIA Slow preset selected](images/controls-game-profile.png)
 
-The scope displays the executable's full path, the number of overrides and inherited values.
+The scope shows the number of overrides and inherited values. When multiple profiles
+share a title, the picker and scope identify their store or number the copies.
 All appearance controls, NR enable, coverage, processing resolution, FG mode, optical-flow
-backend and requested reconstruction mode support overrides. **Save game profile** stores all eleven values, so later
-global edits do not change that game's saved setup. New or manually partial profiles inherit
-each missing value from the current global value, then the runtime default. Reset removes
-all saved overrides and restores that inheritance. Missing coverage defaults to **100%** in
+backend, requested reconstruction mode and NVIDIA flow preset support overrides.
+**Save game profile** locks these twelve values for the selected executable. Each missing
+value uses the current global value, then the runtime default. The NVIDIA flow preset is
+set per game and defaults to **Medium**. Reset removes the overrides and restores those
+defaults. Missing coverage defaults to **100%** in
 both Controls and the runtime. A saved global coverage value, including 90%, always takes
 precedence over that fallback; this default change does not overwrite any saved value.
 
 Profiles apply automatically when that executable uses the custom runtime, including normal
 Virtual Desktop launches and shortcuts. Controls does not need to stay open or select the
 profile before launch. Choose the actual game process EXE rather than a launcher or shortcut;
-Controls does not scan installed games or infer a running game from process names. Two EXEs
+The picker lists saved profiles and uses local store metadata for titles and covers. Two EXEs
 with the same basename in different folders have separate profiles. Case, slash and dot-path
 variations share a profile. Moving the executable to another folder needs a new profile;
 updating its contents at the same path preserves its profile.
 
 Saving NR overrides refreshes a running game's NR settings through the existing registry
-watcher. FG mode and backend are captured when the session starts: restart the game after
-changing either. A profile never temporarily replaces the global gameplay values.
+watcher. Restart the game after changing frame generation settings.
 
 Malformed types or out-of-range values are rejected explicitly. The runtime disables the
 affected NR or FG group rather than silently inheriting an enabled global value. Controls
 shows a rejected profile and blocks Save; Reset removes malformed value overrides and can
-recover an interrupted creation whose identity metadata is missing. Present but mismatched
+recover an interrupted creation whose identity metadata is missing. An invalid NVIDIA
+flow preset falls back to Medium. Controls shows a warning and saves a valid replacement
+when you click **Save game profile**. Present but mismatched
 or incorrectly typed identity metadata blocks replacement and Reset. Corrupt list entries
 are reported and skipped without hiding other valid game profiles.
 Profiles live below the existing 64-bit OpenXR registry key at `Profiles/<path identity>`;
@@ -149,6 +152,7 @@ on per-game settings. OFXR 4× requires a matching 4×-capable host and FG modul
 | Mode | Off, OFXR 2×, OFXR 3× or OFXR 4× | After restarting the game |
 | Optical-flow backend | NVIDIA or experimental FidelityFX at full resolution | After restarting the game |
 | Requested reconstruction mode | Standard, Depth assist or experimental Depth reconstruction | After restarting the game |
+| NVIDIA flow preset | Fast, Medium (default), or Slow for the selected NVIDIA game profile | After restarting the game |
 
 Globals saves immediately. Game scope uses **Save game profile**. The status line confirms
 a saved change or reports an error.
@@ -198,6 +202,13 @@ not guarantee that every submission is eligible or that generated frames meet th
 **Reset NR settings** disables NR and saves its defaults, including 100% processing resolution and 100% coverage.
 It replaces the saved NR appearance choices but preserves the FG mode and backend.
 Installing or upgrading the controls app does not reset your hair/face settings.
+
+## Image quality
+
+Choose **Globals** in the custom runtime to edit these two settings. Each **Apply** button saves its own value.
+
+- **CAS sharpening (%)** ranges from 0 to 100. Zero turns sharpening off. Changes can apply during play.
+- **FSR render scale (%)** ranges from 50 to 100 per eye dimension. 100 uses the native render scale. Restart the game after changing it.
 
 ## Requested reconstruction mode
 

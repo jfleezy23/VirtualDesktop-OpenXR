@@ -31,9 +31,10 @@ MACHINE_PATH = re.compile(r"[A-Za-z]:[/\\](?:Users|Documents and Settings)[/\\]|
 VENDOR_ROOT = "nr-frame-generation/vendor/ofxr/"
 VENDOR_PIN = "07449429c139e5d2070b6f0855ed5323de7cee00"
 DOCUMENTATION_PNG_SHA256 = {
-    "docs/images/controls-overview.png": "d3e687d6569faef15d12faf25ff6704e60c667700a741e9c103828b61b4f399d",
-    "docs/images/controls-fg-only.png": "2ee09bb158e25d633597292c74b5608c3ec5ec54984bf9e8da0ed0193af4db1c",
-    "docs/images/controls-game-profile.png": "8b286ff538e889afaaa965e6ffdb46cf8b6128436b4bab78357133f1b3f9df5f",
+    "docs/images/controls-overview.png": "261f49d9a31f1ddfc8b6567f57a53e2150225ef95b98bf308e3130b7930dcc0b",
+    "docs/images/controls-fg-only.png": "c6e592aeaa6ae012fa633819bb153c8a50b34a46115b2f8d210f67bce27ef9b1",
+    "docs/images/controls-game-profile.png": "c8b1652321849f4a8e8425160b02a137fe20d26df4f3aff37ea631a677feb657",
+    "docs/images/controls-game-picker.png": "960b9e379910442fd8e01b2aef4fdb8056e0b2b148189e09aba928a5b99a280e",
 }
 
 
