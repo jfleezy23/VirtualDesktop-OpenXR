@@ -12,26 +12,55 @@ from unittest.mock import Mock, patch
 import vdxr_registry_gui as gui
 
 
+def create_editor(root):
+    store = Mock()
+    store.list_profiles.return_value = []
+    store.load.return_value = (gui.game_profiles.DEFAULTS, {})
+    return gui.VDXRRegistryApp(root, profile_store=store)
+
+
+class ControlsLayoutTests(unittest.TestCase):
+    def show_editor(self, width, height):
+        root = tk.Tk()
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        root.geometry(f"+{root.winfo_screenwidth() + 100}+0")
+        # Tk also caps mapped windows at the host display's size by default.
+        root.maxsize(width, height)
+        root.winfo_screenwidth = lambda: width
+        root.winfo_screenheight = lambda: height
+        app = create_editor(root)
+        root.deiconify()
+        root.update()
+        return root, app
+
+    def test_wide_editor_arranges_fg_and_nr_in_separate_columns(self):
+        root, app = self.show_editor(1920, 1440)
+        self.assertEqual(tuple(map(int, root.resizable())), (1, 1))
+        self.assertGreaterEqual(app.editor_frame.winfo_reqwidth(), 1030)
+        fg = app.fg_selector.master.master.master.grid_info()
+        nr = app.processing_resolution_slider.master.master.master.grid_info()
+        self.assertEqual(fg["row"], nr["row"])
+        self.assertLess(fg["column"], nr["column"])
+        self.assertEqual(app.editor_scrollbar.winfo_manager(), "")
+        self.assertLessEqual(root.winfo_reqheight(), root.winfo_screenheight() - 40)
+
+    def test_narrow_display_stacks_controls_inside_the_window(self):
+        root, app = self.show_editor(850, 700)
+        self.assertLessEqual(root.minsize()[0], 850)
+        fg = app.fg_selector.master.master.master.grid_info()
+        nr = app.processing_resolution_slider.master.master.master.grid_info()
+        self.assertEqual(fg["column"], nr["column"])
+        self.assertLess(fg["row"], nr["row"])
+        self.assertEqual(app.editor_scrollbar.winfo_manager(), "grid")
+
+
 class ControlsPickerTests(unittest.TestCase):
     def setUp(self):
         self.root = tk.Tk()
         self.root.withdraw()
         self.addCleanup(self.root.destroy)
-        store = Mock()
-        store.list_profiles.return_value = []
-        store.load.return_value = (gui.game_profiles.DEFAULTS, {})
-        self.app = gui.VDXRRegistryApp(self.root, profile_store=store)
-
-    def test_wide_editor_arranges_fg_and_nr_in_separate_columns(self):
-        self.root.geometry(f"+{self.root.winfo_screenwidth() + 100}+0")
-        self.root.deiconify()
-        self.root.update()
-        self.assertEqual(tuple(map(int, self.root.resizable())), (1, 1))
-        self.assertGreaterEqual(self.app.editor_frame.winfo_reqwidth(), 1030)
-        self.assertNotEqual(self.app.fg_selector.master.master.master,
-                            self.app.processing_resolution_slider.master.master.master)
-        self.assertEqual(self.app.editor_scrollbar.winfo_manager(), "")
-        self.assertLessEqual(self.root.winfo_reqheight(), self.root.winfo_screenheight() - 40)
+        self.app = create_editor(self.root)
 
     def test_search_trace_is_released_when_picker_closes(self):
         start = len(self.root.tk.call("info", "globals", "PY_VAR*"))
@@ -41,22 +70,6 @@ class ControlsPickerTests(unittest.TestCase):
             self.app.game_picker.destroy()
         self.assertIsNone(self.app.game_picker)
         self.assertEqual(len(self.root.tk.call("info", "globals", "PY_VAR*")), start)
-
-    def test_narrow_display_stacks_controls_inside_the_window(self):
-        root = tk.Tk()
-        root.withdraw()
-        self.addCleanup(root.destroy)
-        root.winfo_screenwidth = lambda: 850
-        root.winfo_screenheight = lambda: 700
-        store = Mock()
-        store.list_profiles.return_value = []
-        store.load.return_value = (gui.game_profiles.DEFAULTS, {})
-        app = gui.VDXRRegistryApp(root, profile_store=store)
-        self.assertLessEqual(root.minsize()[0], 850)
-        fg_column = app.fg_selector.master.master.master.grid_info()
-        nr_column = app.processing_resolution_slider.master.master.master.grid_info()
-        self.assertEqual(fg_column["column"], nr_column["column"])
-        self.assertLess(fg_column["row"], nr_column["row"])
 
     def test_long_selected_title_fits_the_scope_control(self):
         executable = r"f:\many words\game.exe"
