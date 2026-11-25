@@ -1,5 +1,10 @@
 # VirtualDesktop-OpenXR — NR and OFXR 2×/3×/4× frame generation
 
+> The `stable` branch holds the deprecated Standard runtime source. For current NR/FG, download the
+> [latest release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/latest) or browse the
+> [experimental-nr source](https://github.com/jfleezy23/VirtualDesktop-OpenXR/tree/experimental-nr).
+> The guide below covers the historical NR/FG 2026.11.18.1 release, including OFXR's Standard reconstruction mode.
+
 An independent Windows runtime fork maintained by [jfleezy23](https://github.com/jfleezy23), built on
 [VirtualDesktop-OpenXR](https://github.com/mbucchia/VirtualDesktop-OpenXR). Run compatible OpenXR games through
 Virtual Desktop with optional neural rendering (NR), **OFXR 2×/3×/4× PC frame generation**, and automatic
@@ -101,14 +106,12 @@ close the game, select **Stock VDXR**, then launch again.
 
 | Branch | Purpose |
 | --- | --- |
-| [stable](https://github.com/jfleezy23/VirtualDesktop-OpenXR/tree/stable) — default | General runtime fixes. No NR/NGX integration. |
-| [experimental-nr](https://github.com/jfleezy23/VirtualDesktop-OpenXR/tree/experimental-nr) | NR/FG development happens on this branch. Each dated release provides a separate corresponding-source ZIP for the shipped binaries. Its as-built sources can differ from the branch tip. |
+| [experimental-nr](https://github.com/jfleezy23/VirtualDesktop-OpenXR/tree/experimental-nr) (default) | Current NR/FG release and development branch. |
+| [stable](https://github.com/jfleezy23/VirtualDesktop-OpenXR/tree/stable) | Deprecated source for the Standard runtime. |
 
-The dated links above open the NR release's own guides and images.
-`stable` describes the general runtime branch, not universal game compatibility. There is no separate public `main` branch.
-
-For source builds, start with [CONTRIBUTING.md](CONTRIBUTING.md). NR/FG build requirements and regression scope are
-in the [dated FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.18.1/tests/frame-generation.md).
+For builds of the legacy Standard runtime, see [CONTRIBUTING.md](CONTRIBUTING.md) on this branch.
+For NR/FG 2026.11.18.1 build requirements and regression scope, see the
+[dated FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.18.1/tests/frame-generation.md).
 Download the separate [corresponding-source ZIP](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/download/nr-fg-2026.11.18.1/VDXR-NR-FG-corresponding-source-2026.11.18.1.zip) and use the
 [release build instructions](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/download/nr-fg-2026.11.18.1/BUILD-SOURCE-2026.11.18.1.md) to match the shipped binaries.
 
