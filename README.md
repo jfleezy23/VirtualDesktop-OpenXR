@@ -9,22 +9,23 @@ settings profiles for individual game executables.
 with NR on or off. Start with **OFXR 2× / NVIDIA / Medium / Standard**, turn VD's **SSW Off**, and restart the game.
 Generation depends on timing and eligibility; the multiplier does not guarantee an equivalent game-FPS increase.
 
-**[Download NR + OFXR for Windows](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.21.1)** ·
-[Install and try it](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.21.1/docs/NR-FG-QUICKSTART.md) ·
-[Controls guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.21.1/docs/NR-FG-CONTROLS.md) ·
-[Game routing help](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.21.1/docs/GAME-COMPATIBILITY.md)
+**[Download NR + OFXR for Windows](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.24.1)** ·
+[Install and try it](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.24.1/docs/NR-FG-QUICKSTART.md) ·
+[Controls guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.24.1/docs/NR-FG-CONTROLS.md) ·
+[Game routing help](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.24.1/docs/GAME-COMPATIBILITY.md)
 
-[Runtime ZIP](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/download/nr-fg-2026.11.21.1/VDXR-NR-FG-Windows-x64-2026.11.21.1.zip) · [Controls ZIP](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/download/nr-fg-2026.11.21.1/VDXR-NR-FG-Controls-Windows-x64-2026.11.21.1.zip)
+[Runtime ZIP](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/download/nr-fg-2026.11.24.1/VDXR-NR-FG-Windows-x64-2026.11.24.1.zip) · [Controls ZIP](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/download/nr-fg-2026.11.24.1/VDXR-NR-FG-Controls-Windows-x64-2026.11.24.1.zip)
 
 ## What's new
 
-**NVIDIA optical-flow presets** are available per game for **OFXR 2×, 3× and 4×**. Start with
-**Medium**. Fast can reduce optical-flow time with a motion-quality tradeoff. Slow can take more GPU time.
-Choose a preset in a game profile, save it and restart the game.
+**Hubris can now apply NR before native DLSS upscaling.** On the supported D3D12 build, enable
+DLSS Super Resolution in the game and use **Enable NR** in Controls. Each eye is processed at the
+input resolution chosen by DLSS. Other games continue to use compositor NR with their saved coverage
+and processing settings. The live Hubris test used 3× FG.
 
-**Less work after a frame gap.** Eligible D3D11 sessions with NR and NVIDIA FG skip speculative
-optical flow when the next presentation group calls for real frames only. Earlier stereo replay,
-early optical flow and 4× slot recovery remain available.
+In a 30-second Hubris gameplay segment at 120 Hz with 3× FG on an RTX 4090, NR ran on all **1,186**
+real stereo frames. VDXR submitted **3,558** frames to the PC streaming runtime (**118.6 per second**).
+[Read the test conditions](docs/releases/2026.11.24.1.md#gameplay-checks) for the full capture.
 
 **Controls 2026.11.20.1** includes a game picker with cover art when available, a **Live runtime**
 card, and global **CAS Sharpening** and **FSR Render Scale** controls. Install the matching host and FG
@@ -49,10 +50,10 @@ It can be closed during play.
 settings such as **95% coverage / 80% processing** or **90% / 85%**. Reduced processing reconstructs NR inside the
 selected coverage at native output size. Game pixel density and saved face/hair/detail controls stay separate.
 Fresh settings remain **NR Off, FG Off, 100% processing and 100% coverage**. See the
-[release notes](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.21.1/docs/releases/2026.11.21.1.md)
+[release notes](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.24.1/docs/releases/2026.11.24.1.md)
 for upgrade details.
 
-![VDXR NR/FG Controls illustration](https://raw.githubusercontent.com/jfleezy23/VirtualDesktop-OpenXR/nr-fg-2026.11.21.1/docs/images/controls-overview.png)
+![VDXR NR/FG Controls illustration](https://raw.githubusercontent.com/jfleezy23/VirtualDesktop-OpenXR/nr-fg-2026.11.24.1/docs/images/controls-overview.png)
 
 *Example settings. The [game picker and profile guide](docs/NR-FG-CONTROLS.md#automatic-game-profiles) shows how to save per-game presets.*
 
@@ -60,7 +61,7 @@ for upgrade details.
 
 - A Windows x64 PC, the headset version of [Virtual Desktop](https://www.vrdesktop.net/) and its installed Streamer.
 - A game that reaches VDXR through OpenXR. Steam or Oculus ownership alone does not establish compatibility.
-- For NR: compatible NVIDIA hardware and a separately supplied, compatible licensed `nvngx_dlssnr.dll`.
+- For NR: compatible NVIDIA hardware and a separately supplied, compatible licensed `nvngx_dlssnr.dll` beside the host DLL in `%ProgramFiles%\VDXR-NR-FG\OpenXR`.
   **No proprietary NR DLL or neural model is included or downloaded.** NR was tested on an RTX 4090;
   support for every NVIDIA GPU is not established. FG with NR off does not need the NR component.
 - Current graphics drivers and the [Microsoft Visual C++ v14 x64 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/).
@@ -72,8 +73,8 @@ runtime; Frame Launcher's existing SteamVR route remains separate.
 ## Try it
 
 1. Download the dated **runtime** and **Controls** ZIPs from the
-   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.21.1).
-   Follow the [dated quickstart](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.21.1/docs/NR-FG-QUICKSTART.md)
+   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.24.1).
+   Follow the [dated quickstart](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.24.1/docs/NR-FG-QUICKSTART.md)
    to install the matching runtime DLLs and metadata in `%ProgramFiles%\VDXR-NR-FG\OpenXR`.
    Streamer's original files stay in place.
 2. Extract the **entire** Controls ZIP, keep `_internal` beside the EXE, and run **VDXR-NR-FG-Controls.exe**.
@@ -84,12 +85,12 @@ runtime; Frame Launcher's existing SteamVR route remains separate.
    profile takes precedence over Globals. Existing preferences survive installation.
 4. Relaunch the game after changing runtime, FG mode, backend or reconstruction request. Check both eyes,
    controllers and head motion. Then compare 3× or 4× separately. To add NR, supply the licensed component,
-   enable NR and try **100% coverage / 80% processing**; NR + FG requires coverage of at least **90%**.
+   enable NR. For compositor NR, try **100% coverage / 80% processing** with FG.
    Saved NR controls remain adjustable during play. For early optical flow, use a compatible D3D11 game and
    look for the **used** count under **Early prepared / used** in **Live runtime** to rise.
 
 If the game still uses SteamVR or native Oculus, follow the
-[game routing guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.21.1/docs/GAME-COMPATIBILITY.md).
+[game routing guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.24.1/docs/GAME-COMPATIBILITY.md).
 Some titles need a compatible translation layer or a title-specific fix; routing to VDXR does not guarantee an NR
 visual benefit. If interpolation is unsuitable, choose **FG Off**, save if editing a game profile, and restart.
 To return to the official runtime,
@@ -106,7 +107,7 @@ To rebuild a dated NR/FG release, use the corresponding-source ZIP attached to t
 used for the shipped binaries. The dated guides and images above match the linked downloads.
 
 For source builds, start with [CONTRIBUTING.md](CONTRIBUTING.md). NR/FG build requirements and regression scope are
-in the [dated FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.21.1/tests/frame-generation.md).
+in the [dated FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.24.1/tests/frame-generation.md).
 Binary downloads include matching corresponding source and license notices; branch source may advance later.
 
 ## Credits and licenses
@@ -123,7 +124,7 @@ No F5 GPL implementation was copied; this is not F5's full temporal pipeline.
 
 The optional synthesis module builds on [djules75/OFXR-Bridge](https://github.com/djules75/OFXR-Bridge) and includes
 **LGPL-3.0** code. AMD FidelityFX and NVIDIA interface notices accompany it. See the
-[module notice](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.21.1/nr-frame-generation/NOTICE.md)
+[module notice](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.24.1/nr-frame-generation/NOTICE.md)
 for component terms and corresponding source. The runtime's MIT license does not replace those terms.
 
 This is an independent community project, provided as-is, with no Khronos conformance claim. For original runtime
