@@ -254,23 +254,21 @@ namespace virtualdesktop_openxr {
             VDXR_PRIVATE_2X_RECOVERY && m_frameGenerationMode == 2 && m_fgBegunReservation.multiplier == 2 &&
             m_fgBegunReservation.reason == PredictionReservationReason::expired2 && !m_fgBegunReservation.valid &&
             m_fgBegunReservation.shouldRender && info.displayTime == m_fgBegunReservation.returnedDisplayTime;
+        // D3D12 resolves the quad after capacity. The worker queues its ordinary native copy
+        // before opening capacity, so the next resolve can order itself after that read.
+        const bool allowQuad = info.layerCount == 2 && m_deliveryTransport && isD3D12Session() && m_d3d12CommandQueue &&
+                               !settings.enabled && m_hubrisFrameGeneration.load(std::memory_order_acquire);
         const bool eligible =
             m_frameGenerationMode && !m_frameGenerationUnavailable && m_useAsyncSubmission &&
             !m_useApplicationDeviceForSubmission && (!settings.enabled || settings.foveationSize >= .90f) &&
-            info.layerCount == 1 && (settings.enabled || m_d3d11Context || m_d3d12CommandQueue) &&
-            m_layersForFrame.size() == 1 &&
-            (m_layersForFrame[0].Header.Type == ovrLayerType_EyeFov ||
-             m_layersForFrame[0].Header.Type == ovrLayerType_EyeFovDepth) &&
-            m_precompositor.finalColour[0] && m_precompositor.finalColour[1] && m_fgBegunReservation.shouldRender &&
-            info.layers && info.layers[0] &&
+            (settings.enabled || m_d3d11Context || m_d3d12CommandQueue) &&
+            frameGenerationLayerLayoutSupported(info, m_layersForFrame, allowQuad) && m_precompositor.finalColour[0] &&
+            m_precompositor.finalColour[1] && m_fgBegunReservation.shouldRender &&
             ((m_fgBegunReservation.valid && info.displayTime == m_fgBegunReservation.currentTarget) || expiredRecovery);
         if (!eligible) {
             return bypass();
         }
         const auto& sourceProjection = *reinterpret_cast<const XrCompositionLayerProjection*>(info.layers[0]);
-        if (sourceProjection.viewCount != 2 || !sourceProjection.views) {
-            return bypass();
-        }
         for (unsigned eye = 0; eye < 2; ++eye) {
             const auto& view = sourceProjection.views[eye];
             const auto& source = *reinterpret_cast<const Swapchain*>(view.subImage.swapchain);
@@ -449,7 +447,7 @@ namespace virtualdesktop_openxr {
         }
         const bool guideUpgrade =
             m_frameGeneration && m_fgDepthGuidanceRequested && !m_frameGeneration->depthGuidanceRequested();
-        // Admission above permits exactly one native projection. VDXR's
+        // The generated input is always the first projection. VDXR's
         // existing first-layer policy ignores source alpha, even when an XR
         // bridge sets BLEND_TEXTURE_SOURCE_ALPHA. Describe the finalized
         // projection sent to VD, rather than those unused application flags.
@@ -795,15 +793,15 @@ namespace virtualdesktop_openxr {
         }
     }
 
-    void OpenXrRuntime::protectFrameGenerationSources(bool ordinaryFallback) {
+    void OpenXrRuntime::protectFrameGenerationSources(bool ordinaryLayerReads) {
         // Delivery NR returns private-colour input ownership separately. Native
         // NR may still read an aliased app image, so its successful capture also
-        // needs this return edge. Fallback reads require it on either route.
+        // needs this return edge. Ordinary layer reads, including a captured HUD, require it too.
         const bool hasDepthSources = m_precompositor.finalDepth[0] || m_precompositor.finalDepth[1];
         const bool hasGuideSources =
             m_frameGeneration && m_frameGeneration->depthGuidanceEnabled() &&
             (m_precompositor.originalFgDepth[0].source || m_precompositor.originalFgDepth[1].source);
-        if ((m_precompositor.dlssnrSettings.enabled && m_deliveryTransport && !ordinaryFallback &&
+        if ((m_precompositor.dlssnrSettings.enabled && m_deliveryTransport && !ordinaryLayerReads &&
              !m_fgDepthSnapshotForFrame && !hasDepthSources && !hasGuideSources) ||
             (!m_d3d11Context && !m_d3d12CommandQueue)) {
             return;
@@ -1155,6 +1153,7 @@ namespace virtualdesktop_openxr {
                     m_asyncSubmissionCondVar.notify_all();
                 }
                 const bool hasGpuOutput = transaction.ticket.token != 0;
+                const bool hasHud = hasGpuOutput && ownedLayers.size() == 2;
                 const bool traceGroup = IsTraceEnabled();
                 std::array<double, 4> readyEnter{}, readyReturn{}, copyQueued{}, copyObserved{};
                 std::array<int, 4> preparedImages{{-1, -1, -1, -1}};
@@ -1177,7 +1176,8 @@ namespace virtualdesktop_openxr {
                     reservation.multiplier >= 1 && reservation.multiplier <= 4 ? reservation.multiplier : 1;
                 const bool matchingReservation =
                     reservation.valid && reservation.nativeId == static_cast<uint64_t>(nativeId);
-                const bool retainReal = hasGpuOutput && m_deliveryTransport && transaction.nrEnabled &&
+                // Cross-group replay owns only the previous projection's pixels and pose.
+                const bool retainReal = hasGpuOutput && !hasHud && m_deliveryTransport && transaction.nrEnabled &&
                                         matchingReservation && reservation.shouldRender;
                 const bool continuesRetainedLineage =
                     hasGpuOutput && retainedStereo.serial && !transaction.ticket.prime &&
@@ -1229,6 +1229,11 @@ namespace virtualdesktop_openxr {
                 bool deferredReal{};
                 if (hasGpuOutput) {
                     std::unique_lock contextLease(m_fgContextMutex);
+                    if (hasHud) {
+                        // Deliver any pending HUD update once before admitting the next producer.
+                        // Every current-group End uses the committed native image and B's quad pose.
+                        m_deliveryTransport->execute(ownedDelivery);
+                    }
                     if (!canRepeat())
                         retainedStereo = {};
                     // No current dependency may get ahead of a possible repeat
@@ -1251,9 +1256,13 @@ namespace virtualdesktop_openxr {
                 // Closed native cycles can omit expired original slots. An
                 // already-begun cycle still needs its matching End; do not
                 // assume that the SDK permits replacing that open cycle.
-                const bool recoverExpiredSlots = generated && cycles == 4 && !begun;
+                const bool skipExpiredThree =
+                    generated && !begun && cycles == 3 && !deferredReal && transaction.slots.count == cycles &&
+                    m_hubrisFrameGeneration.load(std::memory_order_acquire) &&
+                    ovrTimeToXrTime(ovr_GetTimeInSeconds()) >= transaction.slots.targets[cycles - 1];
+                const bool recoverExpiredSlots = generated && !begun && (cycles == 4 || skipExpiredThree);
                 const bool recoverReadyContent =
-                    generated && !begun && m_deliveryTransport && (cycles == 2 || cycles == 3);
+                    generated && !begun && !recoverExpiredSlots && m_deliveryTransport && (cycles == 2 || cycles == 3);
                 // Comparison arm: retain preparation and producer admission
                 // before the SDK's blocking timing calls. Recovery and
                 // independent-End lease release remain enabled.
@@ -1943,6 +1952,8 @@ namespace virtualdesktop_openxr {
                             }
                         }
                         pointers[layerCount++] = &layer.Header;
+                        if (hasHud)
+                            pointers[layerCount++] = &ownedLayers[1].Header;
                     } else {
                         // Unsupported composition preserves the complete layer
                         // list. Only transition reservations have padding repeats.
@@ -1993,6 +2004,9 @@ namespace virtualdesktop_openxr {
                                       TLArg(slot, "Slot"),
                                       TLArg(selectedContentSlot, "ContentSlot"),
                                       TLArg(cycles, "Slots"),
+                                      TLArg(skipExpiredThree ? cycles - 1 : 0u, "ExpiredClosedSlotsSkipped"),
+                                      TLArg(layerCount, "LayerCount"),
+                                      TLArg(hasHud, "CapturedHud"),
                                       TLArg(generated && slot < cycles - 1, "Synthetic"),
                                       TLArg(repeatedSynthetic, "SyntheticRepeat"),
                                       TLArg(!generated && slot < cycles - 1, "PaddingRepeat"),

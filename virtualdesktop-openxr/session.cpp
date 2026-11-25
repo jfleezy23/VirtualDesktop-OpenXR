@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 #include "pch.h"
+#include "NrBeforeSr.h"
 #include "PairCaptureNrPrivate.h"
 
 #include "log.h"
@@ -77,6 +78,10 @@ namespace virtualdesktop_openxr {
         m_sessionResourcesRequireCleanup = true;
         const auto initialize = [&]() -> XrResult {
             CHECK_MSG(ensureOVRSession(), "Failed to re-create OVR session\n");
+
+            // A retained app-device model rules out the compositor model even after an XR session restart.
+            m_usingBeforeSrNr.store(nr_before_sr::HasBeforeSrModel(), std::memory_order_release);
+            m_hubrisFrameGeneration.store(false, std::memory_order_release);
 
             // Get the graphics device and initialize the necessary resources.
             bool hasGraphicsBindings = false;
@@ -699,6 +704,15 @@ namespace virtualdesktop_openxr {
         {
             std::unique_lock lock(m_dlssnrSettingsMutex);
             m_dlssnrSettings = settings;
+            m_dlssnrProfileValid = effectiveSettings.nrValid;
+            if (m_usingBeforeSrNr.load(std::memory_order_acquire))
+                nr_before_sr::UpdateBeforeSrAppearance(settings.style,
+                                                       settings.intensity,
+                                                       settings.localToneStrength,
+                                                       settings.localStructureStrength,
+                                                       settings.skinStructureStrength,
+                                                       settings.enabled,
+                                                       m_dlssnrProfileValid);
         }
 
         TraceLoggingWrite(

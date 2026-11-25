@@ -1079,7 +1079,7 @@ namespace virtualdesktop_openxr {
                          const XrRect2Di& sourceRect,
                          const ovrRecti& destinationRect,
                          const DepthEncodingTransform& encoding);
-        void protectFrameGenerationSources(bool ordinaryFallback = false);
+        void protectFrameGenerationSources(bool ordinaryLayerReads = false);
         void orderApplicationAfterSourceReads(uint64_t complete);
         void cleanupFrameGeneration();
         void asyncFrameGenerationThread();
@@ -1193,6 +1193,10 @@ namespace virtualdesktop_openxr {
         NVSDK_NGX_Parameter* m_ngxParameters{nullptr};
         std::mutex m_dlssnrSettingsMutex;
         DlssnrSettings m_dlssnrSettings;
+        bool m_dlssnrProfileValid{true};
+        std::atomic<bool> m_usingBeforeSrNr{false};
+        std::atomic<bool> m_hubrisFrameGeneration{false};
+        bool m_observingBeforeSr{};
 
         // Statistics.
         double m_sessionStartTime{0.0};

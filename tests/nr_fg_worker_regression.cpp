@@ -1148,6 +1148,9 @@ namespace virtualdesktop_openxr {
             end.displayTime = 1000000000;
             end.layerCount = 1;
             XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+            XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+            OpenXrRuntime::Swapchain hudInput{};
+            quad.subImage.swapchain = reinterpret_cast<XrSwapchain>(&hudInput);
             OpenXrRuntime::Swapchain colourInputs[2]{};
             XrCompositionLayerProjectionView views[2]{};
             for (unsigned eye = 0; eye < 2; ++eye) {
@@ -1155,6 +1158,7 @@ namespace virtualdesktop_openxr {
             }
             projection.viewCount = 2;
             projection.views = views;
+            const auto secondProjection = projection;
             if (scenario == L"static" || scenario == L"protected") {
                 colourInputs[1].xrDesc.createFlags = scenario == L"static" ? XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT
                                                                            : XR_SWAPCHAIN_CREATE_PROTECTED_CONTENT_BIT;
@@ -1175,13 +1179,288 @@ namespace virtualdesktop_openxr {
                 end.layerCount = 2;
             }
             const XrCompositionLayerBaseHeader* layers[]{
-                reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+                reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
+                scenario == L"second-projection"
+                    ? reinterpret_cast<const XrCompositionLayerBaseHeader*>(&secondProjection)
+                    : reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
             end.layers = layers;
             require(!runtime.prepareFrameGeneration(end) && !runtime.m_frameGeneration,
                     "unsupported final composition bypasses before loading a module");
             require(runtime.m_fgDesiredMultiplier.load() == 1,
                     "unsupported format or eye extents restore native application cadence");
             runtime.cleanupSessionResources();
+        }
+        static void hudQuad(const wchar_t* backend, const wchar_t* module, unsigned multiplier, bool testExpiredGroup) {
+            OpenXrRuntime runtime;
+            BackendState sdk;
+            BackendHooks hooks(backend, sdk, false);
+            CapacityClockHook clock(true, testExpiredGroup);
+            Interop presenter;
+            RuntimeInputRegression::seed(runtime);
+            ovrGraphicsLuid luid{};
+            require(OVR_SUCCESS(ovr_Create(&runtime.m_ovrSession, &luid)), "create private OVRNull session");
+            ComPtr<IDXGIDevice> dxgi;
+            ComPtr<IDXGIAdapter> adapter;
+            success(presenter.device.As(&dxgi), "presentation DXGI device");
+            success(dxgi->GetAdapter(&adapter), "presentation adapter");
+            ComPtr<ID3D11Device> producer;
+            ComPtr<ID3D11DeviceContext> context;
+            success(D3D11CreateDevice(adapter.Get(),
+                                      D3D_DRIVER_TYPE_UNKNOWN,
+                                      nullptr,
+                                      0,
+                                      nullptr,
+                                      0,
+                                      D3D11_SDK_VERSION,
+                                      &producer,
+                                      nullptr,
+                                      &context),
+                    "independent producer device");
+            success(producer.As(&runtime.m_ovrSubmissionDevice), "producer device5");
+            success(context.As(&runtime.m_ovrSubmissionContext), "producer context4");
+            runtime.m_d3d12Device = presenter.gpu.device;
+            runtime.m_d3d12CommandQueue = presenter.gpu.queue;
+            runtime.m_deliveryTransport = std::make_unique<DeliveryTransport>(runtime.m_ovrSession,
+                                                                              runtime.m_ovrSubmissionDevice.Get(),
+                                                                              runtime.m_ovrSubmissionContext.Get(),
+                                                                              presenter.device.Get(),
+                                                                              presenter.context.Get());
+            auto& transport = *runtime.m_deliveryTransport;
+            runtime.m_useApplicationDeviceForSubmission = false;
+            runtime.m_hubrisFrameGeneration = true;
+            runtime.m_precompositor.dlssnrSettings.enabled = false;
+            runtime.m_frameGenerationMode = multiplier;
+            runtime.m_idealFrameDuration = .01;
+            const auto oldHome = dllHome;
+            auto restore = MakeScopeGuard([&] { dllHome = oldHome; });
+            dllHome = std::filesystem::absolute(module).parent_path();
+
+            ovrTextureSwapChainDesc desc{};
+            desc.Type = ovrTexture_2D;
+            desc.Width = width;
+            desc.Height = height;
+            desc.ArraySize = desc.MipLevels = desc.SampleCount = 1;
+            desc.Format = OVR_FORMAT_R8G8B8A8_UNORM;
+            desc.BindFlags = ovrTextureBind_DX_RenderTarget;
+            ovrTextureSwapChain projectionChain{}, hudChains[2]{};
+            require(OVR_SUCCESS(transport.create(desc, &projectionChain)), "ordinary projection source chain");
+            for (auto& chain : hudChains)
+                require(OVR_SUCCESS(transport.create(desc, &chain)), "independent ordinary HUD chain");
+            const auto upload = [&](ovrTextureSwapChain chain, const std::vector<uint8_t>& pixels) {
+                int index{};
+                ComPtr<ID3D11Texture2D> image;
+                require(OVR_SUCCESS(transport.current(chain, &index)) &&
+                            OVR_SUCCESS(transport.buffer(chain, index, IID_PPV_ARGS(&image))),
+                        "producer ring image");
+                context->UpdateSubresource(image.Get(), 0, nullptr, pixels.data(), width * 4, 0);
+                return image;
+            };
+            const auto currentNative = [&](ovrTextureSwapChain chain) {
+                int index{}, length{};
+                require(OVR_SUCCESS(ovr_GetTextureSwapChainLength(runtime.m_ovrSession, chain, &length)) &&
+                            length == 3 &&
+                            OVR_SUCCESS(ovr_GetTextureSwapChainCurrentIndex(runtime.m_ovrSession, chain, &index)),
+                        "actual three-image OVRNull ring");
+                return index;
+            };
+            const auto readNative = [&](ovrTextureSwapChain chain, int index) {
+                ComPtr<ID3D11Texture2D> image;
+                require(OVR_SUCCESS(
+                            ovr_GetTextureSwapChainBufferDX(runtime.m_ovrSession, chain, index, IID_PPV_ARGS(&image))),
+                        "native End image");
+                return presenter.read(image.Get());
+            };
+
+            OpenXrRuntime::Swapchain appColour{}, appHud[2]{};
+            XrCompositionLayerProjectionView views[2]{};
+            XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+            projection.viewCount = 2;
+            projection.views = views;
+            for (unsigned eye = 0; eye < 2; ++eye) {
+                views[eye].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+                views[eye].subImage.swapchain = reinterpret_cast<XrSwapchain>(&appColour);
+                views[eye].subImage.imageRect = {{int(eye * eyeWidth), 0}, {eyeWidth, height}};
+                views[eye].pose.orientation.w = 1.f;
+                views[eye].fov = {-.8f, .8f, .8f, -.8f};
+            }
+            XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+            quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            quad.pose.orientation.w = 1.f;
+            const XrCompositionLayerBaseHeader* layers[]{
+                reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
+                reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
+            XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+            end.layerCount = 2;
+            end.layers = layers;
+            runtime.m_layersForFrame.resize(2);
+            auto& stereo = runtime.m_layersForFrame[0].EyeFov;
+            stereo.Header.Type = ovrLayerType_EyeFov;
+            for (unsigned eye = 0; eye < 2; ++eye) {
+                stereo.ColorTexture[eye] = projectionChain;
+                stereo.Viewport[eye] = {{int(eye * eyeWidth), 0}, {eyeWidth, height}};
+                stereo.RenderPose[eye].Orientation.w = 1;
+                stereo.Fov[eye] = {1, 1, 1, 1};
+            }
+            auto& hud = runtime.m_layersForFrame[1].Quad;
+            hud.Header.Type = ovrLayerType_Quad;
+            hud.Header.Flags = ovrLayerFlag_HeadLocked | ovrLayerFlag_HighQuality;
+            hud.QuadPoseCenter.Orientation.w = 1;
+            std::vector<uint8_t> hudPixels;
+            sdk.observeWait = [&](long long id) { clock.advance(id); };
+            auto stop = MakeScopeGuard([&] { RuntimeInputRegression::stop(runtime, sdk); });
+            RuntimeInputRegression::start(runtime);
+            sdk.release();
+            runtime.waitForAsyncSubmissionIdle();
+            constexpr int64_t period = 10000000;
+            const auto first = runtime.ovrTimeToXrTime(clock.origin + .003);
+            unsigned ends{}, nextNativeId{};
+            for (unsigned group = 0; group < 6; ++group) {
+                const unsigned chainId = group >= 4;
+                const bool changedPixels = group != 5;
+                const unsigned slots = group ? multiplier : 1;
+                const bool expiredGroup = testExpiredGroup && group == 3;
+                const unsigned expectedEnds = expiredGroup ? 1 : slots;
+                const auto chain = hudChains[chainId];
+                const auto startIndex = currentNative(chain);
+                auto colour = scene(12 * group);
+                for (size_t alpha = 3; alpha < colour.size(); alpha += 4)
+                    colour[alpha] = 255;
+                auto finalColour = upload(projectionChain, colour);
+                runtime.m_precompositor.finalColour[0] = runtime.m_precompositor.finalColour[1] = finalColour;
+                if (changedPixels) {
+                    hudPixels = scene(5 * group);
+                    for (size_t i = 0; i < hudPixels.size(); i += 4) {
+                        hudPixels[i] = static_cast<uint8_t>(group * 31 + 7);
+                        hudPixels[i + 3] = static_cast<uint8_t>(61 + group * 13);
+                    }
+                    upload(chain, hudPixels);
+                    require(OVR_SUCCESS(transport.commit(chain)), "publish ordinary HUD image");
+                }
+                quad.subImage.swapchain = reinterpret_cast<XrSwapchain>(&appHud[chainId]);
+                quad.subImage.imageRect = {{int(group), 4}, {width / 2, height / 2}};
+                quad.pose.position = {.01f * group, .02f, -1.f};
+                quad.size = {.5f + .02f * group, .25f};
+                hud.ColorTexture = chain;
+                hud.Viewport = {{int(group), 4}, {width / 2, height / 2}};
+                hud.QuadPoseCenter.Position = {quad.pose.position.x, quad.pose.position.y, quad.pose.position.z};
+                hud.QuadSize = {quad.size.width, quad.size.height};
+                runtime.m_frameBegun = group + 1;
+                runtime.m_fgBegunReservation = runtime.m_frameGenerationCadence.reserve(
+                    0, first + nextNativeId * period, period, slots, nextNativeId);
+                end.displayTime = runtime.m_fgBegunReservation.currentTarget;
+                if (!group) {
+                    const auto rejected = [&] {
+                        require(!runtime.prepareFrameGeneration(end) && !runtime.m_fgTransactionForFrame.ticket.token &&
+                                    !runtime.m_frameGeneration,
+                                "unsupported HUD composition bypasses before FG allocation");
+                    };
+                    runtime.m_hubrisFrameGeneration = false;
+                    rejected();
+                    runtime.m_hubrisFrameGeneration = true;
+                    quad.subImage.swapchain = views[0].subImage.swapchain;
+                    rejected();
+                    quad.subImage.swapchain = reinterpret_cast<XrSwapchain>(&appHud[0]);
+                    hud.ColorTexture = projectionChain;
+                    rejected();
+                    hud.ColorTexture = chain;
+                    layers[1] = layers[0];
+                    rejected();
+                    layers[1] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+                }
+                require(runtime.prepareFrameGeneration(end), "production capture accepts independent D3D12 HUD");
+                auto& tx = runtime.m_fgTransactionForFrame;
+                require(tx.ticket.token && !!tx.ticket.prime == !group && !tx.nrEnabled, "ordinary prime/pair ticket");
+                presenter.gpu.wait(static_cast<ID3D12Fence*>(tx.ticket.output_ready_fence),
+                                   tx.ticket.output_ready_value);
+                const auto bank = tx.ticket.bank;
+                const auto before = transport.statistics();
+                auto batch = transport.prepare({chain}, group + 1);
+                require(batch.images.size() == unsigned(changedPixels), "only pending HUD pixels enter delivery");
+                if (expiredGroup) {
+                    // Publish this closed 3x group after its original B deadline. Both synthetics are obsolete.
+                    capacityClockTime = runtime.xrTimeToOvrTime(tx.slots.targets[slots - 1]) + .000001;
+                }
+                unsigned observed{};
+                // interceptedEnd holds sdk.mutex throughout the callback. On a timeout,
+                // let an in-flight read finish and detach before any captured local unwinds.
+                auto detachObserver = MakeScopeGuard([&] {
+                    std::lock_guard lock(sdk.mutex);
+                    sdk.observeLayers = {};
+                });
+                {
+                    std::lock_guard lock(sdk.mutex);
+                    sdk.observeLayers = [&](const ovrLayerHeader* const* submitted, unsigned count) {
+                        require(count == 2 && submitted[0]->Type == ovrLayerType_EyeFov &&
+                                    submitted[1]->Type == ovrLayerType_Quad,
+                                "ordered projection and HUD at native End");
+                        const auto& projectionOut = *reinterpret_cast<const ovrLayerEyeFov*>(submitted[0]);
+                        const auto& quadOut = *reinterpret_cast<const ovrLayerQuad*>(submitted[1]);
+                        require(quadOut.ColorTexture == chain && quadOut.Header.Flags == hud.Header.Flags &&
+                                    !std::memcmp(&quadOut.Viewport, &hud.Viewport, sizeof(hud.Viewport)) &&
+                                    !std::memcmp(
+                                        &quadOut.QuadPoseCenter, &hud.QuadPoseCenter, sizeof(hud.QuadPoseCenter)) &&
+                                    !std::memcmp(&quadOut.QuadSize, &hud.QuadSize, sizeof(hud.QuadSize)),
+                                "each native End preserves the complete quad placement and flags");
+                        const int index = (currentNative(chain) + 2) % 3;
+                        require(index == (startIndex + (changedPixels ? 0 : 2)) % 3 &&
+                                    readNative(chain, index) == hudPixels,
+                                "exact committed HUD pixels on each End");
+                        const bool real = observed + 1 == expectedEnds;
+                        const unsigned role = real ? 2 : observed == 2 ? 3 : observed;
+                        const auto expected = runtime.m_fgPresentationBanks[real ? bank : 0][role].ovrSwapchain;
+                        require(projectionOut.ColorTexture[0] == expected && projectionOut.ColorTexture[1] == expected,
+                                "native End selects the intended synthetic or real stereo role");
+                        const auto output = readNative(expected, (currentNative(expected) + 2) % 3);
+                        require(real ? output == colour : output != colour && output != hudPixels,
+                                "real stereo matches source and synthetic pixels differ from both final layers");
+                        ++observed;
+                    };
+                }
+                {
+                    std::lock_guard lock(runtime.m_asyncSubmissionMutex);
+                    runtime.m_fgReservationForSubmission = runtime.m_fgBegunReservation;
+                    runtime.m_fgTransactionForSubmission = std::move(tx);
+                    tx = {};
+                    runtime.m_layersForAsyncSubmission = runtime.m_layersForFrame;
+                    runtime.m_deliveryForSubmission = std::move(batch);
+                    runtime.m_asyncNextFrameId = runtime.m_frameBegun;
+                    runtime.m_asyncSubmissionReady = false;
+                    runtime.m_asyncSubmissionCondVar.notify_all();
+                }
+                {
+                    std::unique_lock lock(runtime.m_asyncSubmissionMutex);
+                    require(runtime.m_asyncSubmissionCondVar.wait_for(
+                                lock,
+                                15s,
+                                [&] {
+                                    return runtime.m_asyncSubmissionError ||
+                                           (!runtime.m_fgActiveSubmission &&
+                                            runtime.m_layersForAsyncSubmission.empty());
+                                }),
+                            "bounded HUD group retirement");
+                    if (runtime.m_asyncSubmissionError)
+                        std::rethrow_exception(runtime.m_asyncSubmissionError);
+                }
+                {
+                    std::lock_guard lock(sdk.mutex);
+                    require(observed == expectedEnds && sdk.frames.size() == ends + expectedEnds,
+                            "only the expected native cycles reached End");
+                    for (unsigned i = 0; i < observed; ++i) {
+                        const auto id = nextNativeId + (slots - expectedEnds) + i;
+                        require(sdk.frames[ends + i].id == id && sdk.waitedIds.at(ends + i) == id &&
+                                    sdk.begunIds.at(ends + i) == id,
+                                "Wait, Begin and End retain each selected slot's original native ID");
+                    }
+                }
+                const auto after = transport.statistics();
+                require(after.nativeCopies - before.nativeCopies == unsigned(changedPixels) &&
+                            after.nativeCommits - before.nativeCommits == unsigned(changedPixels),
+                        "one native HUD transfer per changed image, none for reused pixels");
+                ends += expectedEnds;
+                nextNativeId += slots;
+            }
+            presenter.gpu.noErrors();
+            std::cout << "HUD_QUAD groups=6 ends=" << ends << " ordinary_copies=5 ordinary_commits=5\n";
         }
         static void run(const wchar_t* backend,
                         const wchar_t* module,
@@ -1948,6 +2227,10 @@ int wmain(int argc, wchar_t** argv) {
             scenario == L"synchronous" || scenario == L"depth" || scenario == L"overlay" ||
             scenario == L"second-projection") {
             virtualdesktop_openxr::RuntimeFrameGenerationRegression::bypass(scenario);
+        } else if (scenario == L"hud-quad" || scenario == L"hud-quad-expired") {
+            const bool expired = scenario == L"hud-quad-expired";
+            require(!expired || multiplier == 3, "before-SR closed-cycle expiry uses 3X");
+            virtualdesktop_openxr::RuntimeFrameGenerationRegression::hudQuad(argv[1], argv[2], multiplier, expired);
         } else if (scenario.rfind(L"allocation-", 0) == 0) {
             virtualdesktop_openxr::RuntimeFrameGenerationRegression::allocation(argv[1], argv[2], multiplier, scenario);
         } else if (scenario == L"cleanup-producer") {

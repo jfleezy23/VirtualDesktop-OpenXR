@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 #include "pch.h"
+#include "NrBeforeSrModel.h"
 #include "PairCaptureNrEngine.h"
 #include "PairCaptureNrPostFx.h"
 #include "PairCaptureNrWarmLayouts.h"
@@ -85,6 +86,11 @@ namespace ngx {
     InitExt Init_Ext{nullptr};
     decltype(&::NVSDK_NGX_D3D12_Shutdown1) Shutdown1{nullptr};
     ComPtr<ID3D12Device> initializedDevice;
+    // The direct module has process-wide dispatch. Late sessions may release and rebind it;
+    // an opted-in early owner retains it across outstanding or replayable application lists.
+    std::mutex modelOwnerMutex;
+    bool lateSessionOwnsModel{};
+    IUnknown* beforeSrDeviceIdentity{}; // Owns a process-lifetime reference after successful early Init.
     auto NVSDK_NGX_D3D12_CreateFeature = &::NVSDK_NGX_D3D12_CreateFeature;
     auto NVSDK_NGX_D3D12_ReleaseFeature = &::NVSDK_NGX_D3D12_ReleaseFeature;
     auto NVSDK_NGX_D3D12_EvaluateFeature = &::NVSDK_NGX_D3D12_EvaluateFeature;
@@ -244,6 +250,60 @@ namespace virtualdesktop_openxr {
 
     using namespace virtualdesktop_openxr::log;
     using namespace virtualdesktop_openxr::utils;
+
+    bool nr_before_sr::OpenBeforeSrModel(ID3D12Device* device, BeforeSrModelApi& api) noexcept {
+        api = {};
+        try {
+            ComPtr<IUnknown> identity;
+            if (!device || FAILED(device->QueryInterface(IID_PPV_ARGS(identity.GetAddressOf()))))
+                return false;
+            BeforeSrModelApi candidate{};
+            const auto game = GetModuleHandleW(nullptr);
+            if (!game)
+                return false;
+            candidate.getParameters = reinterpret_cast<decltype(candidate.getParameters)>(
+                GetProcAddress(game, "NVSDK_NGX_D3D12_GetCapabilityParameters"));
+            candidate.destroyParameters = reinterpret_cast<decltype(candidate.destroyParameters)>(
+                GetProcAddress(game, "NVSDK_NGX_D3D12_DestroyParameters"));
+            if (!candidate.getParameters || !candidate.destroyParameters)
+                return false;
+
+            std::lock_guard guard(ngx::modelOwnerMutex);
+            if (ngx::lateSessionOwnsModel || ngx::initializedDevice ||
+                (ngx::beforeSrDeviceIdentity && ngx::beforeSrDeviceIdentity != identity.Get()))
+                return false;
+            if (!ngx::beforeSrDeviceIdentity) {
+                if (!dllHome.is_absolute())
+                    return false;
+                if (!ngx::dlssnrModule)
+                    ngx::loadModule(dllHome / L"nvngx_dlssnr.dll");
+                if (!ngx::Init_Ext || !ngx::Shutdown1)
+                    return false;
+                // The model imports a function in this runtime. Both modules and its
+                // device must outlive any game list that can still replay their commands.
+                wil::unique_hmodule runtime;
+                if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                                        reinterpret_cast<LPCWSTR>(&OpenBeforeSrModel),
+                                        runtime.put()))
+                    return false;
+                if (NVSDK_NGX_FAILED(
+                        ngx::Init_Ext(123456, programData.c_str(), device, NVSDK_NGX_Version_API, nullptr)))
+                    return false;
+                // Release ownership from RAII without releasing the counted references:
+                // even at process detach, never run driver cleanup under the loader lock.
+                ngx::beforeSrDeviceIdentity = identity.Detach();
+                (void)ngx::dlssnrModule.release();
+                (void)runtime.release();
+            }
+            candidate.create = ngx::NVSDK_NGX_D3D12_CreateFeature;
+            candidate.evaluate = ngx::NVSDK_NGX_D3D12_EvaluateFeature;
+            candidate.release = ngx::NVSDK_NGX_D3D12_ReleaseFeature;
+            api = candidate;
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
 
     void OpenXrRuntime::createDlssnrFeature(uint32_t eye,
                                             const ovrSizei& resolution,
@@ -1163,6 +1223,11 @@ namespace virtualdesktop_openxr {
         if (m_dlssnrResourcesInitialized) {
             return;
         }
+        {
+            std::lock_guard guard(ngx::modelOwnerMutex);
+            CHECK_MSG(!ngx::beforeSrDeviceIdentity, "Direct NR is bound to the application's before-SR device");
+            ngx::lateSessionOwnsModel = true;
+        }
         ComPtr<ID3D12Device> device;
         std::unique_ptr<D3D12Utils::CommandContext> context;
         ComPtr<ID3D12Fence> inFence;
@@ -1325,9 +1390,14 @@ namespace virtualdesktop_openxr {
             CHECK_NGXCMD(ngx::Shutdown1(ngx::initializedDevice.Get()));
             ngx::initializedDevice.Reset();
         }
+        std::lock_guard guard(ngx::modelOwnerMutex);
+        ngx::lateSessionOwnsModel = false;
     }
 
     void OpenXrRuntime::unloadDlssnrModule() {
+        std::lock_guard guard(ngx::modelOwnerMutex);
+        if (ngx::beforeSrDeviceIdentity)
+            return;
         // Device cleanup must finish before FreeLibrary, which invokes DLL destructors under the loader lock.
         CHECK_MSG(!ngx::initializedDevice, "DLSS-NR device must be shut down before module unload");
         ngx::restoreModuleNameImports();

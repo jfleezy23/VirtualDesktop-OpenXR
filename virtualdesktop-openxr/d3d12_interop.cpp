@@ -22,6 +22,7 @@
 
 #include "pch.h"
 
+#include "NrBeforeSr.h"
 #include "log.h"
 #include "runtime.h"
 #include "utils.h"
@@ -137,10 +138,30 @@ namespace virtualdesktop_openxr {
             m_gpuTimerApp[i] = std::make_unique<D3D12GpuTimer>(m_d3d12Device.Get(), m_d3d12CommandQueue.Get());
         }
 
+        const auto beforeSr = nr_before_sr::StartBeforeSr(
+            m_d3d12Device.Get(), m_d3d12CommandQueue.Get(), m_d3d12CommandList.Get(), m_d3d12CommandAllocator.Get());
+        m_observingBeforeSr = beforeSr.observing;
+        m_hubrisFrameGeneration.store(beforeSr.hubrisFrameGeneration, std::memory_order_release);
+        m_usingBeforeSrNr.store(beforeSr.usesEarlyPlacement, std::memory_order_release);
+        if (beforeSr.usesEarlyPlacement) {
+            std::unique_lock lock(m_dlssnrSettingsMutex);
+            const auto& settings = m_dlssnrSettings;
+            nr_before_sr::UpdateBeforeSrAppearance(settings.style,
+                                                   settings.intensity,
+                                                   settings.localToneStrength,
+                                                   settings.localStructureStrength,
+                                                   settings.skinStructureStrength,
+                                                   settings.enabled,
+                                                   m_dlssnrProfileValid);
+        }
         return XR_SUCCESS;
     }
 
     void OpenXrRuntime::cleanupD3D12() {
+        if (m_observingBeforeSr) {
+            nr_before_sr::StopBeforeSr();
+            m_observingBeforeSr = false;
+        }
         flushD3D12CommandQueue();
 
         for (uint32_t i = 0; i < k_numGpuTimers; i++) {
