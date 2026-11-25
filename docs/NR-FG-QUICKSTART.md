@@ -1,11 +1,9 @@
 # Try VDXR NR and OFXR frame generation
 
-The [November 21 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.21.1)
-avoids unused early optical-flow work across frame gaps in eligible D3D11 sessions with NR and NVIDIA FG.
-Stereo replay during late NR and retry ordering after a failed NR submission carry forward.
-**Controls 2026.11.20.1** adds a cover grid for saved games and per-game NVIDIA flow presets.
-NR processing resolution and coverage are independent, including **95% coverage / 80% processing** and
-**90% coverage / 85% processing**. FG offers Off, 2×, 3× and 4× and also works with NR off.
+The [November 24 Windows x64 release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.24.1)
+adds NR before native DLSS upscaling in the supported Hubris build. Other games keep their compositor NR path.
+**Controls 2026.11.20.1** includes game profiles, optical-flow presets and a live runtime display. OFXR supports
+2×, 3× and 4× with NR on or off.
 
 ## Before installing
 
@@ -23,19 +21,19 @@ it does not provide Steam Frame or ALVR streaming. Frame Launcher's separate Ste
 
 ## Install once
 
-1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.11.21.1.zip` and
-   `VDXR-NR-FG-Controls-Windows-x64-2026.11.21.1.zip` from the
-   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.21.1).
-   Check them against `SHA256SUMS-2026.11.21.1.txt`.
+1. Close VR games. Download `VDXR-NR-FG-Windows-x64-2026.11.24.1.zip` and
+   `VDXR-NR-FG-Controls-Windows-x64-2026.11.24.1.zip` from the
+   [release](https://github.com/jfleezy23/VirtualDesktop-OpenXR/releases/tag/nr-fg-2026.11.24.1).
+   Check them against `SHA256SUMS-2026.11.24.1.txt`.
 2. Use the ZIPs from step 1 with the [side-by-side setup](SIDE-BY-SIDE-RUNTIME.md), which describes
    the folder layout and registration procedure. Put the matching host DLL, FG DLL and
    `CUSTOM-RUNTIME.json` under `%ProgramFiles%\VDXR-NR-FG\OpenXR`, then register the managed path.
-   Keep this release's host, FG module and metadata together.
+   For NR, place your compatible licensed `nvngx_dlssnr.dll` beside the host DLL. The side-by-side guide includes the administrator registration command.
    Leave Streamer's official files in place. Restore them first if an older installation replaced them.
 3. Extract the **entire** Controls ZIP. Run **VDXR-NR-FG-Controls.exe**, keeping `_internal` beside it.
    Accept the administrator prompt to save settings. This community app is unsigned; opening it preserves
    existing preferences. It does not install runtime DLLs.
-4. Select **Custom VDXR** in Controls and **VDXR** in Streamer. The switch takes effect on the next game launch.
+4. Restart Streamer after replacing runtime files and reconnect the headset. Select **Custom VDXR** in Controls and **VDXR** in Streamer. The switch takes effect on the next game launch.
 
 For upgrades, use the side-by-side guide's backup and replacement steps with all VR games closed. The new Controls
 app can live in its own extracted folder. Restart Streamer after replacing the runtime and reconnect the headset
@@ -56,7 +54,7 @@ Fresh settings remain NR off, FG off, 100% processing and 100% coverage.
 4. Check that both eyes align, controllers work, and faces, hair, dark scenes and head motion look acceptable.
    Compare 3× and 4× separately if desired. To add NR, supply its licensed component, enable NR, set coverage
    to **100%** and processing to **80%**, then compare processing **100%** against **80%** in the same scene.
-   Hold game resolution and other settings fixed; NR + FG requires coverage of at least **90%**.
+   These percentages apply to compositor NR. Keep game resolution fixed while comparing them.
 
 ![VDXR NR/FG Controls illustration](images/controls-overview.png)
 
@@ -68,6 +66,14 @@ mode are captured at session start and require a game restart. The reconstructio
 not proof that depth processing is active; see the [mode guide](DEPTH-MODES.md). Fresh settings start with NR off,
 processing **100%**, coverage **100%**, FG off
 and NVIDIA selected. The saved depth choice is preserved, and an unset depth request falls back to Depth Assist.
+
+## Use NR with native DLSS in Hubris
+
+On the supported D3D12 build, turn on DLSS Super Resolution in Hubris and relaunch the game. In Controls,
+use **Enable NR** under Globals or the Hubris profile. Save the profile if you edited game settings.
+The game chooses its DLSS input size, and NR processes both eyes at that size before upscaling. Your
+appearance controls still apply. If you turn off DLSS in the game, relaunch to use compositor NR with
+your saved coverage and processing resolution.
 
 ## Check early optical flow
 

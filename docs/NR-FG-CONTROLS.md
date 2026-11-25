@@ -1,6 +1,6 @@
 # VDXR NR/FG Controls
 
-A standalone Windows x64 settings app for this repository's experimental VDXR runtime.
+A standalone Windows x64 settings app for this repository's custom VDXR runtime.
 Adjust neural rendering (NR) during play, or select PC-side OFXR frame generation (FG)
 for the next game session. Frame generation also works with NR off. The Runtime
 selector chooses stock or custom VDXR for the next VR launch.
@@ -9,8 +9,8 @@ selector chooses stock or custom VDXR for the next VR launch.
 
 *Example settings. The profile screenshots use fictional titles and original placeholder artwork.*
 
-**Controls 2026.11.20.1** ships with runtime **2026.11.21.1**. Use the matching packages listed in the
-[Quickstart](NR-FG-QUICKSTART.md). See the [release notes](releases/2026.11.21.1.md) for upgrade details.
+**Controls 2026.11.20.1** ships with runtime **2026.11.24.1**. Use the matching packages listed in the
+[Quickstart](NR-FG-QUICKSTART.md). See the [release notes](releases/2026.11.24.1.md) for upgrade details.
 
 ## Get started
 

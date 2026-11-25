@@ -21,7 +21,7 @@ defaults:
 jobs:
   source-checks:
     runs-on: windows-2025-vs2026
-    timeout-minutes: 15
+    timeout-minutes: 25
     outputs:
       base: ${{ steps.base.outputs.sha }}
       platforms: ${{ steps.base.outputs.platforms }}
@@ -35,6 +35,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Install pinned MSVC for native build-helper tests
+        run: '& ./.github/scripts/Install-Msvc145.ps1'
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.13'
@@ -115,6 +117,11 @@ jobs:
         with:
           vs-version: ${{ needs.source-checks.outputs.vs_range }}
           msbuild-architecture: x64
+      - name: Install pinned MSVC for core and CPU regressions
+        if: needs.source-checks.outputs.experimental == 'true'
+        run: |
+          $installation = & ./.github/scripts/Install-Msvc145.ps1
+          "VDXR_VS_INSTALLATION=$installation" >> $env:GITHUB_ENV
       - name: Restore NuGet
         run: |
           nuget restore VirtualDesktop-OpenXR.sln -NonInteractive
@@ -170,6 +177,8 @@ jobs:
           $source = (Resolve-Path 'virtualdesktop-openxr').Path
           $objects = (Resolve-Path 'bin/community/build/x64/ReleaseBundle/obj').Path
           if ($env:VDXR_TOOLSET -eq 'v145') {
+            Import-Module "$env:VDXR_VS_INSTALLATION/Common7/Tools/Microsoft.VisualStudio.DevShell.dll"
+            Enter-VsDevShell -VsInstallPath $env:VDXR_VS_INSTALLATION -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64 -vcvars_ver=$env:VDXR_VCTOOLS_VERSION -winsdk=10.0.26100.0"
             & tests/build-nr-spatial-regression.ps1 -PolicyOnly -OutputDirectory 'bin/community/nr-spatial-policy'
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $compilerDirectory = [IO.DirectoryInfo](Split-Path (Get-Command cl.exe -ErrorAction Stop).Source)
@@ -317,6 +326,9 @@ jobs:
         run: |
           $dxc = & candidate/scripts/Setup-Dxc.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'vdxr-dxc-1.9.2609')
           "VDXR_DXC_PATH=$dxc" >> $env:GITHUB_ENV
+      - name: Install pinned MSVC for both cohorts
+        if: needs.source-checks.outputs.experimental == 'true'
+        run: '& ./candidate/.github/scripts/Install-Msvc145.ps1'
       - name: Restore and analyze baseline and candidate with identical tools
         run: |
           foreach ($cohort in @('baseline', 'candidate')) {
