@@ -300,8 +300,11 @@ replay. These are fixture-sensitivity controls, not production GPU coverage.
 Run the recovery cases at 72, 80, 90, 96, 100, 120, and 144 Hz. Keep existing
 `nr_fg_worker_regression` controls alongside them: 3X `normal` and
 `query-wait-slot-late`, 4X `normal` (including the already-begun bootstrap), and
-4X `begin-pending-s1`, `begin-ready-s2`, and `begin-at-b-s1`. Recovery may skip
-only closed 4X cycles; the existing post-Begin fallback policy remains intact.
+4X `begin-pending-s1`, `begin-ready-s2`, and `begin-at-b-s1`.
+The presenter suite also runs `hud-quad` at 2X, 3X and 4X. Its
+`hud-quad-expired` case publishes one eligible, closed Hubris 3X group
+after the real frame's deadline. The fixture checks the original native IDs,
+real stereo and HUD pixels, and subsequent groups' synthetic output.
 All gates release and both GPU domains drain before resource owners unwind.
 These tests establish scheduler, pixel, and ownership behavior with a controlled
 SDK; they do not establish physical scanout or general pacing improvements.

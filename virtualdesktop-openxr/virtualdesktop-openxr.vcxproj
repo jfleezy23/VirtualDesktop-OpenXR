@@ -641,6 +641,11 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
     <ClCompile Include="display_refresh_rate.cpp" />
     <ClCompile Include="dlssnr.cpp" />
     <ClCompile Include="dlssnr_spatial.cpp" />
+    <ClCompile Include="NrBeforeSr.cpp" />
+    <ClCompile Include="NrBeforeSrColor.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="NrBeforeSrHooks.cpp" />
     <ClCompile Include="NrSpatialPipeline.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -688,8 +693,20 @@ echo const char* RuntimeCommitHash = "%commit%"; &gt; $(IntDir)\commit.h
     <None Include="Common.hlsli" />
     <None Include="NrSpatialCommon.hlsli" />
     <None Include="PerceptualTransfer.hlsli" />
+    <None Include="NrBeforeSrColorCS.hlsl" />
     <ClInclude Include="NrSpatialPipeline.h" />
     <ClInclude Include="NrSpatialPolicy.h" />
+    <ClInclude Include="NrBeforeSr.h" />
+    <ClInclude Include="NrBeforeSrColor.h" />
+    <ClInclude Include="NrBeforeSrHistoryBank.h" />
+    <ClInclude Include="NrBeforeSrHooks.h" />
+    <ClInclude Include="NrBeforeSrLayers.h" />
+    <ClInclude Include="NrBeforeSrModel.h" />
+    <ClInclude Include="NrBeforeSrNgx.h" />
+    <ClInclude Include="NrBeforeSrPipeline.h" />
+    <ClInclude Include="NrBeforeSrPolicy.h" />
+    <ClInclude Include="NrBeforeSrRecording.h" />
+    <ClInclude Include="NrBeforeSrStereo.h" />
     <None Include="framework\dispatch_generator.py" />
     <None Include="packages.config" />
     <None Include="virtualdesktop-openxr-32.json" />

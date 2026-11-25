@@ -32,8 +32,12 @@ foreach($name in @('dxc.exe','dxcompiler.dll','dxil.dll')){
     $tools[$name]=@{name=$name;path=$path;sha256=$hash;version=(Get-Item -LiteralPath $path).VersionInfo.FileVersion}
 }
 $recipes=[ordered]@{
-    NrSpatialDownsampleCS='cs_6_0';NrSpatialResolvePS='ps_6_0'
-    NrNativeResolvePS='ps_6_0';FullScreenQuadVS='vs_6_0'
+    NrSpatialDownsampleCS=@('NrSpatialDownsampleCS','cs_6_0','main')
+    NrSpatialResolvePS=@('NrSpatialResolvePS','ps_6_0','main')
+    NrNativeResolvePS=@('NrNativeResolvePS','ps_6_0','main')
+    FullScreenQuadVS=@('FullScreenQuadVS','vs_6_0','main')
+    NrBeforeSrColorEncode=@('NrBeforeSrColorCS','cs_6_0','Encode')
+    NrBeforeSrColorResolve=@('NrBeforeSrColorCS','cs_6_0','Resolve')
 }
 $inputHashes=@{}
 function Read-ShaderInput([string]$Path){
@@ -45,7 +49,8 @@ function Read-ShaderInput([string]$Path){
         Read-ShaderInput (Join-Path (Split-Path -Parent $path) $include.Groups[1].Value)
     }
 }
-foreach($name in $recipes.Keys){Read-ShaderInput (Join-Path $source ($name+'.hlsl'))}
+$shaderSources=@($recipes.Values|ForEach-Object {$_[0]+'.hlsl'})
+foreach($name in $shaderSources){Read-ShaderInput (Join-Path $source $name)}
 $stage=Join-Path $output ('.dxc-'+[guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $stage)
 $temporary=[Collections.Generic.List[string]]::new()
@@ -55,9 +60,11 @@ try{
         $header=$name+'_DXIL.h';$symbol='g_'+$name+'_DXIL'
         $headerPath=Join-Path $stage $header;$objectPath=Join-Path $stage ($name+'.dxil')
         $temporary.Add($headerPath);$temporary.Add($objectPath)
-        $arguments=@('-T',$recipes[$name],'-E','main','-HV','2016','-O3','-Ges','-WX',
+        $shaderSource,$profile,$entry=$recipes[$name]
+        $arguments=@('-T',$profile,'-E',$entry,'-HV','2016','-O3','-Ges','-WX',
             '-Qstrip_debug','-Qstrip_reflect','-Fo',$objectPath,'-Fh',$headerPath,'-Vn',$symbol,
-            (Join-Path $source ($name+'.hlsl')))
+            (Join-Path $source ($shaderSource+'.hlsl')))
+        if($shaderSource -ceq 'NrBeforeSrColorCS'){$arguments=@('-Gis')+$arguments}
         $previousErrorAction=$ErrorActionPreference
         try{
             $ErrorActionPreference='Continue'
@@ -69,7 +76,7 @@ try{
            -not (Test-Path -LiteralPath $objectPath -PathType Leaf) -or (Get-Item -LiteralPath $headerPath).Length -eq 0){
             throw ('DXC did not produce both outputs for '+$name)
         }
-        $shaders.Add(@{source=$name+'.hlsl';profile=$recipes[$name];entry='main';header=$header;symbol=$symbol;
+        $shaders.Add(@{source=$shaderSource+'.hlsl';profile=$profile;entry=$entry;header=$header;symbol=$symbol;
             arguments=$arguments;exit_code=$exitCode;diagnostics=$diagnostics;
             header_sha256=(Get-FileHash -LiteralPath $headerPath).Hash.ToLowerInvariant();
             dxil_sha256=(Get-FileHash -LiteralPath $objectPath).Hash.ToLowerInvariant()})
@@ -85,7 +92,7 @@ try{
     foreach($path in @($inputHashes.Keys|Sort-Object)){
         $relative=[uri]::UnescapeDataString($sourceUri.MakeRelativeUri([uri]$path).ToString()).Replace('/','\')
         $record=@{file=$relative;sha256=$inputHashes[$path]}
-        if([IO.Path]::GetFileNameWithoutExtension($path) -in $recipes.Keys -and [IO.Path]::GetExtension($path) -ceq '.hlsl'){
+        if([IO.Path]::GetFileName($path) -in $shaderSources){
             $inputs+=$record
         }else{$includes+=$record}
     }
@@ -105,7 +112,7 @@ try{
         Move-Item -LiteralPath (Join-Path $stage $shader.header) -Destination $destination -Force
     }
     Move-Item -LiteralPath $pendingManifest -Destination $manifest -Force
-    Write-Output ('Built four DXIL shader headers with pinned DXC '+$version.FileVersion)
+    Write-Output ("Built $($shaders.Count) DXIL shader headers with pinned DXC "+$version.FileVersion)
 }finally{
     foreach($path in $temporary){if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path -Force}}
     if(Test-Path -LiteralPath $stage){Remove-Item -LiteralPath $stage}

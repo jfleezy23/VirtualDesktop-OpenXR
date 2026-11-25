@@ -159,6 +159,14 @@ a saved change or reports an error.
 The NR sliders are disabled while NR is off; FG remains selectable. Closing the app
 flushes pending processing/coverage changes and leaves the saved settings in place.
 
+**Hubris with native DLSS Super Resolution.** Use the same **Enable NR** switch in Globals or
+the game's profile. On the supported D3D12 game build, VDXR applies NR to each eye before DLSS
+upscales it. DLSS sets the input dimensions for this route. NR covers that input, and the
+style, strength, tone, structure and skin controls still apply. The runtime leaves the game's
+DLSS mode alone. If you disable native DLSS in Hubris, relaunch the game to use compositor NR.
+The processing-resolution and coverage sliders apply to the ordinary compositor
+route used by games such as Robo Recall. Either route works with FG off or with a saved FG mode.
+
 **Combined coverage and processing requires the updated custom runtime.** Older custom runtimes
 may not support a partial crop with reduced processing. Install the matching runtime before using
 mixed settings. The sliders save independently after a short pause; changing either one preserves

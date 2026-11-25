@@ -200,8 +200,9 @@ def main():
                              output / ("state-" + scenario), scenario)
         if args.suite in {"presenter", "all"}:
             for multiplier in (2, 3, 4):
-                for scenario in ("normal", "late", "capacity", "capacity-late"):
+                for scenario in ("normal", "late", "capacity", "capacity-late", "hud-quad"):
                     runtime_case(f"worker-{multiplier}-{scenario}", "nr_fg_worker_regression", backend, module, multiplier, scenario)
+            runtime_case("worker-3-hud-quad-expired", "nr_fg_worker_regression", backend, module, 3, "hud-quad-expired")
             for scenario in ("control", "late-fg", "future-input", "late-nr", "expired-ready",
                              "ready-event-failure", "ready-wait-failure", "ready-cancel"):
                 runtime_case("delay-" + scenario, "nr_fg_delay_regression", backend, module, scenario)

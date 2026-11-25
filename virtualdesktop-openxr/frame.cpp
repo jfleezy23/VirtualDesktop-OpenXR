@@ -21,6 +21,8 @@
 // SOFTWARE.
 
 #include "pch.h"
+#include "NrBeforeSr.h"
+#include "NrBeforeSrLayers.h"
 #include "PairCaptureNrReturnGuard.h"
 
 #include <array>
@@ -182,7 +184,10 @@ namespace virtualdesktop_openxr {
 
             // Capacity can release the frame lock while the worker advances
             // its native frontier. Reconcile only after reacquiring that lock.
-            if (m_useAsyncSubmission && !m_useDeferredFrameWait.load(std::memory_order_relaxed)) {
+            const bool useEarlierWait =
+                !m_useDeferredFrameWait.load(std::memory_order_relaxed) ||
+                (m_frameGenerationMode == 3 && m_hubrisFrameGeneration.load(std::memory_order_acquire));
+            if (m_useAsyncSubmission && useEarlierWait) {
                 const bool doRunningStart = m_useRunningStart.load(std::memory_order_relaxed);
                 const double predictedFrameDuration = m_predictedFrameDuration;
                 lock.unlock();
@@ -442,6 +447,12 @@ namespace virtualdesktop_openxr {
             }
         }
 
+        if (m_observingBeforeSr) {
+            // Only a definitive failure before any app-device model was opened releases late NR.
+            if (m_usingBeforeSrNr.load(std::memory_order_acquire) && nr_before_sr::BeforeSrModelUnavailable())
+                m_usingBeforeSrNr.store(false, std::memory_order_release);
+            nr_before_sr::BeginBeforeSrFrame();
+        }
         return !frameDiscarded ? XR_SUCCESS : XR_FRAME_DISCARDED;
     }
 
@@ -578,6 +589,8 @@ namespace virtualdesktop_openxr {
                 } else {
                     std::unique_lock lock(m_dlssnrSettingsMutex);
                     m_precompositor.dlssnrSettings = m_dlssnrSettings;
+                    if (m_usingBeforeSrNr.load(std::memory_order_acquire))
+                        m_precompositor.dlssnrSettings.enabled = false;
                 }
                 nrSourceReturnGuard.emplace();
                 observePrivateNrRawFrame(*frameEndInfo);
@@ -666,6 +679,8 @@ namespace virtualdesktop_openxr {
             if (earlyDispatchEligible && m_deliveryTransport) {
                 std::unique_lock settingsLock(m_dlssnrSettingsMutex);
                 frameNrSettings = m_dlssnrSettings;
+                if (m_usingBeforeSrNr.load(std::memory_order_acquire))
+                    frameNrSettings->enabled = false;
             }
             const auto stagingSerial = m_frameBegun;
             bool hasNrProjection{};
@@ -932,13 +947,19 @@ namespace virtualdesktop_openxr {
                     }
                 }
             }
-            if (m_deliveryTransport && !captured)
+            const bool capturedHud = captured && layersAllocator.size() == 2;
+            if (capturedHud) {
+                // handleQuadCylinderLayer resolved and finalized this ordinary chain. Only its
+                // pending image travels to the worker; the FG ticket supplies the projection.
+                m_deliveryForFrame = m_deliveryTransport->prepare({layersAllocator[1].Quad.ColorTexture}, m_frameBegun);
+            } else if (m_deliveryTransport && !captured) {
                 m_deliveryForFrame = prepareDeliveryLayers(layersAllocator, m_frameBegun);
+            }
             if (m_frameGenerationMode || m_deliveryTransport) {
                 // Fallback also reads newly private ordinary source images.
                 // Protect application reuse whether FG accepted this input or
                 // submitted the complete original layers instead.
-                protectFrameGenerationSources(!captured);
+                protectFrameGenerationSources(!captured || capturedHud);
                 earlySourcesPending = false;
             }
 
@@ -1056,6 +1077,7 @@ namespace virtualdesktop_openxr {
                 }
                 if (m_frameGenerationMode) {
                     CHECK_MSG(!m_terminateAsyncThread, "Frame-generation submission is stopping");
+                    CHECK_MSG(!m_fgTransactionForSubmission.ticket.token, "Unretired frame-generation publication");
                     CHECK_MSG(!m_fgDepthCompletionUnknown ||
                                   (m_deliveryTransport && m_fgTransactionForFrame.ticket.token &&
                                    m_fgDepthDelivery[m_fgTransactionForFrame.ticket.bank].sourceReady),
@@ -1065,7 +1087,6 @@ namespace virtualdesktop_openxr {
                 m_deliveryForSubmission = std::move(m_deliveryForFrame);
                 m_deliveryForFrame = {};
                 if (m_frameGenerationMode) {
-                    CHECK_MSG(!m_fgTransactionForSubmission.ticket.token, "Unretired frame-generation publication");
                     m_fgTransactionForSubmission = std::move(m_fgTransactionForFrame);
                     m_fgTransactionForFrame = {};
                     m_fgReservationForSubmission = m_fgBegunReservation;
@@ -1083,6 +1104,10 @@ namespace virtualdesktop_openxr {
             }
 
             m_frameCompleted = m_frameBegun;
+            const auto beforeSrAppearance =
+                m_observingBeforeSr
+                    ? nr_before_sr::EndBeforeSrFrame(nr_before_sr::HasStereoProjectionWithOptionalQuads(*frameEndInfo))
+                    : std::nullopt;
             updateSessionState();
 
             m_currentTimerIndex = (m_currentTimerIndex + 1) % k_numGpuTimers;
@@ -1092,15 +1117,21 @@ namespace virtualdesktop_openxr {
                 const auto& settings = m_precompositor.dlssnrSettings;
                 const auto percent = [](float value) { return static_cast<uint64_t>(value * 100.f + .5f); };
                 ++m_liveProducer.baseFrames;
+                if (beforeSrAppearance)
+                    ++m_liveProducer.nrPairs;
                 m_liveProducer.serial = m_frameCompleted;
-                m_liveProducer.nrEnabled = settings.enabled;
-                m_liveProducer.coverage = percent(settings.foveationSize);
-                m_liveProducer.processing = settings.processingResolution;
-                m_liveProducer.style = settings.style;
-                m_liveProducer.intensity = percent(settings.intensity);
-                m_liveProducer.tone = percent(settings.localToneStrength);
-                m_liveProducer.structure = percent(settings.localStructureStrength);
-                m_liveProducer.skin = percent(settings.skinStructureStrength);
+                m_liveProducer.nrEnabled = beforeSrAppearance || settings.enabled;
+                m_liveProducer.coverage = beforeSrAppearance ? 100 : percent(settings.foveationSize);
+                m_liveProducer.processing = beforeSrAppearance ? 100 : settings.processingResolution;
+                m_liveProducer.style = beforeSrAppearance ? beforeSrAppearance->style : settings.style;
+                m_liveProducer.intensity =
+                    percent(beforeSrAppearance ? beforeSrAppearance->intensity : settings.intensity);
+                m_liveProducer.tone =
+                    percent(beforeSrAppearance ? beforeSrAppearance->localToneStrength : settings.localToneStrength);
+                m_liveProducer.structure = percent(beforeSrAppearance ? beforeSrAppearance->localStructureStrength
+                                                                      : settings.localStructureStrength);
+                m_liveProducer.skin = percent(beforeSrAppearance ? beforeSrAppearance->skinStructureStrength
+                                                                 : settings.skinStructureStrength);
                 m_liveStatus.publishProducer(m_liveProducer.payload());
             }
 

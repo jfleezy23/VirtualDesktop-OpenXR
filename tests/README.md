@@ -1,6 +1,10 @@
 # NR GPU regressions
 
-These tests require Windows, the MSVC x64 tools, and a D3D12-capable GPU.
+The GPU regressions require Windows, the MSVC x64 tools, and a D3D12-capable GPU.
+
+From an x64 Native Tools prompt, run `powershell -ExecutionPolicy Bypass -File tests/run-nr-before-sr-regressions.ps1`
+to build and run the eight before-SR and HUD CPU fixtures. They use the Windows SDK and the checkout's
+OpenXR, LibOVR and NGX headers. The presenter suite exercises the GPU path described in [frame-generation.md](frame-generation.md).
 
 `build-runtime-redirect-regression.cmd` builds a CPU-only actual-DLL negotiation test and isolated success/failure targets. Run `bin/tests/redirect/runtime_redirect_regression.exe <bundle-runtime.dll> bin/tests/redirect/vdxr_redirect_failure_test.dll failure`, then the same command with `vdxr_redirect_success_test.dll success`. A read-only registry detour supplies the test redirect: no registry value, VR instance, session, or graphics device is created. Failed negotiation must unload the target and preserve its error; successful negotiation must retain callable target dispatch.
 
