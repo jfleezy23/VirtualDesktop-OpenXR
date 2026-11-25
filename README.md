@@ -99,11 +99,11 @@ close the game, select **Stock VDXR**, then launch again.
 
 | Branch | Purpose |
 | --- | --- |
-| [stable](https://github.com/jfleezy23/VirtualDesktop-OpenXR/tree/stable) — default | General runtime fixes. No NR/NGX integration. |
-| [experimental-nr](https://github.com/jfleezy23/VirtualDesktop-OpenXR/tree/experimental-nr) | NR/FG development happens on this branch. Each dated release provides a separate corresponding-source ZIP for the shipped binaries. Its as-built sources can differ from the branch tip. |
+| [experimental-nr](https://github.com/jfleezy23/VirtualDesktop-OpenXR/tree/experimental-nr) (default) | Current NR/FG release and development branch. |
+| [stable](https://github.com/jfleezy23/VirtualDesktop-OpenXR/tree/stable) | Deprecated source for the Standard runtime. |
 
-This README is shared between the branches; the dated links above open the NR release's own guides and images.
-`stable` describes the general runtime branch, not universal game compatibility. There is no separate public `main` branch.
+To rebuild a dated NR/FG release, use the corresponding-source ZIP attached to that release. It contains the sources
+used for the shipped binaries. The dated guides and images above match the linked downloads.
 
 For source builds, start with [CONTRIBUTING.md](CONTRIBUTING.md). NR/FG build requirements and regression scope are
 in the [dated FG development guide](https://github.com/jfleezy23/VirtualDesktop-OpenXR/blob/nr-fg-2026.11.21.1/tests/frame-generation.md).
